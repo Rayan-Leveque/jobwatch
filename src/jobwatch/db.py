@@ -9,6 +9,12 @@ from typing import Any
 
 SCHEMA_FILE = "schema.sql"
 
+# Colonnes ajoutées après la création de la table (migration d'une base v0.2 existante).
+COLUMN_MIGRATIONS = {
+    "offer": ("deadline", "TEXT"),
+    "match": ("fit", "TEXT"),
+}
+
 
 class JobwatchError(Exception):
     """Erreur attendue, destinée à l'utilisateur. La CLI affiche un message clair et sort avec le code 1."""
@@ -23,9 +29,18 @@ def connect(path: Path | str) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Exécute le schema.sql fourni avec le paquet sur la connexion."""
+    """Exécute le schema.sql fourni avec le paquet, puis migre une base v0.2 existante."""
     schema = resources.files("jobwatch").joinpath(SCHEMA_FILE).read_text()
     conn.executescript(schema)
+    _migrate_columns(conn)
+
+
+def _migrate_columns(conn: sqlite3.Connection) -> None:
+    """Ajoute les colonnes manquantes avec ALTER TABLE, de façon idempotente."""
+    for table, (column, column_type) in COLUMN_MIGRATIONS.items():
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
 
 def row(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> sqlite3.Row | None:

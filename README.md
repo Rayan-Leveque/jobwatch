@@ -7,7 +7,7 @@ de suivre vos candidatures depuis la ligne de commande ou via un tableau de bord
 
 Flux : **collecter -> dédupliquer -> matcher -> notifier -> suivre**.
 
-Pas de fonctionnalités LLM, pas de cloud, pas de traçage. Vos données restent dans un seul
+Pas de fonctionnalités LLM intégrées, pas de cloud, pas de traçage. Vos données restent dans un seul
 fichier SQLite sur votre machine.
 
 ## Démarrage rapide
@@ -36,6 +36,36 @@ Exécutez `jw run` chaque jour via cron :
 ```
 0 7 * * * cd ~/jobwatch && .venv/bin/jw run
 ```
+
+### Import des artefacts quotidiens
+
+La v0.3 importe les artefacts produits par votre veille quotidienne : offres web, fit LLM,
+candidatures, échéances et documents.
+
+```bash
+.venv/bin/jw ingest-daily --api-json offres.json --config config.yaml            # plancher API
+.venv/bin/jw ingest-daily --digest digest.md --config config.yaml                # offres web + fit LLM
+.venv/bin/jw import-md /chemin/vers/suivi_candidatures.md --config config.yaml
+```
+
+`jw ingest-daily` exige au moins l'un de `--api-json` ou `--digest`. Le JSON API est le plancher
+de collecte ; le digest Markdown apporte les offres web et le fit LLM (`high`, `medium`, `low`).
+Les offres sont dédupliquées par URL et associées à une recherche (`--search-name`, défaut
+`veille-importee`). `jw import-md` migre le suivi des candidatures (offres, candidatures,
+échéances, documents) depuis un tracker Markdown (défaut `--search-name suivi-importe`). Les deux
+imports sont atomiques et idempotents : relancer les mêmes artefacts ne crée aucun doublon et ne
+rétrograde jamais un état existant.
+
+Les résumés LLM détaillés restent dans les digests Markdown : la v0.3 importe le fit dans SQLite,
+mais n'y stocke pas encore les synthèses complètes.
+
+### Migration progressive
+
+Le cron ai-job-search continue sa collecte HTTP et sa recherche large Claude. Le bridge appelle
+jobwatch en mode dégradable via `JOBWATCH_DIR` (`~/jobwatch` par défaut) et `JOBWATCH_CONFIG`
+(`~/.config/jobwatch/config.yaml` par défaut). Le bridge n'envoie aucune notification
+supplémentaire et son échec ne casse pas le cron historique. Une fois la parité vérifiée,
+SQLite/jobwatch devient la source de vérité.
 
 ## Tableau de bord local
 
@@ -107,8 +137,9 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 
 ## Feuille de route
 
-- v0.2 : tableau de bord (`jw serve`), export markdown des candidatures, plus de sources.
-- v0.3 : résumés LLM optionnels et scoring de pertinence pour les offres collectées.
+- v0.2 : tableau de bord local en lecture seule (`jw serve`).
+- v0.3 : import des artefacts quotidiens (`jw ingest-daily`) et du suivi Markdown (`jw import-md`), fit LLM, échéances et documents.
+- v0.4 : synthèses LLM détaillées stockées dans SQLite.
 
 ## Licence
 

@@ -55,6 +55,9 @@ def _seed_offer(
     platform: str = "Test",
     search: str = "ai-paris",
     state: str = "new",
+    fit: str | None = None,
+    deadline: str | None = None,
+    collected_at: str = "2026-08-01 10:00:00",
 ) -> tuple[int, int]:
     if url is None:
         url = f"https://example.com/{company}-{title}".replace(" ", "-")
@@ -63,9 +66,9 @@ def _seed_offer(
     conn.execute("INSERT OR IGNORE INTO company (name) VALUES (?)", (company,))
     company_id = conn.execute("SELECT id FROM company WHERE name = ?", (company,)).fetchone()["id"]
     conn.execute(
-        "INSERT INTO offer (source_id, company_id, title, url, platform, location, contract) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (source_id, company_id, title, url, platform, location, contract),
+        "INSERT INTO offer (source_id, company_id, title, url, platform, location, "
+        "contract, deadline, collected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (source_id, company_id, title, url, platform, location, contract, deadline, collected_at),
     )
     offer_id = conn.execute("SELECT id FROM offer WHERE url = ?", (url,)).fetchone()["id"]
     conn.execute(
@@ -75,8 +78,8 @@ def _seed_offer(
     )
     search_id = conn.execute("SELECT id FROM search WHERE name = ?", (search,)).fetchone()["id"]
     conn.execute(
-        "INSERT INTO match (search_id, offer_id, state) VALUES (?, ?, ?)",
-        (search_id, offer_id, state),
+        "INSERT INTO match (search_id, offer_id, state, fit) VALUES (?, ?, ?, ?)",
+        (search_id, offer_id, state, fit),
     )
     match_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.commit()
@@ -252,6 +255,54 @@ def test_unicode_text_renders(conn: sqlite3.Connection) -> None:
     page = render_page(conn)
     assert "Café &amp; Compagnie" in page
     assert "Ingénieur DevOps - Paris" in page
+
+
+def test_fit_pills_rendered_high_medium_low(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="HighCo", title="Role", fit="high")
+    _seed_offer(conn, company="MidCo", title="Role", fit="medium")
+    _seed_offer(conn, company="LowCo", title="Role", fit="low")
+    page = render_page(conn)
+    assert '<span class="pill fit high">high</span>' in page
+    assert '<span class="pill fit medium">medium</span>' in page
+    assert '<span class="pill fit low">low</span>' in page
+
+
+def test_no_fit_pill_when_fit_null(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="Acme", title="Role", fit=None)
+    page = render_page(conn)
+    assert "pill fit" not in page
+
+
+def test_invalid_fit_is_not_rendered(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="Acme", title="Role", fit='high\" onclick=\"alert(1)')
+    page = render_page(conn)
+    assert "pill fit" not in page
+    assert "onclick" not in page
+
+
+def test_deadline_displayed_in_meta(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="Acme", title="Role", deadline="2026-09-01")
+    page = render_page(conn)
+    assert "échéance 1 sept." in _section_html(page, "new")
+
+
+def test_deadline_escaped(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="Acme", title="Role", deadline='"><script>alert(1)</script>')
+    page = render_page(conn)
+    section = _section_html(page, "new")
+    assert "&lt;script&gt;" in section
+    assert "<script>alert(1)" not in section
+
+
+def test_match_order_fit_then_collected_desc(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="LoCo", title="L", fit="low", collected_at="2026-08-05 10:00:00")
+    _seed_offer(conn, company="HiCo", title="H", fit="high", collected_at="2026-08-01 10:00:00")
+    _seed_offer(conn, company="NoneCo", title="N", fit=None, collected_at="2026-08-04 10:00:00")
+    _seed_offer(conn, company="MidCo", title="M", fit="medium", collected_at="2026-08-03 10:00:00")
+    page = render_page(conn)
+    section = _section_html(page, "new")
+    indexes = [section.index(name) for name in ("HiCo", "MidCo", "LoCo", "NoneCo")]
+    assert indexes == sorted(indexes)
 
 
 def _start_server(db_path: Path) -> tuple[ThreadingHTTPServer, threading.Thread]:

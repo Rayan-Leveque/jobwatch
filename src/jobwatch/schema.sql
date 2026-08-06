@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS offer (
   location TEXT,
   contract TEXT,                     -- 'permanent' | 'fixed_term' | 'internship' | 'other'
   published_at TEXT,
+  deadline TEXT,
   collected_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_offer_company_title ON offer(company_id, title);
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS match (
   state TEXT NOT NULL DEFAULT 'new', -- 'new' | 'seen' | 'discarded' | 'applied'
   notified_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  fit TEXT,                          -- 'high' | 'medium' | 'low' | NULL = unknown
   UNIQUE(search_id, offer_id)
 );
 CREATE TABLE IF NOT EXISTS application (

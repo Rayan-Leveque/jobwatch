@@ -11,6 +11,51 @@ from click.testing import CliRunner
 from jobwatch.cli import cli
 from jobwatch.db import connect, init_db
 
+SAMPLE_JSON = {
+    "li-1": {
+        "title": "Ingénieur IA",
+        "company": "DxO Labs",
+        "url": "https://www.linkedin.com/jobs/view/4447379908",
+        "source": "linkedin",
+        "first_seen": "2026-08-06",
+    },
+    "li-2": {
+        "title": "GenAI Engineer",
+        "company": "SFEIR",
+        "url": "https://www.linkedin.com/jobs/view/4326775827",
+        "source": "linkedin",
+        "first_seen": "2026-08-06",
+    },
+}
+
+SAMPLE_DIGEST = """# Veille emploi - 2026-08-06
+
+## Fit high
+
+| Fit | Poste | Entreprise | Lieu | XP demandée | Source | URL |
+|---|---|---|---|---|---|---|
+| high | Ingénieur IA | DxO Labs | Boulogne-Billancourt | non précisée | LinkedIn | https://www.linkedin.com/jobs/view/4447379908 |
+| high | GenAI Engineer | SFEIR | Paris | non précisée | LinkedIn | https://www.linkedin.com/jobs/view/4326775827 |
+
+## Fit medium
+
+| Fit | Poste | Entreprise | Lieu | XP demandée | Source | URL |
+|---|---|---|---|---|---|---|
+| medium | AI Engineer H/F | LCL | Villejuif | non précisée | LinkedIn | https://www.linkedin.com/jobs/view/4440973597 |
+
+*Note ignorée.*
+"""
+
+SAMPLE_TRACKER = """# Suivi candidatures - Test
+
+## Candidatures manuelles - secteur public
+
+| Envoyé | Date | Fit | Employeur | Poste (réf.) | Deadline | CV | LDM |
+|---|---|---|---|---|---|---|---|
+| [x] | 2026-08-05 | **high** | CNIL | Ingénieur IA - Service (2026-2346240) | 03/09/2026 | documents/cv/cv_cnil.pdf | documents/cover_letters/cover_cnil.tex |
+| [ ] | | medium | DGE (Bercy) | Chef de projets IA (MEF_2026-32117) | 22/08/2026 | à faire | à faire |
+"""
+
 
 @pytest.fixture()
 def runner() -> CliRunner:
@@ -242,3 +287,238 @@ def test_list_ack_with_no_rows_does_not_crash(runner: CliRunner, tmp_path: Path)
     conn.close()
     result = runner.invoke(cli, ["list", "--config", str(config), "--ack"])
     assert result.exit_code == 0, result.output
+
+
+# --- ingest-daily ---------------------------------------------------------
+
+
+def _json_file(tmp_path: Path) -> Path:
+    path = tmp_path / "daily.json"
+    path.write_text(json.dumps(SAMPLE_JSON))
+    return path
+
+
+def _digest_file(tmp_path: Path) -> Path:
+    path = tmp_path / "daily.md"
+    path.write_text(SAMPLE_DIGEST)
+    return path
+
+
+def test_ingest_daily_requires_an_artifact(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+
+    result = runner.invoke(cli, ["ingest-daily", "--config", str(config)])
+    assert result.exit_code == 1
+    assert "au moins l'un de --api-json ou --digest est requis" in result.output
+
+
+def test_ingest_daily_missing_json_is_usage_error(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+
+    result = runner.invoke(
+        cli, ["ingest-daily", "--api-json", str(tmp_path / "absent.json"), "--config", str(config)]
+    )
+    assert result.exit_code == 2
+    assert "absent.json" in result.output
+
+
+def test_ingest_daily_without_config_fails_cleanly(runner: CliRunner, tmp_path: Path) -> None:
+    _json_file(tmp_path)
+    result = runner.invoke(cli, ["ingest-daily", "--api-json", str(tmp_path / "daily.json"),
+                                 "--config", str(tmp_path / "missing.yaml")])
+    assert result.exit_code == 1
+    assert "erreur :" in result.output
+
+
+def test_ingest_daily_json_only_success(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    json_path = _json_file(tmp_path)
+
+    result = runner.invoke(
+        cli, ["ingest-daily", "--api-json", str(json_path), "--config", str(config)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "2 offre(s) créée(s)" in result.output
+    assert "0 déjà présente(s)" in result.output
+    assert "2 match(s) créé(s)" in result.output
+    assert "0 fit(s) mis à jour" in result.output
+
+
+def test_ingest_daily_digest_only_success(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    digest_path = _digest_file(tmp_path)
+
+    result = runner.invoke(cli, ["ingest-daily", "--digest", str(digest_path), "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert "3 offre(s) créée(s)" in result.output
+    assert "3 match(s) créé(s)" in result.output
+
+
+def test_ingest_daily_merge_json_and_digest(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    json_path = _json_file(tmp_path)
+    digest_path = _digest_file(tmp_path)
+
+    result = runner.invoke(
+        cli,
+        ["ingest-daily", "--api-json", str(json_path), "--digest", str(digest_path),
+         "--config", str(config)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "3 offre(s) créée(s)" in result.output
+    assert "0 déjà présente(s)" in result.output
+    assert "3 match(s) créé(s)" in result.output
+
+    conn = connect(db_path)
+    init_db(conn)
+    assert conn.execute("SELECT count(*) FROM offer").fetchone()[0] == 3
+    assert conn.execute("SELECT count(*) FROM match").fetchone()[0] == 3
+    conn.close()
+
+
+def test_ingest_daily_is_idempotent(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    json_path = _json_file(tmp_path)
+    digest_path = _digest_file(tmp_path)
+    args = ["ingest-daily", "--api-json", str(json_path), "--digest", str(digest_path),
+            "--config", str(config)]
+
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+
+    second = runner.invoke(cli, args)
+    assert second.exit_code == 0, second.output
+    assert "0 offre(s) créée(s)" in second.output
+    assert "3 déjà présente(s)" in second.output
+    assert "0 match(s) créé(s)" in second.output
+    assert "0 fit(s) mis à jour" in second.output
+
+
+def test_ingest_daily_invalid_json_leaves_no_artifacts(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ nope")
+
+    result = runner.invoke(cli, ["ingest-daily", "--api-json", str(bad), "--config", str(config)])
+    assert result.exit_code == 1
+    assert "erreur :" in result.output
+    assert "JSON invalide" in result.output
+    assert "Traceback" not in result.output
+
+    conn = connect(db_path)
+    init_db(conn)
+    for table in ("offer", "match", "search", "source", "company"):
+        assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+    conn.close()
+
+
+def test_ingest_daily_custom_search_name(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    json_path = _json_file(tmp_path)
+
+    result = runner.invoke(
+        cli, ["ingest-daily", "--api-json", str(json_path), "--search-name", "ma-veille",
+              "--config", str(config)]
+    )
+    assert result.exit_code == 0, result.output
+
+    conn = connect(db_path)
+    init_db(conn)
+    assert conn.execute("SELECT count(*) FROM search WHERE name = 'ma-veille'").fetchone()[0] == 1
+    conn.close()
+
+
+# --- import-md ------------------------------------------------------------
+
+
+def test_import_md_missing_file_is_usage_error(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+
+    result = runner.invoke(cli, ["import-md", str(tmp_path / "absent.md"), "--config", str(config)])
+    assert result.exit_code == 2
+    assert "absent.md" in result.output
+
+
+def test_import_md_without_config_fails_cleanly(runner: CliRunner, tmp_path: Path) -> None:
+    tracker = tmp_path / "suivi.md"
+    tracker.write_text(SAMPLE_TRACKER)
+    result = runner.invoke(
+        cli, ["import-md", str(tracker), "--config", str(tmp_path / "missing.yaml")]
+    )
+    assert result.exit_code == 1
+    assert "erreur :" in result.output
+
+
+def test_import_md_success(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    tracker = tmp_path / "suivi.md"
+    tracker.write_text(SAMPLE_TRACKER)
+
+    result = runner.invoke(cli, ["import-md", str(tracker), "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert "2 ligne(s) importée(s)" in result.output
+    assert "2 offre(s) créée(s)" in result.output
+    assert "2 match(s) créé(s)" in result.output
+    assert "1 candidature(s) créée(s)" in result.output
+    assert "2 document(s) créé(s)" in result.output
+    assert "0 déjà présente(s)" in result.output
+
+
+def test_import_md_is_idempotent(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    tracker = tmp_path / "suivi.md"
+    tracker.write_text(SAMPLE_TRACKER)
+    args = ["import-md", str(tracker), "--config", str(config)]
+
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+
+    second = runner.invoke(cli, args)
+    assert second.exit_code == 0, second.output
+    assert "0 offre(s) créée(s)" in second.output
+    assert "0 match(s) créé(s)" in second.output
+    assert "0 candidature(s) créée(s)" in second.output
+    assert "0 document(s) créé(s)" in second.output
+    assert "2 déjà présente(s)" in second.output
+
+    conn = connect(db_path)
+    init_db(conn)
+    assert conn.execute("SELECT count(*) FROM offer").fetchone()[0] == 2
+    assert conn.execute("SELECT count(*) FROM match").fetchone()[0] == 2
+    assert conn.execute("SELECT count(*) FROM application").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM document").fetchone()[0] == 2
+    conn.close()
+
+
+def test_import_md_invalid_line_fails_cleanly(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    bad = tmp_path / "suivi.md"
+    bad.write_text(
+        "# Suivi\n\n## Section\n\n"
+        "| Envoyé | Date | Fit | Employeur | Poste | Deadline | CV | LDM |\n"
+        "|---|---|---|---|---|---|---|---|\n"
+        "| [ ] | | high | | Poste sans entreprise | | | |\n"
+    )
+
+    result = runner.invoke(cli, ["import-md", str(bad), "--config", str(config)])
+    assert result.exit_code == 1
+    assert "erreur :" in result.output
+    assert "Traceback" not in result.output
+
+    conn = connect(db_path)
+    init_db(conn)
+    for table in ("offer", "match", "search", "source", "company"):
+        assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+    conn.close()

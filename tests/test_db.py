@@ -38,6 +38,131 @@ def test_init_db_creates_all_tables(conn: sqlite3.Connection) -> None:
     assert EXPECTED_TABLES <= tables
 
 
+def test_init_db_creates_v03_columns(conn: sqlite3.Connection) -> None:
+    offer_cols = {row["name"] for row in conn.execute("PRAGMA table_info(offer)")}
+    match_cols = {row["name"] for row in conn.execute("PRAGMA table_info(match)")}
+    assert "deadline" in offer_cols
+    assert "fit" in match_cols
+
+
+V02_SCHEMA = """
+CREATE TABLE source (
+  id INTEGER PRIMARY KEY,
+  type TEXT NOT NULL,
+  name TEXT NOT NULL UNIQUE,
+  last_run_at TEXT
+);
+CREATE TABLE company (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+);
+CREATE TABLE offer (
+  id INTEGER PRIMARY KEY,
+  source_id INTEGER NOT NULL REFERENCES source(id),
+  company_id INTEGER REFERENCES company(id),
+  title TEXT NOT NULL,
+  url TEXT NOT NULL UNIQUE,
+  platform TEXT,
+  location TEXT,
+  contract TEXT,
+  published_at TEXT,
+  collected_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE search (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  include_json TEXT NOT NULL,
+  exclude_json TEXT NOT NULL,
+  locations_json TEXT NOT NULL,
+  contract TEXT,
+  active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE match (
+  id INTEGER PRIMARY KEY,
+  search_id INTEGER NOT NULL REFERENCES search(id),
+  offer_id INTEGER NOT NULL REFERENCES offer(id),
+  state TEXT NOT NULL DEFAULT 'new',
+  notified_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(search_id, offer_id)
+);
+CREATE TABLE application (
+  id INTEGER PRIMARY KEY,
+  match_id INTEGER REFERENCES match(id),
+  offer_id INTEGER NOT NULL REFERENCES offer(id),
+  note TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE event (
+  id INTEGER PRIMARY KEY,
+  application_id INTEGER NOT NULL REFERENCES application(id),
+  type TEXT NOT NULL,
+  at TEXT NOT NULL DEFAULT (datetime('now')),
+  comment TEXT
+);
+CREATE TABLE document (
+  id INTEGER PRIMARY KEY,
+  application_id INTEGER NOT NULL REFERENCES application(id),
+  type TEXT NOT NULL,
+  path TEXT NOT NULL,
+  sent_at TEXT
+);
+"""
+
+
+def test_init_db_migrates_v02_database_without_data_loss() -> None:
+    conn = connect(":memory:")
+    conn.executescript(V02_SCHEMA)
+    conn.execute("INSERT INTO source (type, name) VALUES ('test', 's1')")
+    conn.execute(
+        "INSERT INTO offer (source_id, title, url) VALUES (1, 'Engineer', 'https://a/1')"
+    )
+    conn.execute(
+        "INSERT INTO search (name, include_json, exclude_json, locations_json) VALUES ('dev', '[]', '[]', '[]')"
+    )
+    conn.execute("INSERT INTO match (search_id, offer_id, state) VALUES (1, 1, 'seen')")
+    conn.commit()
+
+    init_db(conn)
+
+    offer = conn.execute("SELECT * FROM offer WHERE id = 1").fetchone()
+    match = conn.execute("SELECT * FROM match WHERE id = 1").fetchone()
+    assert offer["title"] == "Engineer"
+    assert offer["url"] == "https://a/1"
+    assert offer["deadline"] is None
+    assert match["search_id"] == 1
+    assert match["state"] == "seen"
+    assert match["fit"] is None
+
+    offer_cols = {row["name"] for row in conn.execute("PRAGMA table_info(offer)")}
+    match_cols = {row["name"] for row in conn.execute("PRAGMA table_info(match)")}
+    assert "deadline" in offer_cols
+    assert "fit" in match_cols
+    conn.close()
+
+
+def test_init_db_twice_is_idempotent(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT INTO source (type, name) VALUES ('test', 's1')")
+    conn.execute(
+        "INSERT INTO offer (source_id, title, url) VALUES (1, 'Engineer', 'https://a/1')"
+    )
+    conn.execute(
+        "INSERT INTO search (name, include_json, exclude_json, locations_json) VALUES ('dev', '[]', '[]', '[]')"
+    )
+    conn.execute("INSERT INTO match (search_id, offer_id) VALUES (1, 1)")
+    conn.commit()
+
+    init_db(conn)
+    init_db(conn)
+
+    count = conn.execute("SELECT count(*) FROM offer").fetchone()[0]
+    assert count == 1
+    offer = conn.execute("SELECT * FROM offer WHERE id = 1").fetchone()
+    assert offer["deadline"] is None
+    match = conn.execute("SELECT * FROM match WHERE id = 1").fetchone()
+    assert match["fit"] is None
+
+
 def test_foreign_keys_are_enforced(conn: sqlite3.Connection) -> None:
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO offer (source_id, title, url) VALUES (999, 'x', 'y')")

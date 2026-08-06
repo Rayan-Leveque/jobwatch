@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from jobwatch import __version__
+from jobwatch import __version__, importing
 from jobwatch.collectors import build_collectors
 from jobwatch.collectors.base import store_offers
 from jobwatch.config import Config, ConfigError, example_config_text, load_config
@@ -114,6 +114,74 @@ def run(config_path: Path | None) -> None:
 
     notified = f", notifié via {', '.join(channels)}" if channels else ""
     click.echo(f"{collected} nouvelles offres collectées, {len(new_matches)} nouveaux matchs{notified}")
+
+
+@cli.command("ingest-daily")
+@click.option(
+    "--api-json",
+    "api_json",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="fichier JSON quotidien d'offres",
+)
+@click.option(
+    "--digest",
+    "digest",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="digest quotidien LLM (Markdown)",
+)
+@click.option(
+    "--search-name",
+    "search_name",
+    default="veille-importee",
+    show_default=True,
+    help="nom de la recherche à laquelle associer les offres",
+)
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def ingest_daily(config_path: Path | None, api_json: Path | None, digest: Path | None, search_name: str) -> None:
+    """Importe les artefacts quotidiens (JSON et/ou digest) dans une recherche."""
+    if api_json is None and digest is None:
+        _fatal("au moins l'un de --api-json ou --digest est requis")
+    config = _require_config(config_path)
+    conn = _open_db(config)
+    try:
+        result = importing.ingest_daily(conn, api_json, digest, search_name)
+    except importing.ImportError as exc:
+        _fatal(str(exc))
+    finally:
+        conn.close()
+    click.echo(
+        f"{result.offers_created} offre(s) créée(s), {result.offers_already_present} déjà présente(s), "
+        f"{result.matches_created} match(s) créé(s), {result.fits_updated} fit(s) mis à jour"
+    )
+
+
+@cli.command("import-md")
+@click.argument("path", type=click.Path(path_type=Path, exists=True, dir_okay=False))
+@click.option(
+    "--search-name",
+    "search_name",
+    default="suivi-importe",
+    show_default=True,
+    help="nom de la recherche à laquelle associer les offres",
+)
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def import_md(config_path: Path | None, path: Path, search_name: str) -> None:
+    """Importe le suivi Markdown des candidatures dans une recherche."""
+    config = _require_config(config_path)
+    conn = _open_db(config)
+    try:
+        result = importing.import_tracker(conn, path, search_name)
+    except importing.ImportError as exc:
+        _fatal(str(exc))
+    finally:
+        conn.close()
+    click.echo(
+        f"{result.rows_imported} ligne(s) importée(s), {result.offers_created} offre(s) créée(s), "
+        f"{result.matches_created} match(s) créé(s), {result.applications_created} candidature(s) créée(s), "
+        f"{result.documents_created} document(s) créé(s), {result.rows_already_present} déjà présente(s)"
+    )
 
 
 @cli.command("list")

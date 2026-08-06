@@ -55,17 +55,19 @@ def _short_date(value: str) -> str:
 
 def _matches(conn: sqlite3.Connection, state: str) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT m.id AS id, m.state AS state, s.name AS search_name, "
+        "SELECT m.id AS id, m.state AS state, m.fit AS fit, s.name AS search_name, "
         "       c.name AS company, o.title AS title, o.location AS location, "
         "       o.contract AS contract, o.platform AS platform, o.url AS url, "
-        "       o.collected_at AS collected_at "
+        "       o.collected_at AS collected_at, o.deadline AS deadline "
         "FROM match m "
         "JOIN search s ON s.id = m.search_id "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = ? AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
-        "ORDER BY o.collected_at DESC, m.id DESC",
+        "ORDER BY CASE m.fit WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
+        "         WHEN 'low' THEN 2 ELSE 3 END, "
+        "         o.collected_at DESC, m.id DESC",
         (state,),
     ).fetchall()
 
@@ -105,8 +107,14 @@ def _link(url: object) -> str:
     return f'<a href="{escaped}" target="_blank" rel="noopener noreferrer">offre ↗</a>'
 
 
-def _meta(row: sqlite3.Row, date_label: str, date: object, search_name: object = None) -> str:
-    """Ligne de métadonnées : plateforme, lieu, contrat, recherche, date, lien."""
+def _meta(
+    row: sqlite3.Row,
+    date_label: str,
+    date: object,
+    search_name: object = None,
+    deadline: object = None,
+) -> str:
+    """Ligne de métadonnées : plateforme, lieu, contrat, deadline, recherche, date, lien."""
     parts: list[str] = []
     if row["platform"]:
         parts.append(f'<span class="platform">{html.escape(str(row["platform"]))}</span>')
@@ -116,6 +124,8 @@ def _meta(row: sqlite3.Row, date_label: str, date: object, search_name: object =
     if row["contract"]:
         contract = str(row["contract"])
         text.append(CONTRACT_LABELS.get(contract, contract))
+    if deadline:
+        text.append(f"échéance {_short_date(str(deadline))}")
     if search_name:
         text.append(f"via {search_name}")
     if date:
@@ -128,14 +138,25 @@ def _meta(row: sqlite3.Row, date_label: str, date: object, search_name: object =
     return " · ".join(parts)
 
 
+def _fit_pill(fit: object) -> str:
+    """Pill high/medium/low quand un fit est connu, sinon rien."""
+    if fit is None:
+        return ""
+    value = str(fit).lower()
+    if value not in ("high", "medium", "low"):
+        return ""
+    return f'<span class="pill fit {value}">{html.escape(value)}</span>'
+
+
 def _match_card(row: sqlite3.Row) -> str:
     cls = "new" if row["state"] == "new" else "seen"
     company = html.escape(str(row["company"] or "Société inconnue"))
     title = html.escape(str(row["title"] or ""))
-    meta = _meta(row, "collecté le", row["collected_at"], row["search_name"])
+    pill = _fit_pill(row["fit"])
+    meta = _meta(row, "collecté le", row["collected_at"], row["search_name"], row["deadline"])
     return (
         f'<article class="row row-{cls}"><div class="body">'
-        f'<div class="card-topline"><div class="company">{company}</div></div>'
+        f'<div class="card-topline"><div class="company">{company}</div>{pill}</div>'
         f'<div class="role">{title}</div>'
         f'<div class="meta">{meta}</div></div></article>'
     )
@@ -440,6 +461,11 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .pill.rejected { color:var(--danger); border-color:color-mix(in srgb, var(--danger) 38%, transparent);
   background:var(--danger-soft) }
 .pill.unknown { color:var(--muted); background:var(--surface) }
+.pill.fit.high { color:var(--accent); border-color:color-mix(in srgb, var(--accent) 38%, transparent);
+  background:var(--accent-soft) }
+.pill.fit.medium { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 38%, transparent);
+  background:var(--amber-soft) }
+.pill.fit.low { color:var(--muted); border-color:var(--line); background:var(--surface) }
 .meta { display:flex; align-items:center; flex-wrap:wrap; gap:2px 6px; margin-top:11px;
   color:var(--muted); font-size:.72rem; line-height:1.4; overflow-wrap:anywhere }
 .platform { min-height:24px; display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px;
