@@ -1,0 +1,128 @@
+"""Match stored offers against saved searches and insert new matches."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+
+from jobwatch.config import SearchConfig
+
+OFFER_WINDOW_DAYS = 60
+
+
+def _json_list(values: list[str]) -> str:
+    return json.dumps(values, ensure_ascii=True, separators=(",", ":"))
+
+
+def _stored_search_key(row: sqlite3.Row) -> tuple[str, str, str, str | None]:
+    """Return the tuple that identifies a search row's configured fields."""
+    return (
+        row["include_json"],
+        row["exclude_json"],
+        row["locations_json"],
+        row["contract"],
+    )
+
+
+def sync_searches(conn: sqlite3.Connection, searches: list[SearchConfig]) -> None:
+    """Insert new searches, update changed ones, deactivate removed ones."""
+    rows = conn.execute("SELECT * FROM search").fetchall()
+    existing = {str(r["name"]): r for r in rows}
+
+    for search in searches:
+        include_json = _json_list(search.include)
+        exclude_json = _json_list(search.exclude)
+        locations_json = _json_list(search.locations)
+        row = existing.get(search.name)
+        if row is None:
+            conn.execute(
+                "INSERT INTO search "
+                "(name, include_json, exclude_json, locations_json, contract, active) "
+                "VALUES (?, ?, ?, ?, ?, 1)",
+                (
+                    search.name,
+                    include_json,
+                    exclude_json,
+                    locations_json,
+                    search.contract,
+                ),
+            )
+            continue
+        key = (include_json, exclude_json, locations_json, search.contract)
+        if _stored_search_key(row) != key or row["active"] != 1:
+            conn.execute(
+                "UPDATE search SET include_json = ?, exclude_json = ?, locations_json = ?, "
+                "contract = ?, active = 1 WHERE id = ?",
+                (include_json, exclude_json, locations_json, search.contract, row["id"]),
+            )
+
+    config_names = {search.name for search in searches}
+    for row in rows:
+        if row["name"] not in config_names and row["active"] == 1:
+            conn.execute("UPDATE search SET active = 0 WHERE id = ?", (row["id"],))
+
+    conn.commit()
+
+
+def _search_row(conn: sqlite3.Connection, search_id: int) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM search WHERE id = ? AND active = 1", (search_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"no active search with id {search_id}")
+    return row
+
+
+def _offer_candidates(conn: sqlite3.Connection, search_id: int) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            "SELECT o.id, o.title, o.location, o.contract FROM offer o "
+            "WHERE NOT EXISTS (SELECT 1 FROM match m "
+            "                     WHERE m.search_id = ? AND m.offer_id = o.id) "
+            "AND o.collected_at >= datetime('now', ?)",
+            (search_id, f"-{OFFER_WINDOW_DAYS} days"),
+        ).fetchall()
+    )
+
+
+def offer_matches_search(offer: sqlite3.Row, search: sqlite3.Row) -> bool:
+    """Return True when the offer satisfies every criterion of the search."""
+    include = json.loads(search["include_json"])
+    exclude = json.loads(search["exclude_json"])
+    locations = json.loads(search["locations_json"])
+
+    title = str(offer["title"] or "").lower()
+    if not any(keyword.lower() in title for keyword in include):
+        return False
+    if any(keyword.lower() in title for keyword in exclude):
+        return False
+
+    offer_location = offer["location"]
+    if locations and offer_location:
+        offer_location_lower = str(offer_location).lower()
+        if not any(location.lower() in offer_location_lower for location in locations):
+            return False
+
+    contract = search["contract"]
+    return contract is None or offer["contract"] == contract
+
+
+def run_matching(conn: sqlite3.Connection) -> list[int]:
+    """Match unmatched offers against every active search, inserting new matches.
+
+    Returns the ids of newly inserted matches.
+    """
+    search_ids = [
+        int(r["id"]) for r in conn.execute("SELECT id FROM search WHERE active = 1").fetchall()
+    ]
+    new_match_ids: list[int] = []
+    for search_id in search_ids:
+        search = _search_row(conn, search_id)
+        for offer in _offer_candidates(conn, search_id):
+            if not offer_matches_search(offer, search):
+                continue
+            cur = conn.execute(
+                "INSERT INTO match (search_id, offer_id) VALUES (?, ?)",
+                (search_id, offer["id"]),
+            )
+            new_match_ids.append(int(cur.lastrowid))
+    conn.commit()
+    return new_match_ids

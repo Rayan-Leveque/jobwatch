@@ -1,0 +1,31 @@
+# jobwatch configuration
+# Copy this file to config.yaml and edit it.
+# See README.md for the full reference.
+
+db: ~/.local/share/jobwatch/jobwatch.db
+
+searches:
+  - name: ai-engineer-paris
+    include: ["AI engineer", "ingénieur IA", "machine learning", "LLM", "GenAI"]
+    exclude: ["stage", "internship", "senior staff"]
+    locations: ["Paris", "Île-de-France", "remote"]
+    contract: permanent      # optional: permanent | fixed_term | internship | other
+
+sources:
+  france_travail:
+    client_id: YOUR_CLIENT_ID          # https://francetravail.io app credentials
+    client_secret: YOUR_CLIENT_SECRET
+    keywords: "ingénieur IA"           # server-side query
+    department: "75"
+  smartrecruiters:
+    companies: [Wavestone1, Devoteam]
+
+notify:
+  ntfy:
+    topic: your-private-topic          # optional; POST https://ntfy.sh/<topic>
+  smtp:                                # optional
+    host: smtp.example.com
+    port: 587
+    user: you@example.com
+    password: app-password
+    to: you@example.com

@@ -1,0 +1,62 @@
+CREATE TABLE IF NOT EXISTS source (
+  id INTEGER PRIMARY KEY,
+  type TEXT NOT NULL,                -- 'france_travail' | 'smartrecruiters'
+  name TEXT NOT NULL UNIQUE,
+  last_run_at TEXT
+);
+CREATE TABLE IF NOT EXISTS company (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS offer (
+  id INTEGER PRIMARY KEY,
+  source_id INTEGER NOT NULL REFERENCES source(id),
+  company_id INTEGER REFERENCES company(id),
+  title TEXT NOT NULL,
+  url TEXT NOT NULL UNIQUE,          -- global dedup key
+  platform TEXT,
+  location TEXT,
+  contract TEXT,                     -- 'permanent' | 'fixed_term' | 'internship' | 'other'
+  published_at TEXT,
+  collected_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_offer_company_title ON offer(company_id, title);
+CREATE TABLE IF NOT EXISTS search (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  include_json TEXT NOT NULL,        -- JSON list of keywords (title match, any-of)
+  exclude_json TEXT NOT NULL,        -- JSON list of keywords (title match, none-of)
+  locations_json TEXT NOT NULL,      -- JSON list; empty = anywhere
+  contract TEXT,                     -- NULL = any
+  active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS match (
+  id INTEGER PRIMARY KEY,
+  search_id INTEGER NOT NULL REFERENCES search(id),
+  offer_id INTEGER NOT NULL REFERENCES offer(id),
+  state TEXT NOT NULL DEFAULT 'new', -- 'new' | 'seen' | 'discarded' | 'applied'
+  notified_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(search_id, offer_id)
+);
+CREATE TABLE IF NOT EXISTS application (
+  id INTEGER PRIMARY KEY,
+  match_id INTEGER REFERENCES match(id),
+  offer_id INTEGER NOT NULL REFERENCES offer(id),
+  note TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS event (
+  id INTEGER PRIMARY KEY,
+  application_id INTEGER NOT NULL REFERENCES application(id),
+  type TEXT NOT NULL,                -- 'applied' | 'follow_up' | 'interview' | 'rejected' | 'offer'
+  at TEXT NOT NULL DEFAULT (datetime('now')),
+  comment TEXT
+);
+CREATE TABLE IF NOT EXISTS document (
+  id INTEGER PRIMARY KEY,
+  application_id INTEGER NOT NULL REFERENCES application(id),
+  type TEXT NOT NULL,                -- 'cv' | 'cover_letter'
+  path TEXT NOT NULL,
+  sent_at TEXT
+);

@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jobwatch"
+version = "0.1.0"
+description = "Self-hosted job-posting watcher: collect, dedup, match, notify, track."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Rayan Leveque" }]
+dependencies = [
+    "click",
+    "httpx",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+jw = "jobwatch.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+jobwatch = ["schema.sql", "config.example.yaml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
