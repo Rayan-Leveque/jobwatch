@@ -21,6 +21,7 @@ class SmartRecruitersCollector:
     """Collecte les offres pour une liste de slugs de sociétés depuis SmartRecruiters."""
 
     name = "smartrecruiters"
+    source_type = "smartrecruiters"
     platform = PLATFORM
 
     def __init__(self, companies: list[str], client: httpx.Client | None = None) -> None:
@@ -86,6 +87,9 @@ def _offer_from_json(slug: str, item: dict) -> RawOffer | None:
 def _company_name(item: dict) -> str | None:
     company = item.get("company")
     if isinstance(company, dict):
+        name = company.get("name")
+        if isinstance(name, str) and name:
+            return name
         identifier = company.get("identifier")
         if isinstance(identifier, str) and identifier:
             return identifier

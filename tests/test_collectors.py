@@ -143,6 +143,7 @@ def _sr_item(
     name: str = "Backend Engineer",
     posting_id: str = "abc123",
     company: str = "Acme",
+    company_name: str | None = None,
     city: str = "Paris",
     experience: str = "professional",
     employment: str = "Full-Time",
@@ -150,7 +151,7 @@ def _sr_item(
     return {
         "name": name,
         "id": posting_id,
-        "company": {"identifier": company},
+        "company": {"name": company_name, "identifier": company},
         "location": {"city": city},
         "experienceLevel": {"id": experience},
         "typeOfEmployment": {"label": employment},
@@ -166,18 +167,28 @@ def test_smartrecruiters_fetch_builds_human_url_and_maps_fields() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert "companies/Acme" in str(request.url)
         assert request.url.params["limit"] == "100"
-        return httpx.Response(200, json={"content": [_sr_item()]})
+        item = _sr_item(company="Wavestone1", company_name="Wavestone")
+        return httpx.Response(200, json={"content": [item]})
 
     offers = _sr_collector(handler).fetch()
     assert len(offers) == 1
     offer = offers[0]
     assert offer.title == "Backend Engineer"
     assert offer.url == "https://jobs.smartrecruiters.com/Acme/abc123"
-    assert offer.company == "Acme"
+    assert offer.company == "Wavestone"
     assert offer.location == "Paris"
     assert offer.contract == "permanent"
     assert offer.platform == "SmartRecruiters"
     assert offer.published_at == "2026-01-02"
+
+
+def test_smartrecruiters_company_falls_back_to_identifier() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        item = _sr_item(company_name=None, company="Wavestone1")
+        return httpx.Response(200, json={"content": [item]})
+
+    offers = _sr_collector(handler).fetch()
+    assert offers[0].company == "Wavestone1"
 
 
 def test_smartrecruiters_skips_internships() -> None:

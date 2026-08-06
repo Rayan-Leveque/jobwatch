@@ -17,7 +17,7 @@ git clone <ce repo> && cd jobwatch
 python3 -m venv .venv
 .venv/bin/pip install -e .
 .venv/bin/jw init                # crée config.yaml + une base de données vide
-# éditez config.yaml : ajoutez des sources et des canaux de notification, puis :
+# éditez config.yaml : décommentez et remplissez les blocs sources et notify, puis :
 .venv/bin/jw run                # collecter, matcher, notifier
 .venv/bin/jw list               # affiche les nouveaux matchs
 .venv/bin/jw apply 1 --note "cv envoyé"
@@ -46,6 +46,15 @@ Exécutez `jw run` chaque jour via cron :
 | `searches` | Liste des recherches enregistrées. Chaque recherche a : `name` (identifiant unique), `include` (mots-clés, au moins un, correspondance insensible à la casse sur le titre), `exclude` (mots-clés, aucun), `locations` (correspondance par sous-chaîne sur la localisation de l'offre ; vide = n'importe où), `contract` (optionnel : `permanent`, `fixed_term`, `internship`, `other`). |
 | `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` (requête côté serveur) et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. |
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
+
+Le filtre `locations` est une correspondance par sous-chaîne sur la localisation de l'offre :
+une offre située à « Puteaux » ou « Levallois-Perret » ne matche PAS une recherche avec
+`locations: ["Paris"]`. Listez explicitement les communes voulues dans `locations`, ou laissez
+la liste vide pour accepter n'importe quelle localisation.
+
+Dans `config.example.yaml`, les blocs `sources` et `notify` sont vides (`{}`) : décommentez-les
+et remplissez-les pour activer la collecte et les notifications. Avec la config d'exemple non
+modifiée, `jw init && jw run` ne fait aucun appel réseau et ne publie rien.
 
 Les recherches sont synchronisées dans la base à chaque `jw run` : les nouvelles sont insérées,
 les modifiées mises à jour, les supprimées désactivées (les matchs existants sont conservés).

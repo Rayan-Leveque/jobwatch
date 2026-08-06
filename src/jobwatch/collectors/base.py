@@ -27,6 +27,7 @@ class Collector(Protocol):
     """Récupère les offres d'emploi d'un job board distant."""
 
     name: str
+    source_type: str
     platform: str
 
     def fetch(self) -> list[RawOffer]:

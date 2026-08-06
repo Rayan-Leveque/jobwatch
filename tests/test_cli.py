@@ -92,6 +92,52 @@ def test_run_with_no_sources_succeeds(runner: CliRunner, tmp_path: Path) -> None
     assert "0 nouvelles offres collectées, 0 nouveaux matchs" in result.output
 
 
+def test_init_then_run_with_unmodified_example_makes_no_network_calls(
+    runner: CliRunner, tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    db_path = tmp_path / "data" / "jw.db"
+
+    result = runner.invoke(cli, ["init", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+
+    text = config_path.read_text()
+    config_path.write_text(text.replace("~/.local/share/jobwatch/jobwatch.db", str(db_path)))
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("aucun appel réseau attendu avec la config d'exemple")
+
+    monkeypatch.setattr("jobwatch.collectors.httpx.Client", _no_network)
+    monkeypatch.setattr("jobwatch.digest.httpx.Client", _no_network)
+
+    result = runner.invoke(cli, ["run", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    assert "0 nouvelles offres collectées, 0 nouveaux matchs" in result.output
+
+
+def test_run_rejects_placeholder_france_travail_credentials(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "jw.db"
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""db: {db_path}
+searches:
+  - name: ai-paris
+    include: ["AI"]
+sources:
+  france_travail:
+    client_id: YOUR_CLIENT_ID
+    client_secret: YOUR_CLIENT_SECRET
+    keywords: "IA"
+"""
+    )
+
+    result = runner.invoke(cli, ["run", "--config", str(config)])
+    assert result.exit_code == 1
+    assert "identifiants factices" in result.output
+
+
 def test_run_without_config_fails_cleanly(runner: CliRunner, tmp_path: Path) -> None:
     result = runner.invoke(cli, ["run", "--config", str(tmp_path / "missing.yaml")])
     assert result.exit_code == 1

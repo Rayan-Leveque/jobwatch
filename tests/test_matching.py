@@ -170,6 +170,12 @@ def test_contract_filter_allows_match(conn: sqlite3.Connection) -> None:
     assert _run_matching_for(conn, search_id, offer_id)
 
 
+def test_offer_contract_missing_matches_any_search_contract(conn: sqlite3.Connection) -> None:
+    search_id = _insert_search(conn, "s", ["AI"], contract="permanent")
+    offer_id = _insert_offer(conn, "AI Engineer", "https://a/1", contract=None)
+    assert _run_matching_for(conn, search_id, offer_id)
+
+
 def test_contract_null_matches_any(conn: sqlite3.Connection) -> None:
     search_id = _insert_search(conn, "s", ["AI"])
     offer_id = _insert_offer(conn, "AI Engineer", "https://a/1", contract="fixed_term")

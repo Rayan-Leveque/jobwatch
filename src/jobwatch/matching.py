@@ -102,7 +102,9 @@ def offer_matches_search(offer: sqlite3.Row, search: sqlite3.Row) -> bool:
             return False
 
     contract = search["contract"]
-    return contract is None or offer["contract"] == contract
+    if contract is None or offer["contract"] is None:
+        return True
+    return offer["contract"] == contract
 
 
 def run_matching(conn: sqlite3.Connection) -> list[int]:

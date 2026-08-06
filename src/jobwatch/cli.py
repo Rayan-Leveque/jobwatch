@@ -63,7 +63,7 @@ def _open_db(config: Config) -> sqlite3.Connection:
 
 
 @click.group()
-@click.version_option(version=__version__)
+@click.version_option(version=__version__, message="jw, version %(version)s")
 def cli() -> None:
     """jobwatch : observateur d'offres d'emploi auto-hébergé."""
 
@@ -103,7 +103,7 @@ def run(config_path: Path | None) -> None:
         collected = 0
         for collector in build_collectors(config.sources):
             offers = collector.fetch()
-            new_ids = store_offers(conn, collector.name, collector.name, offers)
+            new_ids = store_offers(conn, collector.name, collector.source_type, offers)
             collected += len(new_ids)
             logger.info("collected %d new offers from %s", len(new_ids), collector.name)
         new_matches = run_matching(conn)
@@ -158,16 +158,16 @@ def list_matches(config_path: Path | None, state: str, search_name: str | None, 
 
 def _print_matches(rows) -> None:
     header = (
-        f"{'id':>5}  {'recherche':<16} {'société':<22} {'titre':<45} "
+        f"{'id':>5}  {'recherche':<18} {'société':<22} {'titre':<45} "
         f"{'localisation':<18} {'état':<9} {'collecté':<10}"
     )
     click.echo(header)
     for row in rows:
         click.echo(
-            f"{int(row['id']):>5}  {_clip(row['search_name'], 16):<16} "
+            f"{int(row['id']):>5}  {_clip(row['search_name'], 18):<18} "
             f"{_clip(row['company'], 22):<22} {_clip(row['title'], 45):<45} "
             f"{_clip(row['location'], 18):<18} {_clip(row['state'], 9):<9} "
-            f"{_clip(str(row['collected_at']), 10):<10}"
+            f"{str(row['collected_at'])[:10]:<10}"
         )
 
 
@@ -202,7 +202,7 @@ def show(config_path: Path | None, match_id: int) -> None:
         conn.close()
     if row is None:
         _fatal(f"aucun match avec l'id {match_id}")
-    for label, key in (
+    fields = (
         ("id", "id"),
         ("recherche", "search_name"),
         ("état", "state"),
@@ -214,8 +214,10 @@ def show(config_path: Path | None, match_id: int) -> None:
         ("contrat", "contract"),
         ("publié", "published_at"),
         ("collecté", "collected_at"),
-    ):
-        click.echo(f"{label:<10} {row[key] if row[key] is not None else ''}")
+    )
+    width = max(len(label) for label, _ in fields) + 1
+    for label, key in fields:
+        click.echo(f"{label:<{width}} {row[key] if row[key] is not None else ''}")
 
 
 def _require_match(conn, match_id: int):
@@ -328,13 +330,13 @@ def apps(config_path: Path | None) -> None:
     finally:
         conn.close()
 
-    header = f"{'id':>3}  {'société':<22} {'titre':<45} {'statut':<10} {'mise à jour':<19}"
+    header = f"{'id':>3}  {'société':<22} {'titre':<45} {'statut':<10} {'mise à jour':<10}"
     click.echo(header)
     for row in rows:
         click.echo(
             f"{int(row['id']):>3}  {_clip(row['company'], 22):<22} "
             f"{_clip(row['title'], 45):<45} {_clip(row['status'], 10):<10} "
-            f"{_clip(row['status_at'], 19):<19}"
+            f"{str(row['status_at'])[:10]:<10}"
         )
 
 

@@ -38,6 +38,7 @@ class FranceTravailCollector:
     """Collecte les offres depuis l'API partenaire France Travail."""
 
     name = "france_travail"
+    source_type = "france_travail"
     platform = PLATFORM
 
     def __init__(

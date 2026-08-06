@@ -125,6 +125,11 @@ def _france_travail_from_dict(raw: object) -> FranceTravailSource:
         raise ConfigError("sources.france_travail.client_id est requis")
     if not isinstance(client_secret, str) or not client_secret:
         raise ConfigError("sources.france_travail.client_secret est requis")
+    if client_id.startswith("YOUR_") or client_secret.startswith("YOUR_"):
+        raise ConfigError(
+            "sources.france_travail : identifiants factices — créez une application sur "
+            "https://francetravail.io et renseignez client_id/client_secret"
+        )
     if not isinstance(keywords, str):
         raise ConfigError("sources.france_travail.keywords doit être une chaîne")
     department = raw.get("department")
