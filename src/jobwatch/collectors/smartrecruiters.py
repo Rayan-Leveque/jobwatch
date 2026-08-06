@@ -1,4 +1,4 @@
-"""SmartRecruiters collector: public postings API per company slug."""
+"""Collecteur SmartRecruiters : API publique des offres par slug de société."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ INTERNSHIP_EXPERIENCE = "internship"
 
 
 class SmartRecruitersCollector:
-    """Collect offers for a list of company slugs from SmartRecruiters."""
+    """Collecte les offres pour une liste de slugs de sociétés depuis SmartRecruiters."""
 
     name = "smartrecruiters"
     platform = PLATFORM

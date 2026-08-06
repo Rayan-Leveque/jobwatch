@@ -1,86 +1,89 @@
 # jobwatch
 
-Self-hosted job-posting watcher. It collects job postings from job-board APIs, dedupes them
-into a local SQLite database, matches them against your saved searches, sends a digest
-notification for new matches, and lets you track your applications from the command line.
+Observateur d'offres d'emploi auto-hébergé. Il collecte les offres d'emploi via les API des
+job boards, les déduplique dans une base SQLite locale, les met en correspondance avec vos
+recherches enregistrées, envoie un digest des nouveaux matchs par notification, et vous permet
+de suivre vos candidatures depuis la ligne de commande.
 
-Flow: **collect -> dedup -> match -> notify -> track**.
+Flux : **collecter -> dédupliquer -> matcher -> notifier -> suivre**.
 
-No LLM features, no cloud, no tracking. Your data stays in one SQLite file on your machine.
+Pas de fonctionnalités LLM, pas de cloud, pas de traçage. Vos données restent dans un seul
+fichier SQLite sur votre machine.
 
-## Quickstart
+## Démarrage rapide
 
 ```bash
-git clone <this repo> && cd jobwatch
+git clone <ce repo> && cd jobwatch
 python3 -m venv .venv
 .venv/bin/pip install -e .
-.venv/bin/jw init                # creates config.yaml + an empty database
-# edit config.yaml: add sources and notification channels, then:
-.venv/bin/jw run                # collect, match, notify
-.venv/bin/jw list               # show new matches
-.venv/bin/jw apply 1 --note "cv sent"
-.venv/bin/jw log 1 interview -m "phone screen"
-.venv/bin/jw apps               # applications with current status
+.venv/bin/jw init                # crée config.yaml + une base de données vide
+# éditez config.yaml : ajoutez des sources et des canaux de notification, puis :
+.venv/bin/jw run                # collecter, matcher, notifier
+.venv/bin/jw list               # affiche les nouveaux matchs
+.venv/bin/jw apply 1 --note "cv envoyé"
+.venv/bin/jw log 1 interview -m "entretien téléphonique"
+.venv/bin/jw apps               # candidatures avec leur statut actuel
 ```
 
-`jw init` refuses to overwrite an existing `config.yaml`. Every command accepts
-`--config PATH` (default `./config.yaml`, falling back to `~/.config/jobwatch/config.yaml`).
+`jw init` refuse d'écraser un `config.yaml` existant. Toutes les commandes acceptent
+`--config PATH` (par défaut `./config.yaml`, avec repli sur `~/.config/jobwatch/config.yaml`).
 
 ### Cron
 
-Run `jw run` daily from cron:
+Exécutez `jw run` chaque jour via cron :
 
 ```
 0 7 * * * cd ~/jobwatch && .venv/bin/jw run
 ```
 
-## Config reference
+## Référence de configuration
 
-`config.yaml` (a copy of `config.example.yaml`) has four sections.
+`config.yaml` (une copie de `config.example.yaml`) comporte quatre sections.
 
-| Key | Description |
+| Clé | Description |
 | --- | --- |
-| `db` | Path to the SQLite database. `~` is expanded. Directories are created automatically. |
-| `searches` | List of saved searches. Each search has: `name` (unique id), `include` (keywords, any-of, case-insensitive substring match on the title), `exclude` (keywords, none-of), `locations` (substring match on the offer location; empty = anywhere), `contract` (optional: `permanent`, `fixed_term`, `internship`, `other`). |
-| `sources` | The job boards to watch. `france_travail` needs `client_id`, `client_secret`, `keywords` (server-side query) and optionally `department`. `smartrecruiters` takes a list of company slugs. |
-| `notify` | Notification channels. `ntfy` posts to `https://ntfy.sh/<topic>`. `smtp` sends via `host`, `port`, `user`, `password`, `to`. Both are optional; you can use one, both, or none. |
+| `db` | Chemin vers la base SQLite. `~` est développé. Les répertoires sont créés automatiquement. |
+| `searches` | Liste des recherches enregistrées. Chaque recherche a : `name` (identifiant unique), `include` (mots-clés, au moins un, correspondance insensible à la casse sur le titre), `exclude` (mots-clés, aucun), `locations` (correspondance par sous-chaîne sur la localisation de l'offre ; vide = n'importe où), `contract` (optionnel : `permanent`, `fixed_term`, `internship`, `other`). |
+| `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` (requête côté serveur) et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. |
+| `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
 
-Searches are synced into the database on every `jw run`: new ones are inserted, changed ones
-updated, removed ones deactivated (existing matches are kept).
+Les recherches sont synchronisées dans la base à chaque `jw run` : les nouvelles sont insérées,
+les modifiées mises à jour, les supprimées désactivées (les matchs existants sont conservés).
 
-## France Travail credentials
+## Identifiants France Travail
 
-1. Go to https://francetravail.io and create an account (or use your France Travail account).
-2. Create an application ("créer une application") for the API `api_offresdemploiv2`.
-3. Note the `client_id` and `client_secret` and put them in `config.yaml`.
-4. Request the scope `api_offresdemploiv2` for the application.
+1. Allez sur https://francetravail.io et créez un compte (ou utilisez votre compte France Travail).
+2. Créez une application ("créer une application") pour l'API `api_offresdemploiv2`.
+3. Notez le `client_id` et le `client_secret` et placez-les dans `config.yaml`.
+4. Demandez le scope `api_offresdemploiv2` pour l'application.
 
-jobwatch then performs the OAuth2 client-credentials flow automatically on each `jw run`.
-A broken or unconfigured source is logged as a warning and never aborts the run.
+jobwatch exécute ensuite automatiquement le flux OAuth2 client-credentials à chaque `jw run`.
+Une source défaillante ou non configurée est consignée comme avertissement et n'interrompt jamais
+l'exécution.
 
-## Data model
+## Modèle de données
 
-Offers are deduped globally by URL, and additionally skipped when the same company already has
-an offer with the same title. Each offer is matched against every active search; matches are
-stored with a state (`new`, `seen`, `applied`, `discarded`). An application is created from a
-match, and its current status is the latest event in its event log.
+Les offres sont dédupliquées globalement par URL, et de plus ignorées quand la même société a déjà
+une offre avec le même titre. Chaque offre est mise en correspondance avec chaque recherche active ;
+les matchs sont stockés avec un état (`new`, `seen`, `applied`, `discarded`). Une candidature est
+créée depuis un match, et son statut actuel est le dernier événement de son journal d'événements.
 
-| Table | Purpose |
+| Table | Rôle |
 | --- | --- |
-| `source` | Configured job-board sources and their last run time |
-| `company` | Companies (deduped by name) |
-| `offer` | Job postings (deduped by URL and company+title) |
-| `search` | Saved searches (keywords, locations, contract) |
-| `match` | Offer/search pair with state and notification status |
-| `application` | Your application for an offer |
-| `event` | Timeline of an application (applied, interview, rejected, offer, ...) |
-| `document` | CV and cover-letter files attached to an application |
+| `source` | Sources de job boards configurées et leur dernière exécution |
+| `company` | Sociétés (dédupliquées par nom) |
+| `offer` | Offres d'emploi (dédupliquées par URL et société+titre) |
+| `search` | Recherches enregistrées (mots-clés, localisations, contrat) |
+| `match` | Paire offre/recherche avec état et statut de notification |
+| `application` | Votre candidature pour une offre |
+| `event` | Historique d'une candidature (applied, interview, rejected, offer, ...) |
+| `document` | Fichiers CV et lettre de motivation attachés à une candidature |
 
-## Roadmap
+## Feuille de route
 
-- v0.2: dashboard (`jw serve`), markdown export of applications, more sources.
-- v0.3: optional LLM summaries and fit-scoring for collected offers.
+- v0.2 : tableau de bord (`jw serve`), export markdown des candidatures, plus de sources.
+- v0.3 : résumés LLM optionnels et scoring de pertinence pour les offres collectées.
 
-## License
+## Licence
 
 MIT. Copyright 2026 Rayan Leveque.

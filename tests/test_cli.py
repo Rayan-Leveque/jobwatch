@@ -76,11 +76,11 @@ def test_init_creates_config_and_db(runner: CliRunner, tmp_path: Path, monkeypat
     assert result.exit_code == 0, result.output
     assert config_path.exists()
     assert db_path.exists()
-    assert "next steps" in result.output
+    assert "prochaines étapes" in result.output
 
     second = runner.invoke(cli, ["init", "--config", str(config_path)])
     assert second.exit_code == 1
-    assert "refusing to overwrite" in second.output
+    assert "refus d'écraser" in second.output
 
 
 def test_run_with_no_sources_succeeds(runner: CliRunner, tmp_path: Path) -> None:
@@ -89,13 +89,13 @@ def test_run_with_no_sources_succeeds(runner: CliRunner, tmp_path: Path) -> None
 
     result = runner.invoke(cli, ["run", "--config", str(config)])
     assert result.exit_code == 0, result.output
-    assert "collected 0 new offers, 0 new matches" in result.output
+    assert "0 nouvelles offres collectées, 0 nouveaux matchs" in result.output
 
 
 def test_run_without_config_fails_cleanly(runner: CliRunner, tmp_path: Path) -> None:
     result = runner.invoke(cli, ["run", "--config", str(tmp_path / "missing.yaml")])
     assert result.exit_code == 1
-    assert "error:" in result.output
+    assert "erreur :" in result.output
 
 
 def _apply_flow(runner: CliRunner, config: Path) -> None:
@@ -105,11 +105,11 @@ def _apply_flow(runner: CliRunner, config: Path) -> None:
 
     result = runner.invoke(cli, ["apply", "1", "--note", "sent cv", "--config", str(config)])
     assert result.exit_code == 0, result.output
-    assert "recorded application 1" in result.output
+    assert "candidature 1 enregistrée" in result.output
 
     result = runner.invoke(cli, ["apply", "1", "--config", str(config)])
     assert result.exit_code == 1
-    assert "already applied" in result.output
+    assert "déjà été postulé" in result.output
 
     result = runner.invoke(
         cli, ["log", "1", "interview", "-m", "phone screen", "--config", str(config)]
@@ -142,11 +142,11 @@ def test_discard_and_log_errors(runner: CliRunner, tmp_path: Path) -> None:
 
     result = runner.invoke(cli, ["discard", "999", "--config", str(config)])
     assert result.exit_code == 1
-    assert "no match with id 999" in result.output
+    assert "aucun match avec l'id 999" in result.output
 
     result = runner.invoke(cli, ["log", "1", "interview", "--config", str(config)])
     assert result.exit_code == 1
-    assert "no application with id 1" in result.output
+    assert "aucune candidature avec l'id 1" in result.output
 
     result = runner.invoke(cli, ["log", "1", "bogus", "--config", str(config)])
     assert result.exit_code == 2
@@ -159,7 +159,7 @@ def test_list_ack_marks_seen(runner: CliRunner, tmp_path: Path) -> None:
 
     result = runner.invoke(cli, ["list", "--ack", "--config", str(config)])
     assert result.exit_code == 0, result.output
-    assert "acknowledged 1 match" in result.output
+    assert "1 match(s) marqué(s) comme vus" in result.output
 
     result = runner.invoke(cli, ["list", "--config", str(config)])
     assert result.exit_code == 0, result.output
@@ -185,7 +185,7 @@ def test_show_unknown_match_exits_one(runner: CliRunner, tmp_path: Path) -> None
     config = _write_config(tmp_path, db_path)
     result = runner.invoke(cli, ["show", "1", "--config", str(config)])
     assert result.exit_code == 1
-    assert "no match with id 1" in result.output
+    assert "aucun match avec l'id 1" in result.output
 
 
 def test_list_ack_with_no_rows_does_not_crash(runner: CliRunner, tmp_path: Path) -> None:

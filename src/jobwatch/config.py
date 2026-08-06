@@ -1,4 +1,4 @@
-"""Load and validate config.yaml into typed dataclasses."""
+"""Charge et valide config.yaml dans des dataclasses typées."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ CONFIG_EXAMPLE = "config.example.yaml"
 
 
 class ConfigError(Exception):
-    """Invalid or missing configuration. CLI prints a clean message and exits 1."""
+    """Configuration invalide ou manquante. La CLI affiche un message clair et sort avec le code 1."""
 
 
 @dataclass
@@ -45,7 +45,7 @@ class SourcesConfig:
     smartrecruiters: SmartRecruitersSource | None = None
 
     def configured(self) -> list[tuple[str, object]]:
-        """Return (source_type, config) pairs for every configured source."""
+        """Renvoie les paires (source_type, config) pour chaque source configurée."""
         pairs = []
         if self.france_travail is not None:
             pairs.append(("france_travail", self.france_travail))
@@ -87,27 +87,28 @@ class Config:
 
 def _string_list(value: object, field_name: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ConfigError(f"{field_name} must be a list of strings")
+        raise ConfigError(f"{field_name} doit être une liste de chaînes")
     return list(value)
 
 
 def _search_from_dict(raw: object) -> SearchConfig:
     if not isinstance(raw, dict):
-        raise ConfigError("each search must be a mapping")
+        raise ConfigError("chaque recherche doit être un mapping")
     name = raw.get("name")
     if not isinstance(name, str) or not name:
-        raise ConfigError("each search must have a non-empty 'name'")
+        raise ConfigError("chaque recherche doit avoir un 'name' non vide")
     include = raw.get("include")
     if not isinstance(include, list) or not all(isinstance(i, str) for i in include):
-        raise ConfigError(f"search '{name}': 'include' must be a list of strings")
+        raise ConfigError(f"recherche '{name}' : 'include' doit être une liste de chaînes")
     if not include:
-        raise ConfigError(f"search '{name}': 'include' must not be empty")
+        raise ConfigError(f"recherche '{name}' : 'include' ne doit pas être vide")
     exclude = _string_list(raw.get("exclude", []), f"search '{name}': 'exclude'")
     locations = _string_list(raw.get("locations", []), f"search '{name}': 'locations'")
     contract = raw.get("contract")
     if contract is not None and contract not in CONTRACTS:
         raise ConfigError(
-            f"search '{name}': 'contract' must be one of {sorted(CONTRACTS)}, got {contract!r}"
+            f"recherche '{name}' : 'contract' doit être l'une de {sorted(CONTRACTS)}, "
+            f"valeur reçue : {contract!r}"
         )
     return SearchConfig(
         name=name, include=include, exclude=exclude, locations=locations, contract=contract
@@ -116,19 +117,19 @@ def _search_from_dict(raw: object) -> SearchConfig:
 
 def _france_travail_from_dict(raw: object) -> FranceTravailSource:
     if not isinstance(raw, dict):
-        raise ConfigError("sources.france_travail must be a mapping")
+        raise ConfigError("sources.france_travail doit être un mapping")
     client_id = raw.get("client_id")
     client_secret = raw.get("client_secret")
     keywords = raw.get("keywords")
     if not isinstance(client_id, str) or not client_id:
-        raise ConfigError("sources.france_travail.client_id is required")
+        raise ConfigError("sources.france_travail.client_id est requis")
     if not isinstance(client_secret, str) or not client_secret:
-        raise ConfigError("sources.france_travail.client_secret is required")
+        raise ConfigError("sources.france_travail.client_secret est requis")
     if not isinstance(keywords, str):
-        raise ConfigError("sources.france_travail.keywords must be a string")
+        raise ConfigError("sources.france_travail.keywords doit être une chaîne")
     department = raw.get("department")
     if department is not None and not isinstance(department, str):
-        raise ConfigError("sources.france_travail.department must be a string")
+        raise ConfigError("sources.france_travail.department doit être une chaîne")
     return FranceTravailSource(
         client_id=client_id,
         client_secret=client_secret,
@@ -139,10 +140,12 @@ def _france_travail_from_dict(raw: object) -> FranceTravailSource:
 
 def _smartrecruiters_from_dict(raw: object) -> SmartRecruitersSource:
     if not isinstance(raw, dict):
-        raise ConfigError("sources.smartrecruiters must be a mapping")
+        raise ConfigError("sources.smartrecruiters doit être un mapping")
     companies = raw.get("companies")
     if not isinstance(companies, list) or not all(isinstance(c, str) and c for c in companies):
-        raise ConfigError("sources.smartrecruiters.companies must be a non-empty list of strings")
+        raise ConfigError(
+            "sources.smartrecruiters.companies doit être une liste non vide de chaînes"
+        )
     return SmartRecruitersSource(companies=list(companies))
 
 
@@ -150,11 +153,11 @@ def _sources_from_dict(raw: object) -> SourcesConfig:
     if raw is None:
         return SourcesConfig()
     if not isinstance(raw, dict):
-        raise ConfigError("'sources' must be a mapping")
+        raise ConfigError("'sources' doit être un mapping")
     known = {"france_travail", "smartrecruiters"}
     unknown = set(raw) - known
     if unknown:
-        raise ConfigError(f"unknown source type(s): {sorted(unknown)}")
+        raise ConfigError(f"type(s) de source inconnu(s) : {sorted(unknown)}")
     return SourcesConfig(
         france_travail=_france_travail_from_dict(raw.get("france_travail"))
         if "france_travail" in raw
@@ -169,10 +172,10 @@ def _ntfy_from_dict(raw: object) -> NtfyConfig | None:
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        raise ConfigError("notify.ntfy must be a mapping")
+        raise ConfigError("notify.ntfy doit être un mapping")
     topic = raw.get("topic")
     if not isinstance(topic, str) or not topic:
-        raise ConfigError("notify.ntfy.topic is required when notify.ntfy is present")
+        raise ConfigError("notify.ntfy.topic est requis quand notify.ntfy est présent")
     return NtfyConfig(topic=topic)
 
 
@@ -180,22 +183,22 @@ def _smtp_from_dict(raw: object) -> SmtpConfig | None:
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        raise ConfigError("notify.smtp must be a mapping")
+        raise ConfigError("notify.smtp doit être un mapping")
     host = raw.get("host")
     port = raw.get("port")
     user = raw.get("user")
     password = raw.get("password")
     to = raw.get("to")
     if not isinstance(host, str) or not host:
-        raise ConfigError("notify.smtp.host is required when notify.smtp is present")
+        raise ConfigError("notify.smtp.host est requis quand notify.smtp est présent")
     if not isinstance(port, int):
-        raise ConfigError("notify.smtp.port must be an integer")
+        raise ConfigError("notify.smtp.port doit être un entier")
     if not isinstance(user, str) or not user:
-        raise ConfigError("notify.smtp.user is required when notify.smtp is present")
+        raise ConfigError("notify.smtp.user est requis quand notify.smtp est présent")
     if not isinstance(password, str):
-        raise ConfigError("notify.smtp.password must be a string")
+        raise ConfigError("notify.smtp.password doit être une chaîne")
     if not isinstance(to, str) or not to:
-        raise ConfigError("notify.smtp.to is required when notify.smtp is present")
+        raise ConfigError("notify.smtp.to est requis quand notify.smtp est présent")
     return SmtpConfig(host=host, port=port, user=user, password=password, to=to)
 
 
@@ -203,37 +206,37 @@ def _notify_from_dict(raw: object) -> NotifyConfig:
     if raw is None:
         return NotifyConfig()
     if not isinstance(raw, dict):
-        raise ConfigError("'notify' must be a mapping")
+        raise ConfigError("'notify' doit être un mapping")
     return NotifyConfig(
         ntfy=_ntfy_from_dict(raw.get("ntfy")), smtp=_smtp_from_dict(raw.get("smtp"))
     )
 
 
 def load_config(path: Path) -> Config:
-    """Parse and validate a config file, raising ConfigError on any problem."""
+    """Analyse et valide un fichier de config, levant ConfigError en cas de problème."""
     try:
         text = path.read_text()
     except OSError as exc:
-        raise ConfigError(f"cannot read config file {path}: {exc}") from exc
+        raise ConfigError(f"impossible de lire le fichier de config {path} : {exc}") from exc
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"invalid YAML in {path}: {exc}") from exc
+        raise ConfigError(f"YAML invalide dans {path} : {exc}") from exc
     if raw is None:
-        raise ConfigError(f"config file {path} is empty")
+        raise ConfigError(f"le fichier de config {path} est vide")
     if not isinstance(raw, dict):
-        raise ConfigError(f"config file {path} must contain a mapping")
+        raise ConfigError(f"le fichier de config {path} doit contenir un mapping")
 
     db = raw.get("db")
     if not isinstance(db, str) or not db:
-        raise ConfigError("'db' must be a non-empty string path")
+        raise ConfigError("'db' doit être un chemin non vide")
     db_path = Path(os.path.expanduser(db))
 
     searches_raw = raw.get("searches")
     if not isinstance(searches_raw, list):
-        raise ConfigError("'searches' must be a list")
+        raise ConfigError("'searches' doit être une liste")
     if not searches_raw:
-        raise ConfigError("'searches' must not be empty")
+        raise ConfigError("'searches' ne doit pas être vide")
     searches = [_search_from_dict(s) for s in searches_raw]
 
     return Config(
@@ -245,5 +248,5 @@ def load_config(path: Path) -> Config:
 
 
 def example_config_text() -> str:
-    """Return the packaged config.example.yaml contents."""
+    """Renvoie le contenu du config.example.yaml fourni avec le paquet."""
     return resources.files("jobwatch").joinpath(CONFIG_EXAMPLE).read_text()

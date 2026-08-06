@@ -1,4 +1,4 @@
-"""Match stored offers against saved searches and insert new matches."""
+"""Met en correspondance les offres stockées avec les recherches et insère les nouveaux matchs."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def _json_list(values: list[str]) -> str:
 
 
 def _stored_search_key(row: sqlite3.Row) -> tuple[str, str, str, str | None]:
-    """Return the tuple that identifies a search row's configured fields."""
+    """Renvoie le tuple qui identifie les champs configurés d'une ligne de recherche."""
     return (
         row["include_json"],
         row["exclude_json"],
@@ -25,7 +25,7 @@ def _stored_search_key(row: sqlite3.Row) -> tuple[str, str, str, str | None]:
 
 
 def sync_searches(conn: sqlite3.Connection, searches: list[SearchConfig]) -> None:
-    """Insert new searches, update changed ones, deactivate removed ones."""
+    """Insère les nouvelles recherches, met à jour les modifiées, désactive les supprimées."""
     rows = conn.execute("SELECT * FROM search").fetchall()
     existing = {str(r["name"]): r for r in rows}
 
@@ -84,7 +84,7 @@ def _offer_candidates(conn: sqlite3.Connection, search_id: int) -> list[sqlite3.
 
 
 def offer_matches_search(offer: sqlite3.Row, search: sqlite3.Row) -> bool:
-    """Return True when the offer satisfies every criterion of the search."""
+    """Renvoie True quand l'offre satisfait tous les critères de la recherche."""
     include = json.loads(search["include_json"])
     exclude = json.loads(search["exclude_json"])
     locations = json.loads(search["locations_json"])
@@ -106,9 +106,10 @@ def offer_matches_search(offer: sqlite3.Row, search: sqlite3.Row) -> bool:
 
 
 def run_matching(conn: sqlite3.Connection) -> list[int]:
-    """Match unmatched offers against every active search, inserting new matches.
+    """Met en correspondance les offres non encore appariées avec chaque recherche active,
+    en insérant de nouveaux matchs.
 
-    Returns the ids of newly inserted matches.
+    Renvoie les ids des matchs nouvellement insérés.
     """
     search_ids = [
         int(r["id"]) for r in conn.execute("SELECT id FROM search WHERE active = 1").fetchall()

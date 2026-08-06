@@ -1,4 +1,4 @@
-"""Build collector instances from configuration."""
+"""Construit les instances de collecteurs depuis la configuration."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from jobwatch.config import (
 
 
 def build_collectors(sources: SourcesConfig, client: httpx.Client | None = None) -> list[Collector]:
-    """Build one collector per configured source type."""
+    """Construit un collecteur par type de source configuré."""
     collectors: list[Collector] = []
     if sources.france_travail is not None:
         ft: FranceTravailSource = sources.france_travail

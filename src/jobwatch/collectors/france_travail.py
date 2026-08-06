@@ -1,4 +1,4 @@
-"""France Travail collector: OAuth2 client-credentials + offers search API."""
+"""Collecteur France Travail : OAuth2 client-credentials + API de recherche d'offres."""
 
 from __future__ import annotations
 
@@ -28,14 +28,14 @@ CONTRACT_MAP = {
 
 
 def map_contract(type_contrat: str | None) -> str | None:
-    """Map a France Travail contract code to the internal vocabulary."""
+    """Convertit un code contrat France Travail vers le vocabulaire interne."""
     if type_contrat is None:
         return None
     return CONTRACT_MAP.get(type_contrat.upper())
 
 
 class FranceTravailCollector:
-    """Collect offers from the France Travail partenaire API."""
+    """Collecte les offres depuis l'API partenaire France Travail."""
 
     name = "france_travail"
     platform = PLATFORM

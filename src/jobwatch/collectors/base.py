@@ -1,4 +1,4 @@
-"""Collector protocol, RawOffer dataclass and shared offer-storage logic."""
+"""Protocole de collecteur, dataclass RawOffer et logique partagée de stockage des offres."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class RawOffer:
-    """A job posting as returned by a collector, before storage."""
+    """Une offre d'emploi telle que renvoyée par un collecteur, avant stockage."""
 
     title: str
     url: str
@@ -24,13 +24,13 @@ class RawOffer:
 
 
 class Collector(Protocol):
-    """Fetch job postings from a remote job board."""
+    """Récupère les offres d'emploi d'un job board distant."""
 
     name: str
     platform: str
 
     def fetch(self) -> list[RawOffer]:
-        """Return offers from the source. Never raises on network errors."""
+        """Renvoie les offres de la source. Ne lève jamais d'erreur réseau."""
         ...
 
 
@@ -48,10 +48,10 @@ def store_offers(
     source_type: str,
     offers: list[RawOffer],
 ) -> list[int]:
-    """Upsert companies and offers, returning the ids of newly inserted offers.
+    """Upsert des sociétés et offres, en renvoyant les ids des offres nouvellement insérées.
 
-    An offer is skipped when its url already exists, or when an offer with the
-    same (company, lower(title)) already exists.
+    Une offre est ignorée quand son url existe déjà, ou quand une offre avec le
+    même (company, lower(title)) existe déjà.
     """
     conn.execute(
         "INSERT OR IGNORE INTO source (type, name) VALUES (?, ?)", (source_type, source_name)

@@ -1,4 +1,4 @@
-"""Send a digest of new matches via ntfy and/or SMTP, then stamp notified_at."""
+"""Envoie un digest des nouveaux matchs via ntfy et/ou SMTP, puis pose le tampon notified_at."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from jobwatch.config import Config, SmtpConfig
 log = logging.getLogger(__name__)
 
 NTFY_URL = "https://ntfy.sh/{topic}"
-SUBJECT = "jobwatch: {count} new offers"
+SUBJECT = "jobwatch : {count} nouvelles offres"
 
 
 def _collect_unnotified(conn: sqlite3.Connection) -> dict[str, list[sqlite3.Row]]:
@@ -35,7 +35,7 @@ def _collect_unnotified(conn: sqlite3.Connection) -> dict[str, list[sqlite3.Row]
 
 
 def format_digest(groups: dict[str, list[sqlite3.Row]]) -> str:
-    """Build a plain-text digest grouped by search, one line per offer."""
+    """Construit un digest en texte brut groupé par recherche, une ligne par offre."""
     lines: list[str] = []
     for search_name in sorted(groups):
         lines.append(f"[{search_name}]")
@@ -86,10 +86,10 @@ def _send_smtp(cfg: SmtpConfig, body: str, count: int) -> bool:
 def send_digest(
     conn: sqlite3.Connection, config: Config, client: httpx.Client | None = None
 ) -> list[str]:
-    """Send digests of unnotified new matches.
+    """Envoie les digests des nouveaux matchs non notifiés.
 
-    Returns the list of channel names that were used successfully. Matches are
-    stamped notified_at only when at least one channel succeeded.
+    Renvoie la liste des noms de canaux utilisés avec succès. Les matchs ne sont
+    estampillés notified_at que lorsqu'au moins un canal a réussi.
     """
     groups = _collect_unnotified(conn)
     count = sum(len(rows) for rows in groups.values())

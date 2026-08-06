@@ -1,3 +1,3 @@
-"""jobwatch: self-hosted job-posting watcher."""
+"""jobwatch : observateur d'offres d'emploi auto-hébergé."""
 
 __version__ = "0.1.0"

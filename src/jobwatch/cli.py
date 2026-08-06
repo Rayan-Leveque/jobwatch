@@ -1,4 +1,4 @@
-"""click CLI for jobwatch."""
+"""CLI click pour jobwatch."""
 
 from __future__ import annotations
 
@@ -26,11 +26,11 @@ MATCH_STATES = ("new", "seen", "applied", "discarded")
 
 
 class CliError(Exception):
-    """Expected failure with a clean user-facing message."""
+    """Échec attendu avec un message clair destiné à l'utilisateur."""
 
 
 def _fatal(message: str) -> None:
-    click.echo(f"error: {message}", err=True)
+    click.echo(f"erreur : {message}", err=True)
     raise SystemExit(1)
 
 
@@ -43,7 +43,9 @@ def _resolve_config_path(explicit: str | None) -> Path:
     fallback = Path.home() / ".config" / "jobwatch" / "config.yaml"
     if fallback.exists():
         return fallback
-    raise CliError(f"no config found (looked for {local} and {fallback}); run 'jw init' first")
+    raise CliError(
+        f"aucune config trouvée (recherchée dans {local} et {fallback}) ; lancez 'jw init' d'abord"
+    )
 
 
 def _require_config(explicit: str | None) -> Config:
@@ -63,16 +65,16 @@ def _open_db(config: Config) -> sqlite3.Connection:
 @click.group()
 @click.version_option(version=__version__)
 def cli() -> None:
-    """jobwatch: self-hosted job-posting watcher."""
+    """jobwatch : observateur d'offres d'emploi auto-hébergé."""
 
 
 @cli.command()
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def init(config_path: Path | None) -> None:
-    """Create a config.yaml and an empty database, then print next steps."""
+    """Crée un fichier config.yaml et une base de données vide, puis affiche les prochaines étapes."""
     target = config_path or Path(DEFAULT_CONFIG)
     if target.exists():
-        _fatal(f"refusing to overwrite existing config {target}")
+        _fatal(f"refus d'écraser la config existante {target}")
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -84,15 +86,15 @@ def init(config_path: Path | None) -> None:
     conn = _open_db(config)
     conn.close()
 
-    click.echo(f"created {target}")
-    click.echo(f"initialized database at {config.db}")
-    click.echo("next steps: edit config.yaml, then run 'jw run'")
+    click.echo(f"config créée : {target}")
+    click.echo(f"base de données initialisée : {config.db}")
+    click.echo("prochaines étapes : modifiez config.yaml, puis lancez 'jw run'")
 
 
 @cli.command()
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def run(config_path: Path | None) -> None:
-    """Collect offers, match them against searches, send a digest."""
+    """Collecte les offres, les met en correspondance avec les recherches et envoie un digest."""
     config = _require_config(config_path)
 
     conn = _open_db(config)
@@ -109,17 +111,17 @@ def run(config_path: Path | None) -> None:
     finally:
         conn.close()
 
-    notified = f", notified via {', '.join(channels)}" if channels else ""
-    click.echo(f"collected {collected} new offers, {len(new_matches)} new matches{notified}")
+    notified = f", notifié via {', '.join(channels)}" if channels else ""
+    click.echo(f"{collected} nouvelles offres collectées, {len(new_matches)} nouveaux matchs{notified}")
 
 
 @cli.command("list")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 @click.option("--state", "state", type=click.Choice(MATCH_STATES), default="new")
-@click.option("--search", "search_name", default=None, help="filter by search name")
-@click.option("--ack", is_flag=True, help="mark listed 'new' matches as 'seen'")
+@click.option("--search", "search_name", default=None, help="filtrer par nom de recherche")
+@click.option("--ack", is_flag=True, help="marquer les matchs 'new' listés comme 'seen'")
 def list_matches(config_path: Path | None, state: str, search_name: str | None, ack: bool) -> None:
-    """List matches, optionally acknowledging them as seen."""
+    """Liste les matchs, avec possibilité de les marquer comme vus."""
     config = _require_config(config_path)
     conn = _open_db(config)
     try:
@@ -151,13 +153,13 @@ def list_matches(config_path: Path | None, state: str, search_name: str | None, 
 
     _print_matches(rows)
     if ack and rows:
-        click.echo(f"acknowledged {len(rows)} match(es) as seen")
+        click.echo(f"{len(rows)} match(s) marqué(s) comme vus")
 
 
 def _print_matches(rows) -> None:
     header = (
-        f"{'id':>5}  {'search':<16} {'company':<22} {'title':<45} "
-        f"{'location':<18} {'state':<9} {'collected':<10}"
+        f"{'id':>5}  {'recherche':<16} {'société':<22} {'titre':<45} "
+        f"{'localisation':<18} {'état':<9} {'collecté':<10}"
     )
     click.echo(header)
     for row in rows:
@@ -180,7 +182,7 @@ def _clip(value: object, width: int) -> str:
 @click.argument("match_id", type=int)
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def show(config_path: Path | None, match_id: int) -> None:
-    """Show full details for a match."""
+    """Affiche le détail complet d'un match."""
     config = _require_config(config_path)
     conn = _open_db(config)
     try:
@@ -199,19 +201,19 @@ def show(config_path: Path | None, match_id: int) -> None:
     finally:
         conn.close()
     if row is None:
-        _fatal(f"no match with id {match_id}")
+        _fatal(f"aucun match avec l'id {match_id}")
     for label, key in (
         ("id", "id"),
-        ("search", "search_name"),
-        ("state", "state"),
-        ("company", "company"),
-        ("title", "title"),
+        ("recherche", "search_name"),
+        ("état", "state"),
+        ("société", "company"),
+        ("titre", "title"),
         ("url", "url"),
-        ("platform", "platform"),
-        ("location", "location"),
-        ("contract", "contract"),
-        ("published", "published_at"),
-        ("collected", "collected_at"),
+        ("plateforme", "platform"),
+        ("localisation", "location"),
+        ("contrat", "contract"),
+        ("publié", "published_at"),
+        ("collecté", "collected_at"),
     ):
         click.echo(f"{label:<10} {row[key] if row[key] is not None else ''}")
 
@@ -228,16 +230,16 @@ def _require_match(conn, match_id: int):
         (match_id,),
     ).fetchone()
     if row is None:
-        _fatal(f"no match with id {match_id}")
+        _fatal(f"aucun match avec l'id {match_id}")
     return row
 
 
 @cli.command()
 @click.argument("match_id", type=int)
-@click.option("--note", default=None, help="note stored on the application")
+@click.option("--note", default=None, help="note conservée sur la candidature")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def apply(config_path: Path | None, match_id: int, note: str | None) -> None:
-    """Record an application for a match."""
+    """Enregistre une candidature pour un match."""
     config = _require_config(config_path)
     conn = _open_db(config)
     try:
@@ -246,7 +248,7 @@ def apply(config_path: Path | None, match_id: int, note: str | None) -> None:
             "SELECT id FROM application WHERE match_id = ?", (match_id,)
         ).fetchone()
         if existing is not None:
-            _fatal(f"match {match_id} already applied (application {existing['id']})")
+            _fatal(f"le match {match_id} a déjà été postulé (candidature {existing['id']})")
         cur = conn.execute(
             "INSERT INTO application (match_id, offer_id, note) VALUES (?, ?, ?)",
             (match_id, match["offer_id"], note),
@@ -260,14 +262,14 @@ def apply(config_path: Path | None, match_id: int, note: str | None) -> None:
         conn.commit()
     finally:
         conn.close()
-    click.echo(f"recorded application {application_id} for match {match_id}")
+    click.echo(f"candidature {application_id} enregistrée pour le match {match_id}")
 
 
 @cli.command()
 @click.argument("match_id", type=int)
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def discard(config_path: Path | None, match_id: int) -> None:
-    """Mark a match as discarded."""
+    """Marque un match comme écarté."""
     config = _require_config(config_path)
     conn = _open_db(config)
     try:
@@ -276,24 +278,24 @@ def discard(config_path: Path | None, match_id: int) -> None:
         conn.commit()
     finally:
         conn.close()
-    click.echo(f"discarded match {match_id}")
+    click.echo(f"match {match_id} écarté")
 
 
 @cli.command()
 @click.argument("application_id", type=int)
 @click.argument("event_type", type=click.Choice(EVENT_TYPES))
-@click.option("-m", "--comment", default=None, help="comment for the event")
+@click.option("-m", "--comment", default=None, help="commentaire pour l'événement")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def log(
     config_path: Path | None, application_id: int, event_type: str, comment: str | None
 ) -> None:
-    """Add an event to an application."""
+    """Ajoute un événement à une candidature."""
     config = _require_config(config_path)
     conn = _open_db(config)
     try:
         app = conn.execute("SELECT id FROM application WHERE id = ?", (application_id,)).fetchone()
         if app is None:
-            _fatal(f"no application with id {application_id}")
+            _fatal(f"aucune candidature avec l'id {application_id}")
         conn.execute(
             "INSERT INTO event (application_id, type, comment) VALUES (?, ?, ?)",
             (application_id, event_type, comment),
@@ -301,13 +303,13 @@ def log(
         conn.commit()
     finally:
         conn.close()
-    click.echo(f"logged {event_type} for application {application_id}")
+    click.echo(f"événement {event_type} consigné pour la candidature {application_id}")
 
 
 @cli.command("apps")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def apps(config_path: Path | None) -> None:
-    """List applications with their current status (latest event)."""
+    """Liste les candidatures avec leur statut actuel (dernier événement)."""
     config = _require_config(config_path)
     conn = _open_db(config)
     try:
@@ -326,7 +328,7 @@ def apps(config_path: Path | None) -> None:
     finally:
         conn.close()
 
-    header = f"{'id':>3}  {'company':<22} {'title':<45} {'status':<10} {'updated':<19}"
+    header = f"{'id':>3}  {'société':<22} {'titre':<45} {'statut':<10} {'mise à jour':<19}"
     click.echo(header)
     for row in rows:
         click.echo(
@@ -337,7 +339,7 @@ def apps(config_path: Path | None) -> None:
 
 
 def main() -> None:
-    """Entry point for the 'jw' console script."""
+    """Point d'entrée du script console 'jw'."""
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     cli(prog_name="jw")
 

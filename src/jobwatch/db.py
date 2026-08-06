@@ -1,4 +1,4 @@
-"""SQLite connection, schema initialization and row helpers."""
+"""Connexion SQLite, initialisation du schéma et helpers de lignes."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ SCHEMA_FILE = "schema.sql"
 
 
 class JobwatchError(Exception):
-    """Expected, user-facing error. CLI prints a clean message and exits 1."""
+    """Erreur attendue, destinée à l'utilisateur. La CLI affiche un message clair et sort avec le code 1."""
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
-    """Open a SQLite connection with foreign keys and a row factory enabled."""
+    """Ouvre une connexion SQLite avec les clés étrangères et un row factory activés."""
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -23,16 +23,16 @@ def connect(path: Path | str) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Execute the packaged schema.sql against the connection."""
+    """Exécute le schema.sql fourni avec le paquet sur la connexion."""
     schema = resources.files("jobwatch").joinpath(SCHEMA_FILE).read_text()
     conn.executescript(schema)
 
 
 def row(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> sqlite3.Row | None:
-    """Return a single row or None."""
+    """Renvoie une ligne unique ou None."""
     return conn.execute(query, params).fetchone()
 
 
 def rows(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
-    """Return all rows as a list."""
+    """Renvoie toutes les lignes sous forme de liste."""
     return list(conn.execute(query, params).fetchall())
