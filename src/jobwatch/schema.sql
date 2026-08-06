@@ -22,6 +22,16 @@ CREATE TABLE IF NOT EXISTS offer (
   collected_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_offer_company_title ON offer(company_id, title);
+CREATE TABLE IF NOT EXISTS offer_summary (
+  id INTEGER PRIMARY KEY,
+  offer_id INTEGER NOT NULL UNIQUE REFERENCES offer(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS summary_bullet (
+  summary_id INTEGER NOT NULL REFERENCES offer_summary(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  PRIMARY KEY(summary_id, position)
+);
 CREATE TABLE IF NOT EXISTS search (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,

@@ -101,6 +101,17 @@ def _apply(conn: sqlite3.Connection, match_id: int, offer_id: int, note: str = "
     return application_id
 
 
+def _add_summary(conn: sqlite3.Connection, offer_id: int, *bullets: str) -> None:
+    summary_id = int(
+        conn.execute("INSERT INTO offer_summary (offer_id) VALUES (?)", (offer_id,)).lastrowid
+    )
+    conn.executemany(
+        "INSERT INTO summary_bullet (summary_id, position, text) VALUES (?, ?, ?)",
+        ((summary_id, position, bullet) for position, bullet in enumerate(bullets)),
+    )
+    conn.commit()
+
+
 def _section_html(page: str, key: str) -> str:
     marker = f'data-section="{key}"'
     start = page.index(marker)
@@ -267,6 +278,83 @@ def test_fit_pills_rendered_high_medium_low(conn: sqlite3.Connection) -> None:
     assert '<span class="pill fit low">low</span>' in page
 
 
+def test_high_summary_renders_escaped_ordered_accessible_collapsible_block(
+    conn: sqlite3.Connection,
+) -> None:
+    _match_id, offer_id = _seed_offer(
+        conn, company="HighCo", title='AI <Engineer> "Senior"', fit="high"
+    )
+    _add_summary(conn, offer_id, "Premier <script>alert(1)</script>", "Deuxième & dernier")
+
+    page = render_page(conn)
+    section = _section_html(page, "new")
+
+    assert 'class="row row-new has-summary"' in section
+    assert 'class="card-toggle"' in section
+    assert 'aria-expanded="false"' in section
+    assert 'aria-controls="summary-match-' in section
+    assert 'aria-label="Afficher le résumé de AI &lt;Engineer&gt; &quot;Senior&quot;"' in section
+    assert 'class="summary-chevron"' in section
+    assert 'class="summary-panel"' in section
+    assert "hidden" in section
+    assert "En bref" in section
+    assert "Premier &lt;script&gt;alert(1)&lt;/script&gt;" in section
+    assert "<script>alert(1)</script>" not in section
+    assert section.index("Premier") < section.index("Deuxième &amp; dernier")
+
+
+@pytest.mark.parametrize("fit", ["medium", "low", None])
+def test_summary_is_not_rendered_for_non_high_fit(
+    conn: sqlite3.Connection, fit: str | None
+) -> None:
+    _match_id, offer_id = _seed_offer(conn, company=f"Co-{fit}", fit=fit)
+    _add_summary(conn, offer_id, "Fait masqué")
+
+    page = render_page(conn)
+
+    assert "Fait masqué" not in page
+    assert "En bref" not in page
+    assert '<button class="card-toggle"' not in page
+
+
+def test_high_without_summary_has_no_empty_summary_space(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="HighCo", fit="high")
+
+    page = render_page(conn)
+
+    assert "En bref" not in page
+    assert '<div class="summary-panel"' not in page
+    assert 'class="row row-new has-summary"' not in page
+
+
+def test_high_application_renders_its_summary(conn: sqlite3.Connection) -> None:
+    match_id, offer_id = _seed_offer(conn, company="AppliedHigh", fit="high")
+    _add_summary(conn, offer_id, "Fait candidature")
+    _apply(conn, match_id, offer_id)
+
+    page = render_page(conn)
+    applied = _section_html(page, "applied")
+
+    assert "Fait candidature" in applied
+    assert 'aria-controls="summary-application-' in applied
+
+
+def test_summary_toggle_script_preserves_external_link_interaction(
+    conn: sqlite3.Connection,
+) -> None:
+    _match_id, offer_id = _seed_offer(conn, company="HighCo", fit="high")
+    _add_summary(conn, offer_id, "Fait")
+
+    page = render_page(conn)
+
+    assert "button.addEventListener('click'" in page
+    assert "button.setAttribute('aria-expanded'" in page
+    assert "panel.hidden = expanded" in page
+    assert 'target="_blank"' in page
+    assert ".meta a { position:relative; z-index:3" in page
+    assert "pointer-events:auto" in page
+
+
 def test_no_fit_pill_when_fit_null(conn: sqlite3.Connection) -> None:
     _seed_offer(conn, company="Acme", title="Role", fit=None)
     page = render_page(conn)
@@ -296,7 +384,10 @@ def test_deadline_escaped(conn: sqlite3.Connection) -> None:
 
 def test_match_order_fit_then_collected_desc(conn: sqlite3.Connection) -> None:
     _seed_offer(conn, company="LoCo", title="L", fit="low", collected_at="2026-08-05 10:00:00")
-    _seed_offer(conn, company="HiCo", title="H", fit="high", collected_at="2026-08-01 10:00:00")
+    _match_id, high_offer_id = _seed_offer(
+        conn, company="HiCo", title="H", fit="high", collected_at="2026-08-01 10:00:00"
+    )
+    _add_summary(conn, high_offer_id, "Résumé high")
     _seed_offer(conn, company="NoneCo", title="N", fit=None, collected_at="2026-08-04 10:00:00")
     _seed_offer(conn, company="MidCo", title="M", fit="medium", collected_at="2026-08-03 10:00:00")
     page = render_page(conn)

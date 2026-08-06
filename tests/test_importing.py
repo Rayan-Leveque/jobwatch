@@ -11,11 +11,13 @@ import pytest
 from jobwatch.db import connect, init_db
 from jobwatch.importing import (
     ImportError,
+    import_summaries,
     import_tracker,
     ingest_daily,
     merge_offers,
     parse_daily_digest,
     parse_daily_json,
+    parse_summaries_markdown,
     parse_tracker_markdown,
 )
 
@@ -129,6 +131,23 @@ def _digest_file(tmp_path: Path, text: str) -> Path:
     path = tmp_path / "daily.md"
     path.write_text(text)
     return path
+
+
+def _summaries_file(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "resumes.md"
+    path.write_text(text)
+    return path
+
+
+def _seed_summary_offer(conn: sqlite3.Connection, url: str) -> int:
+    conn.execute("INSERT OR IGNORE INTO source (type, name) VALUES ('test', 'test')")
+    source_id = conn.execute("SELECT id FROM source WHERE name = 'test'").fetchone()["id"]
+    cur = conn.execute(
+        "INSERT INTO offer (source_id, title, url) VALUES (?, 'AI Engineer', ?)",
+        (source_id, url),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
 
 
 def _match_row(conn: sqlite3.Connection, search_name: str, url: str):
@@ -1008,3 +1027,130 @@ def test_import_tracker_invalid_line_writes_nothing(
 def test_import_tracker_missing_file_raises(conn: sqlite3.Connection, tmp_path: Path) -> None:
     with pytest.raises(ImportError):
         import_tracker(conn, tmp_path / "absent.md", SEARCH)
+
+
+def test_parse_summaries_preserves_sections_bullets_and_order(tmp_path: Path) -> None:
+    path = _summaries_file(
+        tmp_path,
+        "# Résumés d'offres (high)\n\n> Note liminaire.\n\n"
+        "## https://example.com/one\n- Premier fait\n- Deuxième fait\n\n"
+        "## https://example.com/two\n- Fait unique\n",
+    )
+
+    summaries = parse_summaries_markdown(path)
+
+    assert [summary.url for summary in summaries] == [
+        "https://example.com/one",
+        "https://example.com/two",
+    ]
+    assert summaries[0].bullets == ("Premier fait", "Deuxième fait")
+    assert summaries[1].bullets == ("Fait unique",)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("## ftp://example.com/job\n- Fait\n", r"URL HTTP\(S\) invalide"),
+        ("## https://example.com/job invalide\n- Fait\n", r"URL HTTP\(S\) invalide"),
+        ("## https://example.com/job\n", "aucun bullet"),
+        ("- Fait sans URL\n", "bullet hors section"),
+        ("## https://example.com/job\n- \n", "bullet vide"),
+        (
+            "## https://example.com/job\n- Un\n## https://example.com/job\n- Deux\n",
+            "URL dupliquée",
+        ),
+    ],
+)
+def test_parse_summaries_rejects_invalid_content(
+    tmp_path: Path, text: str, message: str
+) -> None:
+    with pytest.raises(ImportError, match=message):
+        parse_summaries_markdown(_summaries_file(tmp_path, text))
+
+
+def test_import_summaries_is_atomic_when_offer_is_missing(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    _seed_summary_offer(conn, "https://example.com/known")
+    path = _summaries_file(
+        tmp_path,
+        "## https://example.com/known\n- Connu\n"
+        "## https://example.com/missing\n- Absent\n",
+    )
+
+    with pytest.raises(ImportError, match="offre.s. absente.s. de la base"):
+        import_summaries(conn, path)
+
+    assert conn.execute("SELECT count(*) FROM offer").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM offer_summary").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM summary_bullet").fetchone()[0] == 0
+
+
+def test_import_summaries_validation_preserves_existing_data(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    first_id = _seed_summary_offer(conn, "https://example.com/first")
+    _seed_summary_offer(conn, "https://example.com/second")
+    valid = _summaries_file(
+        tmp_path,
+        "## https://example.com/first\n- Fait original\n",
+    )
+    import_summaries(conn, valid)
+    valid.write_text(
+        "## https://example.com/first\n- Fait remplacé\n"
+        "## https://example.com/second\n- \n"
+    )
+
+    with pytest.raises(ImportError, match="bullet vide"):
+        import_summaries(conn, valid)
+
+    stored = conn.execute(
+        "SELECT sb.text FROM offer_summary os "
+        "JOIN summary_bullet sb ON sb.summary_id = os.id "
+        "WHERE os.offer_id = ? ORDER BY sb.position",
+        (first_id,),
+    ).fetchall()
+    assert [row["text"] for row in stored] == ["Fait original"]
+    assert conn.execute("SELECT count(*) FROM offer_summary").fetchone()[0] == 1
+
+
+def test_import_summaries_is_idempotent_and_replaces_modified_summary(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    offer_id = _seed_summary_offer(conn, "https://example.com/job")
+    path = _summaries_file(
+        tmp_path,
+        "## https://example.com/job\n- Premier fait\n- Deuxième fait\n",
+    )
+
+    first = import_summaries(conn, path)
+    second = import_summaries(conn, path)
+
+    assert first.summaries_created == 1
+    assert first.bullets_written == 2
+    assert second.summaries_unchanged == 1
+    assert second.bullets_written == 0
+    summary_id = conn.execute(
+        "SELECT id FROM offer_summary WHERE offer_id = ?", (offer_id,)
+    ).fetchone()["id"]
+    assert [
+        row["text"]
+        for row in conn.execute(
+            "SELECT text FROM summary_bullet WHERE summary_id = ? ORDER BY position",
+            (summary_id,),
+        )
+    ] == ["Premier fait", "Deuxième fait"]
+
+    path.write_text("## https://example.com/job\n- Nouveau fait\n")
+    replaced = import_summaries(conn, path)
+
+    assert replaced.summaries_updated == 1
+    assert replaced.bullets_written == 1
+    assert conn.execute("SELECT count(*) FROM offer_summary").fetchone()[0] == 1
+    assert [
+        row["text"]
+        for row in conn.execute(
+            "SELECT text FROM summary_bullet WHERE summary_id = ? ORDER BY position",
+            (summary_id,),
+        )
+    ] == ["Nouveau fait"]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jobwatch"
-version = "0.3.0"
+version = "0.4.0"
 description = "Self-hosted job-posting watcher: collect, dedup, match, notify, track."
 readme = "README.md"
 requires-python = ">=3.11"

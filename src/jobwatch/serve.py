@@ -55,7 +55,8 @@ def _short_date(value: str) -> str:
 
 def _matches(conn: sqlite3.Connection, state: str) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT m.id AS id, m.state AS state, m.fit AS fit, s.name AS search_name, "
+        "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
+        "       s.name AS search_name, "
         "       c.name AS company, o.title AS title, o.location AS location, "
         "       o.contract AS contract, o.platform AS platform, o.url AS url, "
         "       o.collected_at AS collected_at, o.deadline AS deadline "
@@ -74,7 +75,7 @@ def _matches(conn: sqlite3.Connection, state: str) -> list[sqlite3.Row]:
 
 def _applications(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT a.id AS id, c.name AS company, o.title AS title, "
+        "SELECT a.id AS id, o.id AS offer_id, m.fit AS fit, c.name AS company, o.title AS title, "
         "       o.location AS location, o.contract AS contract, "
         "       o.platform AS platform, o.url AS url, a.note AS note, "
         "       s.name AS search_name, "
@@ -90,6 +91,28 @@ def _applications(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         "LEFT JOIN search s ON s.id = m.search_id "
         "ORDER BY a.created_at DESC, a.id DESC"
     ).fetchall()
+
+
+def _summary_bullets(
+    conn: sqlite3.Connection, offer_ids: list[int]
+) -> dict[int, list[str]]:
+    if not offer_ids:
+        return {}
+    summaries: dict[int, list[str]] = {}
+    for start in range(0, len(offer_ids), 500):
+        chunk = offer_ids[start : start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            "SELECT os.offer_id AS offer_id, sb.text AS text "
+            "FROM offer_summary os "
+            "JOIN summary_bullet sb ON sb.summary_id = os.id "
+            f"WHERE os.offer_id IN ({placeholders}) "
+            "ORDER BY os.offer_id, sb.position",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            summaries.setdefault(int(row["offer_id"]), []).append(str(row["text"]))
+    return summaries
 
 
 def _link(url: object) -> str:
@@ -148,21 +171,42 @@ def _fit_pill(fit: object) -> str:
     return f'<span class="pill fit {value}">{html.escape(value)}</span>'
 
 
-def _match_card(row: sqlite3.Row) -> str:
+def _summary_panel(row: sqlite3.Row, bullets: list[str], prefix: str) -> tuple[str, str]:
+    if row["fit"] != "high" or not bullets:
+        return "", ""
+    panel_id = f"summary-{prefix}-{int(row['id'])}"
+    label = html.escape(f"Afficher le résumé de {row['title'] or 'cette offre'}", quote=True)
+    button = (
+        f'<button class="card-toggle" type="button" aria-expanded="false" '
+        f'aria-controls="{panel_id}" aria-label="{label}"></button>'
+    )
+    items = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in bullets)
+    panel = (
+        f'<div class="summary-panel" id="{panel_id}" hidden>'
+        f'<div class="summary-title">En bref</div><ul>{items}</ul></div>'
+    )
+    return button, panel
+
+
+def _match_card(row: sqlite3.Row, bullets: list[str]) -> str:
     cls = "new" if row["state"] == "new" else "seen"
     company = html.escape(str(row["company"] or "Société inconnue"))
     title = html.escape(str(row["title"] or ""))
     pill = _fit_pill(row["fit"])
     meta = _meta(row, "collecté le", row["collected_at"], row["search_name"], row["deadline"])
+    button, summary = _summary_panel(row, bullets, "match")
+    summary_class = " has-summary" if summary else ""
+    chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
     return (
-        f'<article class="row row-{cls}"><div class="body">'
-        f'<div class="card-topline"><div class="company">{company}</div>{pill}</div>'
+        f'<article class="row row-{cls}{summary_class}">{button}<div class="body">'
+        f'<div class="card-topline"><div class="company">{company}</div>'
+        f'<div class="card-badges">{pill}{chevron}</div></div>'
         f'<div class="role">{title}</div>'
-        f'<div class="meta">{meta}</div></div></article>'
+        f'<div class="meta">{meta}</div></div>{summary}</article>'
     )
 
 
-def _application_card(row: sqlite3.Row) -> str:
+def _application_card(row: sqlite3.Row, bullets: list[str]) -> str:
     status = str(row["status"] or "")
     cls = status if status in STATUS_LABELS else "unknown"
     label = STATUS_LABELS.get(status, STATUS_UNKNOWN)
@@ -171,23 +215,36 @@ def _application_card(row: sqlite3.Row) -> str:
     pill = f'<span class="pill {cls}">{html.escape(label)}</span>'
     meta = _meta(row, "candidature le", row["created_at"], row["search_name"])
     note = f'<p class="note">{html.escape(str(row["note"]))}</p>' if row["note"] else ""
+    button, summary = _summary_panel(row, bullets, "application")
+    summary_class = " has-summary" if summary else ""
+    chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
     return (
-        f'<article class="row row-applied"><div class="body">'
-        f'<div class="card-topline"><div class="company">{company}</div>{pill}</div>'
+        f'<article class="row row-applied{summary_class}">{button}<div class="body">'
+        f'<div class="card-topline"><div class="company">{company}</div>'
+        f'<div class="card-badges">{pill}{chevron}</div></div>'
         f'<div class="role">{title}</div>'
-        f'<div class="meta">{meta}</div>{note}</div></article>'
+        f'<div class="meta">{meta}</div>{note}</div>{summary}</article>'
     )
 
 
-def _card(row: sqlite3.Row, key: str) -> str:
+def _card(row: sqlite3.Row, key: str, summaries: dict[int, list[str]]) -> str:
+    bullets = summaries.get(int(row["offer_id"]), [])
     if key == "applied":
-        return _application_card(row)
-    return _match_card(row)
+        return _application_card(row, bullets)
+    return _match_card(row, bullets)
 
 
-def _section(key: str, label: str, subtitle: str, rows, empty_text: str, open_default: bool) -> str:
+def _section(
+    key: str,
+    label: str,
+    subtitle: str,
+    rows,
+    empty_text: str,
+    open_default: bool,
+    summaries: dict[int, list[str]],
+) -> str:
     if rows:
-        cards = "\n".join(_card(row, key) for row in rows)
+        cards = "\n".join(_card(row, key, summaries) for row in rows)
     else:
         cards = f'<p class="empty-note">{empty_text}</p>'
     open_attr = " open" if open_default else ""
@@ -209,19 +266,21 @@ def render_page(conn: sqlite3.Connection) -> str:
     new = _matches(conn, "new")
     seen = _matches(conn, "seen")
     applied = _applications(conn)
+    offer_ids = sorted({int(row["offer_id"]) for row in (*new, *seen, *applied)})
+    summaries = _summary_bullets(conn, offer_ids)
     body = "\n".join(
         (
             _section(
                 "new", "Nouveaux matchs", "À découvrir", new,
-                "Aucun nouveau match pour l'instant.", True,
+                "Aucun nouveau match pour l'instant.", True, summaries,
             ),
             _section(
                 "seen", "Vus", "Déjà parcourus", seen,
-                "Aucun match parcouru pour l'instant.", False,
+                "Aucun match parcouru pour l'instant.", False, summaries,
             ),
             _section(
                 "applied", "Candidatures", "Dernier statut connu", applied,
-                "Aucune candidature pour l'instant.", False,
+                "Aucune candidature pour l'instant.", False, summaries,
             ),
         )
     )
@@ -369,6 +428,7 @@ html[data-theme="light"] .icon-sun { opacity:1; transform:rotate(0) scale(1) }
 html[data-theme="light"] .icon-moon { opacity:0; transform:rotate(70deg) scale(.6) }
 .theme-toggle:focus-visible, #q:focus-visible, .clear-search:focus-visible,
 summary:focus-visible, a:focus-visible { outline:3px solid var(--violet); outline-offset:3px }
+.card-toggle:focus-visible { outline:3px solid var(--violet); outline-offset:-4px }
 .hero { margin-bottom:22px }
 .eyebrow { margin:0 0 10px; color:var(--accent); font-size:.69rem; font-weight:800;
   letter-spacing:.16em; text-transform:uppercase }
@@ -441,8 +501,15 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .row.row-new::before { background:var(--accent) }
 .row.row-seen::before { background:var(--blue) }
 .row.row-applied::before { background:var(--violet) }
-.row .body { min-width:0 }
+.row .body { position:relative; z-index:2; min-width:0; pointer-events:none }
+.row.has-summary { cursor:pointer }
+.card-toggle { position:absolute; z-index:1; inset:0; width:100%; padding:0; border:0;
+  border-radius:var(--radius-lg); background:transparent; cursor:pointer }
 .card-topline { display:flex; align-items:flex-start; justify-content:space-between; gap:10px }
+.card-badges { display:flex; align-items:center; gap:10px }
+.summary-chevron { width:9px; height:9px; margin:0 4px 4px 0; border-right:2px solid var(--muted);
+  border-bottom:2px solid var(--muted); transform:rotate(45deg); transition:transform .2s ease }
+.has-summary:has(.card-toggle[aria-expanded="true"]) .summary-chevron { transform:rotate(225deg); margin-top:7px }
 .company { min-width:0; overflow-wrap:anywhere; color:var(--fg); font-size:.74rem; line-height:1.35;
   font-weight:810; letter-spacing:.065em; text-transform:uppercase }
 .role { max-width:620px; margin-top:5px; overflow-wrap:anywhere; color:var(--fg); font-size:.98rem;
@@ -470,12 +537,20 @@ h1 span { color:var(--muted-2); font-weight:620 }
   color:var(--muted); font-size:.72rem; line-height:1.4; overflow-wrap:anywhere }
 .platform { min-height:24px; display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px;
   color:var(--blue); background:var(--blue-soft); font-size:.64rem; font-weight:760; letter-spacing:.015em }
-.meta a { min-height:44px; display:inline-flex; align-items:center; padding:0 10px; border:1px solid var(--line);
+.meta a { position:relative; z-index:3; min-height:44px; display:inline-flex; align-items:center;
+  padding:0 10px; border:1px solid var(--line); pointer-events:auto;
   border-radius:11px; color:var(--fg); background:var(--surface); font-size:.69rem; font-weight:680;
   text-decoration:none; transition:border-color .15s ease, background .15s ease }
 .note { margin:12px 0 0; padding:11px 12px; border:1px dashed var(--line-strong);
   border-radius:12px; color:var(--muted); background:color-mix(in srgb, var(--surface) 55%, transparent);
   font-size:.75rem; overflow-wrap:anywhere }
+.summary-panel { position:relative; z-index:2; margin:14px 0 1px; padding:13px 13px 12px;
+  border-top:1px solid var(--line); pointer-events:none }
+.summary-panel[hidden] { display:none }
+.summary-title { color:var(--accent); font-size:.68rem; font-weight:820; letter-spacing:.09em;
+  text-transform:uppercase }
+.summary-panel ul { margin:9px 0 0; padding-left:19px; color:var(--muted); font-size:.76rem }
+.summary-panel li + li { margin-top:6px }
 .empty-note { margin:0; padding:14px 13px; border:1px dashed var(--line-strong);
   border-radius:13px; color:var(--muted); background:var(--surface-2);
   font-size:.75rem; overflow-wrap:anywhere }
@@ -534,6 +609,15 @@ _JS = """\
   const searchDock = document.getElementById('search-dock');
   const details = [...document.querySelectorAll('.section')];
   const rows = [...document.querySelectorAll('.row')];
+  const cardToggles = [...document.querySelectorAll('.card-toggle')];
+  cardToggles.forEach(button => {
+    button.addEventListener('click', () => {
+      const expanded = button.getAttribute('aria-expanded') === 'true';
+      const panel = document.getElementById(button.getAttribute('aria-controls'));
+      button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+      if (panel) panel.hidden = expanded;
+    });
+  });
   const readSession = (key, fallback) => {
     try { return sessionStorage.getItem(key) ?? fallback; } catch (_) { return fallback; }
   };

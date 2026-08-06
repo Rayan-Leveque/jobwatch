@@ -37,15 +37,16 @@ Exécutez `jw run` chaque jour via cron :
 0 7 * * * cd ~/jobwatch && .venv/bin/jw run
 ```
 
-### Import des artefacts quotidiens
+### Import des artefacts et résumés
 
-La v0.3 importe les artefacts produits par votre veille quotidienne : offres web, fit LLM,
-candidatures, échéances et documents.
+La v0.4 importe les artefacts produits par votre veille quotidienne : offres web, fit LLM,
+candidatures, échéances, documents et résumés factuels.
 
 ```bash
 .venv/bin/jw ingest-daily --api-json offres.json --config config.yaml            # plancher API
 .venv/bin/jw ingest-daily --digest digest.md --config config.yaml                # offres web + fit LLM
 .venv/bin/jw import-md /chemin/vers/suivi_candidatures.md --config config.yaml
+.venv/bin/jw import-summaries /chemin/vers/resumes.md --config config.yaml
 ```
 
 `jw ingest-daily` exige au moins l'un de `--api-json` ou `--digest`. Le JSON API est le plancher
@@ -56,8 +57,10 @@ Les offres sont dédupliquées par URL et associées à une recherche (`--search
 imports sont atomiques et idempotents : relancer les mêmes artefacts ne crée aucun doublon et ne
 rétrograde jamais un état existant.
 
-Les résumés LLM détaillés restent dans les digests Markdown : la v0.3 importe le fit dans SQLite,
-mais n'y stocke pas encore les synthèses complètes.
+`jw import-summaries` attend des sections `## URL` suivies d'au moins un bullet `- ...`. Chaque URL
+doit correspondre exactement à une offre déjà présente : si l'une manque, tout l'import est annulé
+et aucune offre fantôme n'est créée. Un nouvel import identique ne modifie rien ; si les bullets
+d'une section changent, ils remplacent intégralement le résumé stocké en conservant leur ordre.
 
 ### Migration progressive
 
@@ -70,7 +73,8 @@ SQLite/jobwatch devient la source de vérité.
 ## Tableau de bord local
 
 `jw serve` sert un tableau de bord en lecture seule qui relit la base SQLite à chaque
-chargement de page :
+chargement de page. Les cartes high disposant d'un résumé affichent un bloc `En bref`, repliable en
+cliquant sur la carte ou au clavier :
 
 ```bash
 .venv/bin/jw serve                        # http://127.0.0.1:8000 (défaut)
@@ -129,6 +133,8 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `source` | Sources de job boards configurées et leur dernière exécution |
 | `company` | Sociétés (dédupliquées par nom) |
 | `offer` | Offres d'emploi (dédupliquées par URL et société+titre) |
+| `offer_summary` | Résumé factuel unique associé à une offre existante |
+| `summary_bullet` | Bullets d'un résumé avec leur position explicite |
 | `search` | Recherches enregistrées (mots-clés, localisations, contrat) |
 | `match` | Paire offre/recherche avec état et statut de notification |
 | `application` | Votre candidature pour une offre |
@@ -139,7 +145,7 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 
 - v0.2 : tableau de bord local en lecture seule (`jw serve`).
 - v0.3 : import des artefacts quotidiens (`jw ingest-daily`) et du suivi Markdown (`jw import-md`), fit LLM, échéances et documents.
-- v0.4 : synthèses LLM détaillées stockées dans SQLite.
+- v0.4 : résumés high stockés dans SQLite et affichés dans le tableau de bord.
 
 ## Licence
 

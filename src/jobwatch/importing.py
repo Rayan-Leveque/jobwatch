@@ -42,6 +42,24 @@ class IngestResult:
     fits_updated: int = 0
 
 
+@dataclass(frozen=True)
+class OfferSummary:
+    """Résumé Markdown validé, associé à une offre par son URL exacte."""
+
+    url: str
+    bullets: tuple[str, ...]
+
+
+@dataclass
+class SummaryImportResult:
+    """Bilan déterministe d'un import de résumés."""
+
+    summaries_created: int = 0
+    summaries_updated: int = 0
+    summaries_unchanged: int = 0
+    bullets_written: int = 0
+
+
 FITS = ("high", "medium", "low")
 
 _JSON_OPTIONAL = ("location", "released", "source", "first_seen")
@@ -73,9 +91,135 @@ _KNOWN_SOURCES = {
 def _is_http_url(value: str) -> bool:
     try:
         parsed = urllib.parse.urlparse(value)
+        port = parsed.port
     except ValueError:
         return False
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    return (
+        parsed.scheme in ("http", "https")
+        and bool(parsed.hostname)
+        and (port is None or 0 < port <= 65535)
+        and not any(char.isspace() for char in value)
+    )
+
+
+def parse_summaries_markdown(path: Path) -> list[OfferSummary]:
+    """Analyse intégralement un fichier de sections ``## URL`` et de bullets."""
+    name = str(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ImportError(f"fichier introuvable : {name}") from exc
+    except OSError as exc:
+        raise ImportError(f"impossible de lire {name} : {exc}") from exc
+    return _parse_summaries_text(text, name)
+
+
+def _parse_summaries_text(text: str, name: str) -> list[OfferSummary]:
+    summaries: list[OfferSummary] = []
+    seen_urls: set[str] = set()
+    current_url: str | None = None
+    bullets: list[str] = []
+
+    def finish_section() -> None:
+        if current_url is None:
+            return
+        if not bullets:
+            raise ImportError(f"{name} : aucun bullet pour {current_url}")
+        summaries.append(OfferSummary(current_url, tuple(bullets)))
+
+    for lineno, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if line.startswith("## "):
+            finish_section()
+            url = line[3:].strip()
+            if not _is_http_url(url):
+                raise ImportError(f"{name} : ligne {lineno} : URL HTTP(S) invalide")
+            if url in seen_urls:
+                raise ImportError(f"{name} : ligne {lineno} : URL dupliquée : {url}")
+            seen_urls.add(url)
+            current_url = url
+            bullets = []
+            continue
+        if line.startswith("-"):
+            if current_url is None:
+                raise ImportError(f"{name} : ligne {lineno} : bullet hors section")
+            if not line.startswith("- ") or not line[2:].strip():
+                raise ImportError(f"{name} : ligne {lineno} : bullet vide")
+            bullets.append(line[2:].strip())
+            continue
+        if current_url is not None and line:
+            raise ImportError(f"{name} : ligne {lineno} : contenu inattendu dans la section")
+
+    finish_section()
+    if not summaries:
+        raise ImportError(f"aucun résumé valide dans {name}")
+    return summaries
+
+
+def import_summaries(conn: sqlite3.Connection, path: Path) -> SummaryImportResult:
+    """Importe des résumés atomiquement, sans créer d'offre absente.
+
+    Un résumé inchangé reste intact. Si ses bullets ont changé, ils remplacent
+    intégralement la version stockée tout en conservant leur ordre.
+    """
+    summaries = parse_summaries_markdown(path)
+    urls = [summary.url for summary in summaries]
+    offers: dict[str, int] = {}
+    for chunk in _chunks(urls):
+        placeholders = ",".join("?" * len(chunk))
+        for row in conn.execute(
+            f"SELECT id, url FROM offer WHERE url IN ({placeholders})", chunk
+        ):
+            offers[str(row["url"])] = int(row["id"])
+    missing = [url for url in urls if url not in offers]
+    if missing:
+        rendered = "\n".join(f"- {url}" for url in missing)
+        raise ImportError(f"offre(s) absente(s) de la base :\n{rendered}")
+
+    try:
+        result = _write_summaries(conn, summaries, offers)
+    except sqlite3.Error as exc:
+        conn.rollback()
+        raise ImportError(f"erreur SQLite pendant l'import : {exc}") from exc
+    conn.commit()
+    return result
+
+
+def _write_summaries(
+    conn: sqlite3.Connection,
+    summaries: list[OfferSummary],
+    offers: dict[str, int],
+) -> SummaryImportResult:
+    result = SummaryImportResult()
+    for summary in summaries:
+        offer_id = offers[summary.url]
+        stored = conn.execute(
+            "SELECT id FROM offer_summary WHERE offer_id = ?", (offer_id,)
+        ).fetchone()
+        if stored is None:
+            cur = conn.execute("INSERT INTO offer_summary (offer_id) VALUES (?)", (offer_id,))
+            summary_id = int(cur.lastrowid)
+            result.summaries_created += 1
+        else:
+            summary_id = int(stored["id"])
+            existing = tuple(
+                str(row["text"])
+                for row in conn.execute(
+                    "SELECT text FROM summary_bullet WHERE summary_id = ? ORDER BY position",
+                    (summary_id,),
+                )
+            )
+            if existing == summary.bullets:
+                result.summaries_unchanged += 1
+                continue
+            conn.execute("DELETE FROM summary_bullet WHERE summary_id = ?", (summary_id,))
+            result.summaries_updated += 1
+        conn.executemany(
+            "INSERT INTO summary_bullet (summary_id, position, text) VALUES (?, ?, ?)",
+            ((summary_id, position, bullet) for position, bullet in enumerate(summary.bullets)),
+        )
+        result.bullets_written += len(summary.bullets)
+    return result
 
 
 def _is_iso_date(value: str | None) -> bool:

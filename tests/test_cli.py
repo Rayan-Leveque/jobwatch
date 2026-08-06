@@ -522,3 +522,68 @@ def test_import_md_invalid_line_fails_cleanly(runner: CliRunner, tmp_path: Path)
     for table in ("offer", "match", "search", "source", "company"):
         assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
     conn.close()
+
+
+# --- import-summaries -----------------------------------------------------
+
+
+def test_import_summaries_help_and_missing_file(runner: CliRunner, tmp_path: Path) -> None:
+    help_result = runner.invoke(cli, ["import-summaries", "--help"])
+    assert help_result.exit_code == 0
+    assert "PATH" in help_result.output
+    assert "--config" in help_result.output
+    config = _write_config(tmp_path, tmp_path / "jw.db")
+
+    result = runner.invoke(
+        cli,
+        ["import-summaries", str(tmp_path / "absent.md"), "--config", str(config)],
+    )
+    assert result.exit_code == 1
+    assert result.output == f"erreur : fichier introuvable : {tmp_path / 'absent.md'}\n"
+
+
+def test_import_summaries_reports_created_then_unchanged(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "jw.db"
+    _seed_match(db_path)
+    config = _write_config(tmp_path, db_path)
+    summaries = tmp_path / "resumes.md"
+    summaries.write_text(
+        "## https://example.com/job\n- Premier fait\n- Deuxième fait\n"
+    )
+    args = ["import-summaries", str(summaries), "--config", str(config)]
+
+    first = runner.invoke(cli, args)
+    second = runner.invoke(cli, args)
+
+    assert first.exit_code == 0, first.output
+    assert first.output == (
+        "1 résumé(s) créé(s), 0 remplacé(s), 0 inchangé(s), 2 puce(s) écrite(s)\n"
+    )
+    assert second.exit_code == 0, second.output
+    assert second.output == (
+        "0 résumé(s) créé(s), 0 remplacé(s), 1 inchangé(s), 0 puce(s) écrite(s)\n"
+    )
+
+
+def test_import_summaries_missing_offer_fails_without_phantom_offer(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    summaries = tmp_path / "resumes.md"
+    summaries.write_text("## https://example.com/absent\n- Fait\n")
+
+    result = runner.invoke(
+        cli, ["import-summaries", str(summaries), "--config", str(config)]
+    )
+
+    assert result.exit_code == 1
+    assert result.output == (
+        "erreur : offre(s) absente(s) de la base :\n- https://example.com/absent\n"
+    )
+    conn = connect(db_path)
+    assert conn.execute("SELECT count(*) FROM offer").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM offer_summary").fetchone()[0] == 0
+    conn.close()

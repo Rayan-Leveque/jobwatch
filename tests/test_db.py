@@ -22,6 +22,8 @@ EXPECTED_TABLES = {
     "source",
     "company",
     "offer",
+    "offer_summary",
+    "summary_bullet",
     "search",
     "match",
     "application",
@@ -138,6 +140,10 @@ def test_init_db_migrates_v02_database_without_data_loss() -> None:
     match_cols = {row["name"] for row in conn.execute("PRAGMA table_info(match)")}
     assert "deadline" in offer_cols
     assert "fit" in match_cols
+    assert conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' "
+        "AND name IN ('offer_summary', 'summary_bullet')"
+    ).fetchone()[0] == 2
     conn.close()
 
 
@@ -161,6 +167,34 @@ def test_init_db_twice_is_idempotent(conn: sqlite3.Connection) -> None:
     assert offer["deadline"] is None
     match = conn.execute("SELECT * FROM match WHERE id = 1").fetchone()
     assert match["fit"] is None
+    assert conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' "
+        "AND name IN ('offer_summary', 'summary_bullet')"
+    ).fetchone()[0] == 2
+
+
+def test_init_db_migrates_v03_database_repeatably() -> None:
+    conn = connect(":memory:")
+    conn.executescript(V02_SCHEMA)
+    conn.execute("ALTER TABLE offer ADD COLUMN deadline TEXT")
+    conn.execute("ALTER TABLE match ADD COLUMN fit TEXT")
+    conn.execute("INSERT INTO source (type, name) VALUES ('test', 's1')")
+    conn.execute(
+        "INSERT INTO offer (source_id, title, url, deadline) "
+        "VALUES (1, 'Engineer', 'https://a/1', '2026-09-01')"
+    )
+    conn.commit()
+
+    init_db(conn)
+    init_db(conn)
+
+    assert conn.execute("SELECT deadline FROM offer WHERE id = 1").fetchone()[0] == "2026-09-01"
+    tables = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    assert {"offer_summary", "summary_bullet"} <= tables
+    conn.close()
 
 
 def test_foreign_keys_are_enforced(conn: sqlite3.Connection) -> None:

@@ -184,6 +184,27 @@ def import_md(config_path: Path | None, path: Path, search_name: str) -> None:
     )
 
 
+@cli.command("import-summaries")
+@click.argument("path", type=click.Path(path_type=Path, dir_okay=False))
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def import_summaries(config_path: Path | None, path: Path) -> None:
+    """Importe des résumés Markdown pour les offres déjà en base."""
+    config = _require_config(config_path)
+    conn = _open_db(config)
+    try:
+        result = importing.import_summaries(conn, path)
+    except importing.ImportError as exc:
+        _fatal(str(exc))
+    finally:
+        conn.close()
+    click.echo(
+        f"{result.summaries_created} résumé(s) créé(s), "
+        f"{result.summaries_updated} remplacé(s), "
+        f"{result.summaries_unchanged} inchangé(s), "
+        f"{result.bullets_written} puce(s) écrite(s)"
+    )
+
+
 @cli.command("list")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 @click.option("--state", "state", type=click.Choice(MATCH_STATES), default="new")
