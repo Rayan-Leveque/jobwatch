@@ -3,7 +3,7 @@
 Observateur d'offres d'emploi auto-hébergé. Il collecte les offres d'emploi via les API des
 job boards, les déduplique dans une base SQLite locale, les met en correspondance avec vos
 recherches enregistrées, envoie un digest des nouveaux matchs par notification, et vous permet
-de suivre vos candidatures depuis la ligne de commande.
+de suivre vos candidatures depuis la ligne de commande ou via un tableau de bord web local.
 
 Flux : **collecter -> dédupliquer -> matcher -> notifier -> suivre**.
 
@@ -19,6 +19,7 @@ python3 -m venv .venv
 .venv/bin/jw init                # crée config.yaml + une base de données vide
 # éditez config.yaml : décommentez et remplissez les blocs sources et notify, puis :
 .venv/bin/jw run                # collecter, matcher, notifier
+.venv/bin/jw serve              # tableau de bord web local : http://127.0.0.1:8000
 .venv/bin/jw list               # affiche les nouveaux matchs
 .venv/bin/jw apply 1 --note "cv envoyé"
 .venv/bin/jw log 1 interview -m "entretien téléphonique"
@@ -35,6 +36,22 @@ Exécutez `jw run` chaque jour via cron :
 ```
 0 7 * * * cd ~/jobwatch && .venv/bin/jw run
 ```
+
+## Tableau de bord local
+
+`jw serve` sert un tableau de bord en lecture seule qui relit la base SQLite à chaque
+chargement de page :
+
+```bash
+.venv/bin/jw serve                        # http://127.0.0.1:8000 (défaut)
+.venv/bin/jw serve --port 9000            # autre port
+.venv/bin/jw serve --host 0.0.0.0         # accessible depuis d'autres machines
+```
+
+`--host 0.0.0.0` rend le tableau de bord accessible à toutes les machines joignables sur
+votre réseau. Le tableau de bord reste en lecture seule, mais il expose vos offres et
+candidatures : réfléchissez à qui y a accès. Préférez l'accès local (`127.0.0.1`, le défaut)
+ou une adresse privée, et ne le publiez pas tel quel sur Internet.
 
 ## Référence de configuration
 

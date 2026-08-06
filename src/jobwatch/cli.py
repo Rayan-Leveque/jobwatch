@@ -15,6 +15,7 @@ from jobwatch.config import Config, ConfigError, example_config_text, load_confi
 from jobwatch.db import connect, init_db
 from jobwatch.digest import send_digest
 from jobwatch.matching import run_matching, sync_searches
+from jobwatch.serve import ServeError, serve_http
 
 logger = logging.getLogger(__name__)
 
@@ -338,6 +339,21 @@ def apps(config_path: Path | None) -> None:
             f"{_clip(row['title'], 45):<45} {_clip(row['status'], 10):<10} "
             f"{str(row['status_at'])[:10]:<10}"
         )
+
+
+@cli.command()
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+@click.option("--host", "host", default="127.0.0.1", show_default=True, help="adresse d'écoute")
+@click.option("--port", "port", type=int, default=8000, show_default=True, help="port d'écoute")
+def serve(config_path: Path | None, host: str, port: int) -> None:
+    """Sert un tableau de bord web local en lecture seule."""
+    config = _require_config(config_path)
+    conn = _open_db(config)
+    conn.close()
+    try:
+        serve_http(config.db, host, port)
+    except ServeError as exc:
+        _fatal(str(exc))
 
 
 def main() -> None:
