@@ -24,7 +24,7 @@ DEFAULT_CONFIG = "config.yaml"
 FALLBACK_CONFIG = "~/.config/jobwatch/config.yaml"
 
 EVENT_TYPES = ("applied", "follow_up", "interview", "rejected", "offer")
-MATCH_STATES = ("new", "seen", "applied", "discarded")
+MATCH_STATES = ("new", "seen", "later", "applied", "discarded")
 
 
 class CliError(Exception):
@@ -386,7 +386,10 @@ def discard(config_path: Path | None, match_id: int) -> None:
     conn = _open_db(config)
     try:
         _require_match(conn, match_id)
-        conn.execute("UPDATE match SET state = 'discarded' WHERE id = ?", (match_id,))
+        conn.execute(
+            "UPDATE match SET state = 'discarded', discarded_at = datetime('now') WHERE id = ?",
+            (match_id,),
+        )
         conn.commit()
     finally:
         conn.close()

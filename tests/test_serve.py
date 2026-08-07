@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import sqlite3
 import threading
@@ -161,6 +162,67 @@ def test_placement_of_new_seen_applied_and_discarded(conn: sqlite3.Connection) -
     assert "AppCo" not in _section_html(page, "seen")
     assert "DropCo" not in page
     assert "via ai-paris" in _section_html(page, "new")
+
+
+def test_placement_of_later_and_recently_discarded(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="LaterCo", title="Later Role", state="later")
+    trash_id, _ = _seed_offer(conn, company="TrashCo", title="Trash Role", state="discarded")
+    conn.execute(
+        "UPDATE match SET discarded_at = datetime('now', '-1 days') WHERE id = ?", (trash_id,)
+    )
+    conn.commit()
+
+    page = render_page(conn)
+    assert "LaterCo" in _section_html(page, "later")
+    assert "LaterCo" not in _section_html(page, "new")
+    assert "LaterCo" not in _section_html(page, "seen")
+    assert "LaterCo" not in _section_html(page, "priority")
+    assert "LaterCo" not in _section_html(page, "applied")
+    assert "LaterCo" not in _section_html(page, "discarded")
+    assert "TrashCo" in _section_html(page, "discarded")
+    assert "TrashCo" not in _section_html(page, "new")
+    assert "TrashCo" not in _section_html(page, "seen")
+    assert "TrashCo" not in _section_html(page, "later")
+    assert "TrashCo" not in _section_html(page, "applied")
+
+
+def test_discarded_matches_older_than_30_days_are_hidden_but_row_kept(
+    conn: sqlite3.Connection,
+) -> None:
+    inside_id, _ = _seed_offer(conn, company="InsideCo", title="Inside", state="discarded")
+    conn.execute(
+        "UPDATE match SET discarded_at = datetime('now', '-29 days') WHERE id = ?", (inside_id,)
+    )
+    outside_id, _ = _seed_offer(conn, company="OutsideCo", title="Outside", state="discarded")
+    conn.execute(
+        "UPDATE match SET discarded_at = datetime('now', '-31 days') WHERE id = ?", (outside_id,)
+    )
+    conn.commit()
+
+    page = render_page(conn)
+    assert "InsideCo" in _section_html(page, "discarded")
+    assert "OutsideCo" not in page
+
+    row = conn.execute("SELECT state, discarded_at FROM match WHERE id = ?", (outside_id,)).fetchone()
+    assert row["state"] == "discarded"
+    assert row["discarded_at"] is not None
+
+
+def test_action_buttons_rendered_for_actionable_sections_only(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="NewCo", title="New Role", state="new")
+    _seed_offer(conn, company="LaterCo", title="Later Role", state="later")
+    trash_id, _ = _seed_offer(conn, company="TrashCo", title="Trash Role", state="discarded")
+    conn.execute("UPDATE match SET discarded_at = datetime('now') WHERE id = ?", (trash_id,))
+    app_match_id, app_offer_id = _seed_offer(conn, company="AppCo", title="App Role", state="new")
+    _apply(conn, app_match_id, app_offer_id)
+    conn.commit()
+
+    page = render_page(conn)
+    assert 'class="card-action action-later"' in _section_html(page, "new")
+    assert 'class="card-action action-later"' in _section_html(page, "later")
+    assert 'class="card-action action-later"' not in _section_html(page, "discarded")
+    assert 'class="card-action action-later"' not in _section_html(page, "applied")
+    assert 'class="card-action action-discard"' in _section_html(page, "new")
 
 
 def test_match_with_application_excluded_from_new(conn: sqlite3.Connection) -> None:
@@ -564,6 +626,142 @@ def test_http_root_serves_page(tmp_path: Path) -> None:
         assert body.startswith("<!DOCTYPE html>")
         assert "Nouveaux matchs" in body
         assert "Acme" in body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _post(
+    port: int, path: str, body: bytes | None = None, content_type: str | None = None
+) -> tuple[int, dict[str, str], str]:
+    url = f"http://127.0.0.1:{port}{path}"
+    headers = {"Content-Type": content_type} if content_type else {}
+    req = urllib.request.Request(url, data=body or b"", method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, dict(resp.headers), resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, dict(exc.headers), exc.read().decode("utf-8")
+
+
+def test_post_later_updates_match_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="new")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, headers, body = _post(port, f"/match/{match_id}/later")
+        assert status == 200
+        assert "application/json" in headers["Content-Type"]
+        assert json.loads(body) == {"ok": True}
+
+        check = connect(db_path)
+        row = check.execute("SELECT state FROM match WHERE id = ?", (match_id,)).fetchone()
+        check.close()
+        assert row["state"] == "later"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_discard_matches_cli_discard_db_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="new")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, _headers, _body = _post(port, f"/match/{match_id}/discard")
+        assert status == 200
+
+        check = connect(db_path)
+        row = check.execute(
+            "SELECT state, discarded_at FROM match WHERE id = ?", (match_id,)
+        ).fetchone()
+        check.close()
+        assert row["state"] == "discarded"
+        assert row["discarded_at"] is not None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_restore_reverts_state_and_preserves_other_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(
+        connection, company="Acme", title="Role", state="seen", fit="high", deadline="2026-09-01"
+    )
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        _post(port, f"/match/{match_id}/discard")
+        status, _headers, _body = _post(
+            port,
+            f"/match/{match_id}/restore",
+            body=json.dumps({"state": "seen"}).encode("utf-8"),
+            content_type="application/json",
+        )
+        assert status == 200
+
+        check = connect(db_path)
+        row = check.execute("SELECT * FROM match WHERE id = ?", (match_id,)).fetchone()
+        check.close()
+        assert row["state"] == "seen"
+        assert row["discarded_at"] is None
+        assert row["fit"] == "high"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_restore_rejects_disallowed_target_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="new")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, _headers, _body = _post(
+            port,
+            f"/match/{match_id}/restore",
+            body=json.dumps({"state": "discarded"}).encode("utf-8"),
+            content_type="application/json",
+        )
+        assert status == 400
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_invalid_match_id_rejected_safely(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        for path in ("/match/abc/later", "/match/1.5/discard", "/match/-1/later", "/match//later"):
+            status, _headers, _body = _post(port, path)
+            assert status == 404
+
+        status, _headers, _body = _post(port, "/match/999999/later")
+        assert status == 404
     finally:
         server.shutdown()
         server.server_close()

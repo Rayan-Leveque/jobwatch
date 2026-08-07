@@ -227,6 +227,22 @@ def test_apply_flow_on_seeded_db(runner: CliRunner, tmp_path: Path) -> None:
     _apply_flow(runner, config)
 
 
+def test_discard_sets_state_and_discarded_at(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    _seed_match(db_path)
+    config = _write_config(tmp_path, db_path)
+
+    result = runner.invoke(cli, ["discard", "1", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert "match 1 écarté" in result.output
+
+    conn = connect(db_path)
+    match = conn.execute("SELECT state, discarded_at FROM match WHERE id = 1").fetchone()
+    conn.close()
+    assert match["state"] == "discarded"
+    assert match["discarded_at"] is not None
+
+
 def test_discard_and_log_errors(runner: CliRunner, tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     config = _write_config(tmp_path, db_path)

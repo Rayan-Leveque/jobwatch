@@ -53,10 +53,11 @@ CREATE TABLE IF NOT EXISTS match (
   id INTEGER PRIMARY KEY,
   search_id INTEGER NOT NULL REFERENCES search(id),
   offer_id INTEGER NOT NULL REFERENCES offer(id),
-  state TEXT NOT NULL DEFAULT 'new', -- 'new' | 'seen' | 'discarded' | 'applied'
+  state TEXT NOT NULL DEFAULT 'new', -- 'new' | 'seen' | 'later' | 'discarded' | 'applied'
   notified_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   fit TEXT,                          -- 'high' | 'medium' | 'low' | NULL = unknown
+  discarded_at TEXT,                 -- horodatage du passage à 'discarded' ; NULL sinon
   UNIQUE(search_id, offer_id)
 );
 CREATE TABLE IF NOT EXISTS application (

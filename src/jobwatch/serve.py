@@ -1,13 +1,17 @@
-"""Tableau de bord web local en lecture seule, servi par `jw serve`.
+"""Tableau de bord web local servi par `jw serve`.
 
 La page est regénérée à chaque requête GET / depuis l'état actuel de la base.
 Le rendu est pur (`render_page`) et le serveur HTTP n'utilise que la
-bibliothèque standard.
+bibliothèque standard. Deux actions HTTP (POST /match/<id>/later et
+/match/<id>/discard, plus /match/<id>/restore pour l'annulation) mutent
+l'état d'un match ; aucune authentification n'est ajoutée, le périmètre
+Tailscale est la frontière de confiance.
 """
 
 from __future__ import annotations
 
 import html
+import json
 import re
 import sqlite3
 from datetime import UTC, datetime
@@ -18,6 +22,9 @@ from urllib.parse import urlsplit
 import click
 
 from jobwatch.db import connect
+
+RESTORE_STATES = ("new", "seen")
+_MATCH_ACTION_RE = re.compile(r"^/match/(\d+)/(later|discard|restore)$")
 
 STATUS_LABELS = {
     "applied": "Candidature envoyée",
@@ -87,6 +94,42 @@ def _priority_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         "WHERE m.fit = 'high' AND m.state IN ('new', 'seen') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
         "ORDER BY o.collected_at DESC, m.id DESC"
+    ).fetchall()
+
+
+def _later_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
+        "       s.name AS search_name, "
+        "       c.name AS company, o.title AS title, o.location AS location, "
+        "       o.contract AS contract, o.platform AS platform, o.url AS url, "
+        "       o.collected_at AS collected_at, o.deadline AS deadline "
+        "FROM match m "
+        "JOIN search s ON s.id = m.search_id "
+        "JOIN offer o ON o.id = m.offer_id "
+        "LEFT JOIN company c ON c.id = o.company_id "
+        "WHERE m.state = 'later' AND NOT EXISTS "
+        "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+        "ORDER BY CASE m.fit WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
+        "         WHEN 'low' THEN 2 ELSE 3 END, "
+        "         o.collected_at DESC, m.id DESC"
+    ).fetchall()
+
+
+def _discarded_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Matchs écartés depuis moins de 30 jours ; filtre d'affichage pur, jamais de suppression."""
+    return conn.execute(
+        "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
+        "       s.name AS search_name, "
+        "       c.name AS company, o.title AS title, o.location AS location, "
+        "       o.contract AS contract, o.platform AS platform, o.url AS url, "
+        "       o.collected_at AS collected_at, o.deadline AS deadline "
+        "FROM match m "
+        "JOIN search s ON s.id = m.search_id "
+        "JOIN offer o ON o.id = m.offer_id "
+        "LEFT JOIN company c ON c.id = o.company_id "
+        "WHERE m.state = 'discarded' AND m.discarded_at > datetime('now', '-30 days') "
+        "ORDER BY m.discarded_at DESC, m.id DESC"
     ).fetchall()
 
 
@@ -251,8 +294,28 @@ def _content_panel(row: sqlite3.Row, markdown: str | None, prefix: str) -> tuple
     return button, panel
 
 
-def _match_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> str:
-    cls = "new" if row["state"] == "new" else "seen"
+def _row_class(state: object) -> str:
+    value = str(state)
+    return value if value in ("new", "seen", "later", "discarded") else "seen"
+
+
+def _card_actions(row: sqlite3.Row) -> str:
+    match_id = int(row["id"])
+    prev_state = html.escape(str(row["state"]), quote=True)
+    return (
+        '<div class="card-actions">'
+        f'<button class="card-action action-later" type="button" data-match-id="{match_id}" '
+        f'data-prev-state="{prev_state}" data-action="later">Plus tard</button>'
+        f'<button class="card-action action-discard" type="button" data-match-id="{match_id}" '
+        f'data-prev-state="{prev_state}" data-action="discard">Écarter</button>'
+        "</div>"
+    )
+
+
+def _match_card(
+    row: sqlite3.Row, bullets: list[str], content: str | None, actions: bool = False
+) -> str:
+    cls = _row_class(row["state"])
     company = html.escape(str(row["company"] or "Société inconnue"))
     title = html.escape(str(row["title"] or ""))
     pill = _fit_pill(row["fit"])
@@ -261,12 +324,14 @@ def _match_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> st
     summary_class = " has-summary" if summary else ""
     chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
     content_button, content_panel = _content_panel(row, content, "match")
+    actions_html = _card_actions(row) if actions else ""
     return (
         f'<article class="row row-{cls}{summary_class}">{button}<div class="body">'
         f'<div class="card-topline"><div class="company">{company}</div>'
         f'<div class="card-badges">{pill}{chevron}</div></div>'
         f'<div class="role">{title}</div>'
-        f'<div class="meta">{meta}</div></div>{summary}{content_button}{content_panel}</article>'
+        f'<div class="meta">{meta}</div></div>{actions_html}{summary}{content_button}{content_panel}'
+        "</article>"
     )
 
 
@@ -292,6 +357,9 @@ def _application_card(row: sqlite3.Row, bullets: list[str], content: str | None)
     )
 
 
+ACTIONABLE_SECTIONS = {"priority", "new", "seen", "later"}
+
+
 def _card(
     row: sqlite3.Row,
     key: str,
@@ -302,7 +370,7 @@ def _card(
     content = contents.get(int(row["offer_id"]))
     if key == "applied":
         return _application_card(row, bullets, content)
-    return _match_card(row, bullets, content)
+    return _match_card(row, bullets, content, actions=key in ACTIONABLE_SECTIONS)
 
 
 def _section(
@@ -338,9 +406,11 @@ def render_page(conn: sqlite3.Connection) -> str:
     priority = _priority_matches(conn)
     new = _matches(conn, "new")
     seen = _matches(conn, "seen")
+    later = _later_matches(conn)
+    discarded = _discarded_matches(conn)
     applied = _applications(conn)
     offer_ids = sorted(
-        {int(row["offer_id"]) for row in (*priority, *new, *seen, *applied)}
+        {int(row["offer_id"]) for row in (*priority, *new, *seen, *later, *discarded, *applied)}
     )
     summaries = _summary_bullets(conn, offer_ids)
     contents = _offer_contents(conn, offer_ids)
@@ -359,6 +429,14 @@ def render_page(conn: sqlite3.Connection) -> str:
                 "Aucun match parcouru pour l'instant.", False, summaries, contents,
             ),
             _section(
+                "later", "À candidater", "Mis de côté pour plus tard", later,
+                "Aucune offre à candidater plus tard pour l'instant.", False, summaries, contents,
+            ),
+            _section(
+                "discarded", "Corbeille", "Écartées dans les 30 derniers jours", discarded,
+                "Aucune offre écartée récemment.", False, summaries, contents,
+            ),
+            _section(
                 "applied", "Candidatures", "Dernier statut connu", applied,
                 "Aucune candidature pour l'instant.", False, summaries, contents,
             ),
@@ -366,7 +444,7 @@ def render_page(conn: sqlite3.Connection) -> str:
     )
     priority_new = sum(row["state"] == "new" for row in priority)
     priority_seen = len(priority) - priority_new
-    total = len(priority) + len(new) + len(seen) + len(applied)
+    total = len(priority) + len(new) + len(seen) + len(later) + len(discarded) + len(applied)
     stamp = datetime.now(UTC).astimezone().strftime("%d/%m/%Y %H:%M")
     return _page_template(
         body=body, total=total,
@@ -401,6 +479,69 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
                 self._send_text(500, f"erreur base de données : {exc}\n")
                 return
             self._send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
+
+        def do_POST(self) -> None:
+            path = urlsplit(self.path).path
+            match = _MATCH_ACTION_RE.match(path)
+            if not match:
+                self._send_text(404, "404 Not Found\n")
+                return
+            match_id = int(match.group(1))
+            action = match.group(2)
+            target_state: str | None = None
+            if action == "restore":
+                body = self._read_json_body()
+                target_state = body.get("state") if isinstance(body, dict) else None
+                if target_state not in RESTORE_STATES:
+                    self._send_json(400, {"error": "état de restauration invalide"})
+                    return
+            try:
+                conn = connect(db_path)
+                try:
+                    if conn.execute(
+                        "SELECT 1 FROM match WHERE id = ?", (match_id,)
+                    ).fetchone() is None:
+                        self._send_text(404, "404 Not Found\n")
+                        return
+                    if action == "later":
+                        conn.execute(
+                            "UPDATE match SET state = 'later', discarded_at = NULL WHERE id = ?",
+                            (match_id,),
+                        )
+                    elif action == "discard":
+                        conn.execute(
+                            "UPDATE match SET state = 'discarded', "
+                            "discarded_at = datetime('now') WHERE id = ?",
+                            (match_id,),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE match SET state = ?, discarded_at = NULL WHERE id = ?",
+                            (target_state, match_id),
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            self._send_json(200, {"ok": True})
+
+        def _read_json_body(self) -> object:
+            try:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                return None
+            if length <= 0:
+                return None
+            raw = self.rfile.read(length)
+            try:
+                return json.loads(raw)
+            except ValueError:
+                return None
+
+        def _send_json(self, status: int, payload: dict) -> None:
+            self._send_bytes(status, json.dumps(payload).encode("utf-8"), "application/json")
 
         def _send_bytes(self, status: int, data: bytes, content_type: str) -> None:
             self.send_response(status)
@@ -564,6 +705,8 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .section-new .section-dot { background:var(--accent); box-shadow:0 0 0 5px var(--accent-soft) }
 .section-priority .section-dot { background:var(--amber); box-shadow:0 0 0 5px var(--amber-soft) }
 .section-seen .section-dot { background:var(--blue); box-shadow:0 0 0 5px var(--blue-soft) }
+.section-later .section-dot { background:var(--amber); box-shadow:0 0 0 5px var(--amber-soft) }
+.section-discarded .section-dot { background:var(--danger); box-shadow:0 0 0 5px var(--danger-soft) }
 .section-applied .section-dot { background:var(--violet); box-shadow:0 0 0 5px var(--violet-soft) }
 .section-title, .section-subtitle { display:block }
 .section-title { overflow:hidden; color:var(--fg); font-size:.94rem; font-weight:740;
@@ -580,12 +723,15 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .row { position:relative; min-height:88px; padding:15px 14px 14px 17px; border:1px solid var(--line);
   border-radius:var(--radius-lg); background:var(--surface-2); overflow:hidden;
   box-shadow:0 1px 0 rgba(255,255,255,.025) inset; transition:transform .18s ease,
-  border-color .18s ease, background .18s ease }
+  border-color .18s ease, background .18s ease, opacity .22s ease }
 .row::before { content:""; position:absolute; inset:13px auto 13px 0; width:3px; border-radius:0 4px 4px 0;
   background:var(--muted-2) }
 .row.row-new::before { background:var(--accent) }
 .row.row-seen::before { background:var(--blue) }
+.row.row-later::before { background:var(--amber) }
+.row.row-discarded::before { background:var(--danger) }
 .row.row-applied::before { background:var(--violet) }
+.row.row-removing { opacity:0; transform:translateX(18px) }
 .row .body { position:relative; z-index:2; min-width:0; pointer-events:none }
 .row.has-summary { cursor:pointer }
 .card-toggle { position:absolute; z-index:1; inset:0; width:100%; padding:0; border:0;
@@ -649,6 +795,27 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .content-panel[hidden] { display:none }
 .content-panel p { margin:0 0 10px }
 .content-panel p:last-child { margin-bottom:0 }
+.card-actions { position:relative; z-index:3; display:flex; gap:8px; margin:12px 13px 0;
+  pointer-events:auto }
+.card-action { min-height:38px; padding:0 14px; display:inline-flex; align-items:center;
+  border:1px solid var(--line); border-radius:11px; background:var(--surface); color:var(--fg);
+  font-size:.71rem; font-weight:700; letter-spacing:.02em; cursor:pointer;
+  transition:border-color .15s ease, background .15s ease }
+.action-later { color:var(--amber) }
+.action-discard { color:var(--danger) }
+.card-action:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
+@media (hover:hover) {
+  .card-action:hover { border-color:var(--line-strong); background:var(--surface-hover) }
+}
+.undo-toast { display:flex; align-items:center; justify-content:space-between; gap:12px;
+  color:var(--muted); font-size:.78rem }
+.undo-toast .undo-btn { flex:none; min-height:38px; padding:0 14px; border:1px solid var(--line);
+  border-radius:11px; color:var(--fg); background:var(--surface); font-size:.72rem; font-weight:700;
+  cursor:pointer; transition:border-color .15s ease, background .15s ease }
+.undo-toast .undo-btn:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
+@media (hover:hover) {
+  .undo-toast .undo-btn:hover { border-color:var(--line-strong); background:var(--surface-hover) }
+}
 .empty-note { margin:0; padding:14px 13px; border:1px dashed var(--line-strong);
   border-radius:13px; color:var(--muted); background:var(--surface-2);
   font-size:.75rem; overflow-wrap:anywhere }
@@ -779,6 +946,62 @@ _JS = """\
   document.addEventListener('scroll', observeDock, {passive:true});
   observeDock();
   apply();
+
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const UNDO_WINDOW_MS = 7000;
+  const updateSectionCount = row => {
+    const section = row.closest('.section');
+    if (!section) return;
+    const count = section.querySelector('.count');
+    if (count && !q.value.trim()) count.textContent = String(section.querySelectorAll('.row').length);
+  };
+  const showUndo = (row, matchId, prevState) => {
+    const toast = document.createElement('article');
+    toast.className = 'row undo-toast';
+    const label = document.createElement('span');
+    label.textContent = 'Retirée du tableau de bord.';
+    const undoBtn = document.createElement('button');
+    undoBtn.type = 'button';
+    undoBtn.className = 'undo-btn';
+    undoBtn.textContent = 'Annuler';
+    toast.append(label, undoBtn);
+    row.replaceWith(toast);
+    rows.splice(rows.indexOf(row), 1, toast);
+    updateSectionCount(toast);
+    const timer = setTimeout(() => {
+      toast.remove();
+      rows.splice(rows.indexOf(toast), 1);
+      updateSectionCount(toast);
+    }, UNDO_WINDOW_MS);
+    undoBtn.addEventListener('click', () => {
+      clearTimeout(timer);
+      fetch(`/match/${matchId}/restore`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({state: prevState}),
+      }).then(resp => {
+        if (resp.ok) location.reload();
+      });
+    });
+  };
+  const actionButtons = [...document.querySelectorAll('.card-action')];
+  actionButtons.forEach(button => {
+    button.addEventListener('click', () => {
+      const row = button.closest('.row');
+      const matchId = button.dataset.matchId;
+      const action = button.dataset.action;
+      const prevState = button.dataset.prevState;
+      fetch(`/match/${matchId}/${action}`, {method: 'POST'}).then(resp => {
+        if (!resp.ok) return;
+        if (reduceMotion) {
+          showUndo(row, matchId, prevState);
+          return;
+        }
+        row.classList.add('row-removing');
+        row.addEventListener('transitionend', () => showUndo(row, matchId, prevState), {once: true});
+      });
+    });
+  });
 })();
 """
 

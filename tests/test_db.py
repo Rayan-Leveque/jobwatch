@@ -47,6 +47,12 @@ def test_init_db_creates_v03_columns(conn: sqlite3.Connection) -> None:
     assert "fit" in match_cols
 
 
+def test_init_db_creates_v04_discarded_at_column(conn: sqlite3.Connection) -> None:
+    match_cols = {row["name"] for row in conn.execute("PRAGMA table_info(match)")}
+    assert "discarded_at" in match_cols
+    assert "fit" in match_cols
+
+
 V02_SCHEMA = """
 CREATE TABLE source (
   id INTEGER PRIMARY KEY,
@@ -194,6 +200,37 @@ def test_init_db_migrates_v03_database_repeatably() -> None:
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     assert {"offer_summary", "summary_bullet"} <= tables
+    conn.close()
+
+
+def test_init_db_migrates_v03_database_to_discarded_at_without_data_loss() -> None:
+    """Deux migrations distinctes de la même table (fit, discarded_at) doivent coexister."""
+    conn = connect(":memory:")
+    conn.executescript(V02_SCHEMA)
+    conn.execute("ALTER TABLE offer ADD COLUMN deadline TEXT")
+    conn.execute("ALTER TABLE match ADD COLUMN fit TEXT")
+    conn.execute("INSERT INTO source (type, name) VALUES ('test', 's1')")
+    conn.execute(
+        "INSERT INTO offer (source_id, title, url) VALUES (1, 'Engineer', 'https://a/1')"
+    )
+    conn.execute(
+        "INSERT INTO search (name, include_json, exclude_json, locations_json) "
+        "VALUES ('dev', '[]', '[]', '[]')"
+    )
+    conn.execute(
+        "INSERT INTO match (search_id, offer_id, state, fit) VALUES (1, 1, 'discarded', 'high')"
+    )
+    conn.commit()
+
+    init_db(conn)
+    init_db(conn)
+
+    match = conn.execute("SELECT * FROM match WHERE id = 1").fetchone()
+    assert match["state"] == "discarded"
+    assert match["fit"] == "high"
+    assert match["discarded_at"] is None
+    match_cols = {row["name"] for row in conn.execute("PRAGMA table_info(match)")}
+    assert {"fit", "discarded_at"} <= match_cols
     conn.close()
 
 
