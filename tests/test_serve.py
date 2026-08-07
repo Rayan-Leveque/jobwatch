@@ -797,6 +797,285 @@ def test_post_invalid_match_id_rejected_safely(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
+def _json_post(port: int, path: str, payload: dict) -> tuple[int, dict[str, str], str]:
+    return _post(
+        port, path, body=json.dumps(payload).encode("utf-8"), content_type="application/json"
+    )
+
+
+def _apply_state(db_path: Path, match_id: int) -> dict[str, object]:
+    conn = connect(db_path)
+    match = conn.execute("SELECT state FROM match WHERE id = ?", (match_id,)).fetchone()
+    application = conn.execute(
+        "SELECT id, note FROM application WHERE match_id = ?", (match_id,)
+    ).fetchone()
+    documents = []
+    events = []
+    if application is not None:
+        documents = conn.execute(
+            "SELECT type, path FROM document WHERE application_id = ? ORDER BY type",
+            (application["id"],),
+        ).fetchall()
+        events = conn.execute(
+            "SELECT type, comment FROM event WHERE application_id = ? ORDER BY id",
+            (application["id"],),
+        ).fetchall()
+    conn.close()
+    return {
+        "state": match["state"],
+        "application": application,
+        "documents": [(row["type"], row["path"]) for row in documents],
+        "events": [(row["type"], row["comment"]) for row in events],
+    }
+
+
+def test_post_apply_with_both_paths_creates_application_and_documents(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="later")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, headers, body = _json_post(
+            port,
+            f"/match/{match_id}/apply",
+            {"cv_path": "cv/acme.pdf", "cover_letter_path": "lm/acme.md"},
+        )
+        assert status == 200
+        assert "application/json" in headers["Content-Type"]
+        assert json.loads(body) == {"ok": True}
+
+        result = _apply_state(db_path, match_id)
+        assert result["state"] == "applied"
+        assert result["application"] is not None
+        assert result["documents"] == [("cover_letter", "lm/acme.md"), ("cv", "cv/acme.pdf")]
+        assert result["events"] == [("applied", None)]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_apply_with_single_path_creates_one_document(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="later")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, _headers, _body = _json_post(
+            port, f"/match/{match_id}/apply", {"cv_path": "cv/seul.pdf", "cover_letter_path": ""}
+        )
+        assert status == 200
+        result = _apply_state(db_path, match_id)
+        assert result["state"] == "applied"
+        assert result["documents"] == [("cv", "cv/seul.pdf")]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_apply_without_paths_creates_application_only(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="later")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        # corps absent et champs blancs : mêmes effets, zéro document
+        status, _headers, _body = _post(port, f"/match/{match_id}/apply")
+        assert status == 200
+        result = _apply_state(db_path, match_id)
+        assert result["state"] == "applied"
+        assert result["application"] is not None
+        assert result["documents"] == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_apply_whitespace_paths_create_no_document(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="later")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, _headers, _body = _json_post(
+            port, f"/match/{match_id}/apply", {"cv_path": "   ", "cover_letter_path": "\t"}
+        )
+        assert status == 200
+        assert _apply_state(db_path, match_id)["documents"] == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_apply_reachable_from_any_non_terminal_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    new_id, _ = _seed_offer(connection, company="NewCo", title="Role", state="new")
+    seen_id, _ = _seed_offer(connection, company="SeenCo", title="Role", state="seen")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        for match_id in (new_id, seen_id):
+            status, _headers, _body = _post(port, f"/match/{match_id}/apply")
+            assert status == 200
+            assert _apply_state(db_path, match_id)["state"] == "applied"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_apply_rejected_for_discarded_match(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="discarded")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, _headers, body = _post(port, f"/match/{match_id}/apply")
+        assert status == 409
+        assert "écarté" in json.loads(body)["error"]
+        assert _apply_state(db_path, match_id)["application"] is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_apply_rejected_when_already_applied(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="later")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        assert _post(port, f"/match/{match_id}/apply")[0] == 200
+        status, _headers, body = _post(port, f"/match/{match_id}/apply")
+        assert status == 409
+        assert "déjà été postulé" in json.loads(body)["error"]
+
+        conn = connect(db_path)
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM application WHERE match_id = ?", (match_id,)
+        ).fetchone()["n"]
+        conn.close()
+        assert count == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_apply_rejects_non_string_path(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="later")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, _headers, _body = _json_post(
+            port, f"/match/{match_id}/apply", {"cv_path": 42}
+        )
+        assert status == 400
+        assert _apply_state(db_path, match_id)["application"] is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_apply_missing_match_returns_404(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        status, _headers, _body = _post(server.server_address[1], "/match/999999/apply")
+        assert status == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_cli_apply_and_http_apply_share_the_same_effects(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Le même parcours en base pour `jw apply` et POST /match/<id>/apply."""
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    connection = connect(db_path)
+    init_db(connection)
+    cli_id, _ = _seed_offer(connection, company="CliCo", title="Role", state="later")
+    http_id, _ = _seed_offer(connection, company="HttpCo", title="Role", state="later")
+    connection.close()
+
+    result = runner.invoke(cli, ["apply", str(cli_id), "--config", str(config)])
+    assert result.exit_code == 0, result.output
+
+    server, thread = _start_server(db_path)
+    try:
+        assert _post(server.server_address[1], f"/match/{http_id}/apply")[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    via_cli = _apply_state(db_path, cli_id)
+    via_http = _apply_state(db_path, http_id)
+    assert via_cli["state"] == via_http["state"] == "applied"
+    assert via_cli["events"] == via_http["events"] == [("applied", None)]
+    assert via_cli["documents"] == via_http["documents"] == []
+
+
+def test_apply_button_and_form_rendered_for_actionable_sections_only(
+    conn: sqlite3.Connection,
+) -> None:
+    _seed_offer(conn, company="NewCo", title="New Role", state="new")
+    _seed_offer(conn, company="LaterCo", title="Later Role", state="later")
+    trash_id, _ = _seed_offer(conn, company="TrashCo", title="Trash Role", state="discarded")
+    conn.execute("UPDATE match SET discarded_at = datetime('now') WHERE id = ?", (trash_id,))
+    app_match_id, app_offer_id = _seed_offer(conn, company="AppCo", title="App Role", state="new")
+    _apply(conn, app_match_id, app_offer_id)
+    conn.commit()
+
+    page = render_page(conn)
+    for key in ("new", "later"):
+        section = _section_html(page, key)
+        assert 'class="card-action action-apply"' in section
+        assert 'class="apply-form"' in section
+        assert 'name="cv_path"' in section
+        assert 'name="cover_letter_path"' in section
+    for key in ("discarded", "applied"):
+        section = _section_html(page, key)
+        assert 'class="card-action action-apply"' not in section
+        assert 'class="apply-form"' not in section
+
+
 def test_http_missing_route_returns_plain_404(tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     connection = connect(db_path)

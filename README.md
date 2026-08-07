@@ -118,10 +118,16 @@ contenu récupéré (`jw enrich`, statut `ok`) affiche un bouton « Annonce comp
 texte intégral de l'annonce.
 
 Chaque carte des sections `Priorité haute`, `Nouveaux matchs`, `Vus` et `À candidater` propose
-deux actions : « Plus tard » (passe le match en `state='later'`, section `À candidater`) et
+trois actions : « Plus tard » (passe le match en `state='later'`, section `À candidater`),
 « Écarter » (passe le match en `state='discarded'` avec `discarded_at` horodaté, section
-`Corbeille`). Ces actions appellent le serveur en JavaScript (`fetch` POST) et retirent la carte
-de son emplacement sans recharger la page ; un bouton « Annuler » apparaît quelques secondes à
+`Corbeille`) et « Candidater ». Cette dernière déplie un petit formulaire avec deux champs
+texte optionnels - chemin du CV et chemin de la lettre de motivation - et enregistre en une
+seule action la candidature (même logique que `jw apply` : ligne `application`, événement
+`applied`, match en `state='applied'`) plus une ligne `document` par champ rempli (`cv` ou
+`cover_letter`). Les chemins sont du texte libre, sans validation d'existence sur le disque :
+simplification délibérée pour un usage personnel à ce stade. Ces actions appellent le serveur
+en JavaScript (`fetch` POST) et retirent la carte de son emplacement sans recharger la page ;
+pour « Plus tard » et « Écarter », un bouton « Annuler » apparaît quelques secondes à
 la place de la carte retirée pour revenir à l'état précédent. La section `Corbeille` n'affiche
 que les matchs écartés depuis moins de 30 jours (filtre d'affichage pur, réévalué à chaque
 chargement) : passé ce délai, la ligne disparaît du tableau de bord mais n'est jamais supprimée
@@ -134,8 +140,8 @@ de la base.
 ```
 
 `--host 0.0.0.0` rend le tableau de bord accessible à toutes les machines joignables sur
-votre réseau. Le tableau de bord n'ajoute aucune authentification : les deux actions HTTP
-(`POST /match/<id>/later`, `/discard`, `/restore`) mutent la base sans jeton ni contrôle
+votre réseau. Le tableau de bord n'ajoute aucune authentification : les actions HTTP
+(`POST /match/<id>/later`, `/discard`, `/restore`, `/apply`) mutent la base sans jeton ni contrôle
 d'accès, c'est un choix délibéré qui repose sur le périmètre réseau (Tailscale) comme frontière
 de confiance. Le tableau de bord expose et modifie vos offres et candidatures : réfléchissez à
 qui y a accès. Préférez l'accès local (`127.0.0.1`, le défaut) ou une adresse privée, et ne le

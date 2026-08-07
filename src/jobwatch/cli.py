@@ -9,6 +9,7 @@ from pathlib import Path
 import click
 
 from jobwatch import __version__, importing
+from jobwatch.applications import ApplicationError, record_application
 from jobwatch.collectors import build_collectors
 from jobwatch.collectors.base import store_offers
 from jobwatch.config import Config, ConfigError, example_config_text, load_config
@@ -369,23 +370,10 @@ def apply(config_path: Path | None, match_id: int, note: str | None) -> None:
     config = _require_config(config_path)
     conn = _open_db(config)
     try:
-        match = _require_match(conn, match_id)
-        existing = conn.execute(
-            "SELECT id FROM application WHERE match_id = ?", (match_id,)
-        ).fetchone()
-        if existing is not None:
-            _fatal(f"le match {match_id} a déjà été postulé (candidature {existing['id']})")
-        cur = conn.execute(
-            "INSERT INTO application (match_id, offer_id, note) VALUES (?, ?, ?)",
-            (match_id, match["offer_id"], note),
-        )
-        application_id = int(cur.lastrowid)
-        conn.execute(
-            "INSERT INTO event (application_id, type, comment) VALUES (?, 'applied', ?)",
-            (application_id, note),
-        )
-        conn.execute("UPDATE match SET state = 'applied' WHERE id = ?", (match_id,))
-        conn.commit()
+        try:
+            application_id = record_application(conn, match_id, note=note)
+        except ApplicationError as exc:
+            _fatal(str(exc))
     finally:
         conn.close()
     click.echo(f"candidature {application_id} enregistrée pour le match {match_id}")

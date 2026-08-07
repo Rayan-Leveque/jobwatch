@@ -2,10 +2,11 @@
 
 La page est regénérée à chaque requête GET / depuis l'état actuel de la base.
 Le rendu est pur (`render_page`) et le serveur HTTP n'utilise que la
-bibliothèque standard. Deux actions HTTP (POST /match/<id>/later et
-/match/<id>/discard, plus /match/<id>/restore pour l'annulation) mutent
-l'état d'un match ; aucune authentification n'est ajoutée, le périmètre
-Tailscale est la frontière de confiance.
+bibliothèque standard. Les actions HTTP (POST /match/<id>/later,
+/match/<id>/discard, /match/<id>/restore pour l'annulation et
+/match/<id>/apply pour enregistrer une candidature avec chemins de
+documents) mutent l'état d'un match ; aucune authentification n'est
+ajoutée, le périmètre Tailscale est la frontière de confiance.
 """
 
 from __future__ import annotations
@@ -21,10 +22,11 @@ from urllib.parse import urlsplit
 
 import click
 
+from jobwatch.applications import ApplicationError, record_application
 from jobwatch.db import connect
 
 RESTORE_STATES = ("new", "seen", "later")
-_MATCH_ACTION_RE = re.compile(r"^/match/(\d+)/(later|discard|restore)$")
+_MATCH_ACTION_RE = re.compile(r"^/match/(\d+)/(later|discard|restore|apply)$")
 
 STATUS_LABELS = {
     "applied": "Candidature envoyée",
@@ -302,13 +304,24 @@ def _row_class(state: object) -> str:
 def _card_actions(row: sqlite3.Row) -> str:
     match_id = int(row["id"])
     prev_state = html.escape(str(row["state"]), quote=True)
+    form_id = f"apply-form-{match_id}"
     return (
         '<div class="card-actions">'
         f'<button class="card-action action-later" type="button" data-match-id="{match_id}" '
         f'data-prev-state="{prev_state}" data-action="later">Plus tard</button>'
         f'<button class="card-action action-discard" type="button" data-match-id="{match_id}" '
         f'data-prev-state="{prev_state}" data-action="discard">Écarter</button>'
+        f'<button class="card-action action-apply" type="button" aria-expanded="false" '
+        f'aria-controls="{form_id}">Candidater</button>'
         "</div>"
+        f'<form class="apply-form" id="{form_id}" data-match-id="{match_id}" hidden>'
+        '<input class="apply-input" name="cv_path" type="text" autocomplete="off" '
+        'placeholder="Chemin du CV (optionnel)" aria-label="Chemin du CV">'
+        '<input class="apply-input" name="cover_letter_path" type="text" autocomplete="off" '
+        'placeholder="Chemin de la lettre de motivation (optionnel)" '
+        'aria-label="Chemin de la lettre de motivation">'
+        '<button class="card-action apply-submit" type="submit">Enregistrer la candidature</button>'
+        "</form>"
     )
 
 
@@ -489,21 +502,52 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
             match_id = int(match.group(1))
             action = match.group(2)
             target_state: str | None = None
+            cv_path: str | None = None
+            cover_letter_path: str | None = None
             if action == "restore":
                 body = self._read_json_body()
                 target_state = body.get("state") if isinstance(body, dict) else None
                 if target_state not in RESTORE_STATES:
                     self._send_json(400, {"error": "état de restauration invalide"})
                     return
+            elif action == "apply":
+                body = self._read_json_body()
+                fields = body if isinstance(body, dict) else {}
+                paths: list[str | None] = []
+                for key in ("cv_path", "cover_letter_path"):
+                    value = fields.get(key)
+                    if value is None:
+                        paths.append(None)
+                    elif isinstance(value, str):
+                        paths.append(value.strip() or None)
+                    else:
+                        self._send_json(400, {"error": f"champ {key} invalide"})
+                        return
+                cv_path, cover_letter_path = paths
             try:
                 conn = connect(db_path)
                 try:
-                    if conn.execute(
-                        "SELECT 1 FROM match WHERE id = ?", (match_id,)
-                    ).fetchone() is None:
+                    match_row = conn.execute(
+                        "SELECT state FROM match WHERE id = ?", (match_id,)
+                    ).fetchone()
+                    if match_row is None:
                         self._send_text(404, "404 Not Found\n")
                         return
-                    if action == "later":
+                    if action == "apply":
+                        if match_row["state"] == "discarded":
+                            self._send_json(
+                                409, {"error": "match écarté : restaurez-le d'abord"}
+                            )
+                            return
+                        try:
+                            record_application(
+                                conn, match_id,
+                                cv_path=cv_path, cover_letter_path=cover_letter_path,
+                            )
+                        except ApplicationError as exc:
+                            self._send_json(409, {"error": str(exc)})
+                            return
+                    elif action == "later":
                         conn.execute(
                             "UPDATE match SET state = 'later', discarded_at = NULL WHERE id = ?",
                             (match_id,),
@@ -803,10 +847,19 @@ h1 span { color:var(--muted-2); font-weight:620 }
   transition:border-color .15s ease, background .15s ease }
 .action-later { color:var(--amber) }
 .action-discard { color:var(--danger) }
+.action-apply { color:var(--accent) }
 .card-action:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
 @media (hover:hover) {
   .card-action:hover { border-color:var(--line-strong); background:var(--surface-hover) }
 }
+.apply-form { position:relative; z-index:3; display:grid; gap:8px; margin:12px 13px 0;
+  pointer-events:auto }
+.apply-form[hidden] { display:none }
+.apply-input { min-height:44px; padding:0 12px; border:1px solid var(--line-strong);
+  border-radius:11px; color:var(--fg); background:var(--surface); font-size:16px }
+.apply-input::placeholder { color:var(--muted-2); opacity:1 }
+.apply-input:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
+.apply-submit { justify-self:start }
 .undo-toast { display:flex; align-items:center; justify-content:space-between; gap:12px;
   color:var(--muted); font-size:.78rem }
 .undo-toast .undo-btn { flex:none; min-height:38px; padding:0 14px; border:1px solid var(--line);
@@ -949,21 +1002,34 @@ _JS = """\
 
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const UNDO_WINDOW_MS = 7000;
+  const REMOVE_MS = 260;
   const updateSectionCount = section => {
     if (!section) return;
     const count = section.querySelector('.count');
     if (count && !q.value.trim()) count.textContent = String(section.querySelectorAll('.row').length);
   };
-  const showUndo = (row, matchId, prevState) => {
+  // Minuterie plutôt que transitionend : quand le système saute la transition
+  // (iOS en économie d'énergie) sans exposer prefers-reduced-motion,
+  // transitionend ne se déclenche jamais et la carte resterait figée.
+  const removeRow = (row, done) => {
+    if (reduceMotion) { done(); return; }
+    row.classList.add('row-removing');
+    setTimeout(done, REMOVE_MS);
+  };
+  const showToast = (row, message, onUndo) => {
     const toast = document.createElement('article');
     toast.className = 'row undo-toast';
     const label = document.createElement('span');
-    label.textContent = 'Retirée du tableau de bord.';
-    const undoBtn = document.createElement('button');
-    undoBtn.type = 'button';
-    undoBtn.className = 'undo-btn';
-    undoBtn.textContent = 'Annuler';
-    toast.append(label, undoBtn);
+    label.textContent = message;
+    toast.append(label);
+    let undoBtn = null;
+    if (onUndo) {
+      undoBtn = document.createElement('button');
+      undoBtn.type = 'button';
+      undoBtn.className = 'undo-btn';
+      undoBtn.textContent = 'Annuler';
+      toast.append(undoBtn);
+    }
     row.replaceWith(toast);
     rows.splice(rows.indexOf(row), 1, toast);
     updateSectionCount(toast.closest('.section'));
@@ -973,8 +1039,13 @@ _JS = """\
       rows.splice(rows.indexOf(toast), 1);
       updateSectionCount(section);
     }, UNDO_WINDOW_MS);
-    undoBtn.addEventListener('click', () => {
+    if (undoBtn) undoBtn.addEventListener('click', () => {
       clearTimeout(timer);
+      onUndo();
+    });
+  };
+  const showUndo = (row, matchId, prevState) => {
+    showToast(row, 'Retirée du tableau de bord.', () => {
       fetch(`/match/${matchId}/restore`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -984,7 +1055,7 @@ _JS = """\
       });
     });
   };
-  const actionButtons = [...document.querySelectorAll('.card-action')];
+  const actionButtons = [...document.querySelectorAll('.action-later, .action-discard')];
   actionButtons.forEach(button => {
     button.addEventListener('click', () => {
       const row = button.closest('.row');
@@ -993,12 +1064,33 @@ _JS = """\
       const prevState = button.dataset.prevState;
       fetch(`/match/${matchId}/${action}`, {method: 'POST'}).then(resp => {
         if (!resp.ok) return;
-        if (reduceMotion) {
-          showUndo(row, matchId, prevState);
-          return;
-        }
-        row.classList.add('row-removing');
-        row.addEventListener('transitionend', () => showUndo(row, matchId, prevState), {once: true});
+        removeRow(row, () => showUndo(row, matchId, prevState));
+      });
+    });
+  });
+  [...document.querySelectorAll('.action-apply')].forEach(button => {
+    button.addEventListener('click', () => {
+      const expanded = button.getAttribute('aria-expanded') === 'true';
+      const form = document.getElementById(button.getAttribute('aria-controls'));
+      button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+      if (form) form.hidden = expanded;
+    });
+  });
+  [...document.querySelectorAll('.apply-form')].forEach(form => {
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      const row = form.closest('.row');
+      const matchId = form.dataset.matchId;
+      fetch(`/match/${matchId}/apply`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          cv_path: form.elements.cv_path.value.trim(),
+          cover_letter_path: form.elements.cover_letter_path.value.trim(),
+        }),
+      }).then(resp => {
+        if (!resp.ok) return;
+        removeRow(row, () => showToast(row, 'Candidature enregistrée.'));
       });
     });
   });
