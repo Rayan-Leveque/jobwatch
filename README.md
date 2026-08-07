@@ -29,7 +29,9 @@ python3 -m venv .venv
 .venv/bin/jw apps               # candidatures avec leur statut actuel
 ```
 
-`jw init` refuse d'écraser un `config.yaml` existant. Toutes les commandes acceptent
+`jw init` refuse d'écraser un `config.yaml` existant. `jw init --db PATH` écrit ce chemin
+dans la ligne `db:` de la config générée au lieu du défaut `~/.local/share/jobwatch/jobwatch.db`
+(utile pour un environnement de test isolé). Toutes les commandes acceptent
 `--config PATH` (par défaut `./config.yaml`, avec repli sur `~/.config/jobwatch/config.yaml`).
 
 ### Cron
