@@ -124,8 +124,9 @@ def _section_html(page: str, key: str) -> str:
 def test_empty_database_renders(conn: sqlite3.Connection) -> None:
     page = render_page(conn)
     assert page.startswith("<!DOCTYPE html>")
-    for label in ("Nouveaux matchs", "Vus", "Candidatures"):
+    for label in ("Priorité haute", "Nouveaux matchs", "Vus", "Candidatures"):
         assert label in page
+    assert "Aucune offre prioritaire pour l'instant." in page
     assert "Aucun nouveau match pour l'instant." in page
     assert "Aucun match parcouru pour l'instant." in page
     assert "Aucune candidature pour l'instant." in page
@@ -287,7 +288,7 @@ def test_high_summary_renders_escaped_ordered_accessible_collapsible_block(
     _add_summary(conn, offer_id, "Premier <script>alert(1)</script>", "Deuxième & dernier")
 
     page = render_page(conn)
-    section = _section_html(page, "new")
+    section = _section_html(page, "priority")
 
     assert 'class="row row-new has-summary"' in section
     assert 'class="card-toggle"' in section
@@ -392,8 +393,52 @@ def test_match_order_fit_then_collected_desc(conn: sqlite3.Connection) -> None:
     _seed_offer(conn, company="MidCo", title="M", fit="medium", collected_at="2026-08-03 10:00:00")
     page = render_page(conn)
     section = _section_html(page, "new")
-    indexes = [section.index(name) for name in ("HiCo", "MidCo", "LoCo", "NoneCo")]
+    indexes = [section.index(name) for name in ("MidCo", "LoCo", "NoneCo")]
     assert indexes == sorted(indexes)
+    assert "HiCo" not in section
+    assert "HiCo" in _section_html(page, "priority")
+
+
+def test_priority_section_precedes_others_without_duplicates_and_sorts_globally(
+    conn: sqlite3.Connection,
+) -> None:
+    _match_id, older_id = _seed_offer(
+        conn,
+        company="OlderHigh",
+        state="new",
+        fit="high",
+        collected_at="2026-08-01 10:00:00",
+    )
+    _match_id, newer_id = _seed_offer(
+        conn,
+        company="NewerHigh",
+        state="seen",
+        fit="high",
+        collected_at="2026-08-05 10:00:00",
+    )
+    _add_summary(conn, older_id, "Résumé ancien")
+    _add_summary(conn, newer_id, "Résumé récent")
+    _seed_offer(conn, company="MediumNew", state="new", fit="medium")
+
+    page = render_page(conn)
+    priority = _section_html(page, "priority")
+
+    section_positions = [
+        page.index(f'data-section="{key}"')
+        for key in ("priority", "new", "seen", "applied")
+    ]
+    assert section_positions == sorted(section_positions)
+    assert '<details class="section section-priority" open' in page
+    assert priority.index("NewerHigh") < priority.index("OlderHigh")
+    assert "Résumé récent" in priority
+    assert "Résumé ancien" in priority
+    assert "OlderHigh" not in _section_html(page, "new")
+    assert "NewerHigh" not in _section_html(page, "seen")
+    assert page.count('class="company">OlderHigh</div>') == 1
+    assert page.count('class="company">NewerHigh</div>') == 1
+    assert '<span class="stat-value">2</span><span class="stat-label">Nouveaux matchs</span>' in page
+    assert '<span class="stat-value">1</span><span class="stat-label">Vus</span>' in page
+    assert '<span class="count">2</span>' in priority
 
 
 def _start_server(db_path: Path) -> tuple[ThreadingHTTPServer, threading.Thread]:

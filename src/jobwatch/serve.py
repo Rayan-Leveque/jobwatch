@@ -64,12 +64,29 @@ def _matches(conn: sqlite3.Connection, state: str) -> list[sqlite3.Row]:
         "JOIN search s ON s.id = m.search_id "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
-        "WHERE m.state = ? AND NOT EXISTS "
+        "WHERE m.state = ? AND (m.fit IS NULL OR m.fit != 'high') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
         "ORDER BY CASE m.fit WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
         "         WHEN 'low' THEN 2 ELSE 3 END, "
         "         o.collected_at DESC, m.id DESC",
         (state,),
+    ).fetchall()
+
+
+def _priority_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
+        "       s.name AS search_name, "
+        "       c.name AS company, o.title AS title, o.location AS location, "
+        "       o.contract AS contract, o.platform AS platform, o.url AS url, "
+        "       o.collected_at AS collected_at, o.deadline AS deadline "
+        "FROM match m "
+        "JOIN search s ON s.id = m.search_id "
+        "JOIN offer o ON o.id = m.offer_id "
+        "LEFT JOIN company c ON c.id = o.company_id "
+        "WHERE m.fit = 'high' AND m.state IN ('new', 'seen') AND NOT EXISTS "
+        "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+        "ORDER BY o.collected_at DESC, m.id DESC"
     ).fetchall()
 
 
@@ -263,13 +280,20 @@ def _section(
 
 def render_page(conn: sqlite3.Connection) -> str:
     """Rend la page HTML complète depuis l'état actuel de la base."""
+    priority = _priority_matches(conn)
     new = _matches(conn, "new")
     seen = _matches(conn, "seen")
     applied = _applications(conn)
-    offer_ids = sorted({int(row["offer_id"]) for row in (*new, *seen, *applied)})
+    offer_ids = sorted(
+        {int(row["offer_id"]) for row in (*priority, *new, *seen, *applied)}
+    )
     summaries = _summary_bullets(conn, offer_ids)
     body = "\n".join(
         (
+            _section(
+                "priority", "Priorité haute", "À regarder en premier", priority,
+                "Aucune offre prioritaire pour l'instant.", True, summaries,
+            ),
             _section(
                 "new", "Nouveaux matchs", "À découvrir", new,
                 "Aucun nouveau match pour l'instant.", True, summaries,
@@ -284,11 +308,15 @@ def render_page(conn: sqlite3.Connection) -> str:
             ),
         )
     )
-    total = len(new) + len(seen) + len(applied)
+    priority_new = sum(row["state"] == "new" for row in priority)
+    priority_seen = len(priority) - priority_new
+    total = len(priority) + len(new) + len(seen) + len(applied)
     stamp = datetime.now(UTC).astimezone().strftime("%d/%m/%Y %H:%M")
     return _page_template(
         body=body, total=total,
-        new_count=len(new), seen_count=len(seen), applied_count=len(applied),
+        new_count=len(new) + priority_new,
+        seen_count=len(seen) + priority_seen,
+        applied_count=len(applied),
         stamp=stamp,
     )
 
@@ -478,6 +506,7 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .section-dot { width:10px; height:10px; flex:0 0 10px; border-radius:50%;
   background:var(--muted-2); box-shadow:0 0 0 5px rgba(145,152,168,.09) }
 .section-new .section-dot { background:var(--accent); box-shadow:0 0 0 5px var(--accent-soft) }
+.section-priority .section-dot { background:var(--amber); box-shadow:0 0 0 5px var(--amber-soft) }
 .section-seen .section-dot { background:var(--blue); box-shadow:0 0 0 5px var(--blue-soft) }
 .section-applied .section-dot { background:var(--violet); box-shadow:0 0 0 5px var(--violet-soft) }
 .section-title, .section-subtitle { display:block }

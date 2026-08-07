@@ -73,8 +73,9 @@ SQLite/jobwatch devient la source de vérité.
 ## Tableau de bord local
 
 `jw serve` sert un tableau de bord en lecture seule qui relit la base SQLite à chaque
-chargement de page. Les cartes high disposant d'un résumé affichent un bloc `En bref`, repliable en
-cliquant sur la carte ou au clavier :
+chargement de page. La section `Priorité haute` regroupe les matchs high avant `Nouveaux matchs`
+et `Vus`; les cartes high disposant d'un résumé affichent un bloc `En bref`, repliable en cliquant
+sur la carte ou au clavier :
 
 ```bash
 .venv/bin/jw serve                        # http://127.0.0.1:8000 (défaut)
