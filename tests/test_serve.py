@@ -726,6 +726,35 @@ def test_post_restore_reverts_state_and_preserves_other_columns(tmp_path: Path) 
         thread.join(timeout=5)
 
 
+def test_post_restore_accepts_later_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="later")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        _post(port, f"/match/{match_id}/discard")
+        status, _headers, _body = _post(
+            port,
+            f"/match/{match_id}/restore",
+            body=json.dumps({"state": "later"}).encode("utf-8"),
+            content_type="application/json",
+        )
+        assert status == 200
+
+        check = connect(db_path)
+        row = check.execute("SELECT * FROM match WHERE id = ?", (match_id,)).fetchone()
+        check.close()
+        assert row["state"] == "later"
+        assert row["discarded_at"] is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_post_restore_rejects_disallowed_target_state(tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     connection = connect(db_path)

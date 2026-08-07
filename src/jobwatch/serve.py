@@ -23,7 +23,7 @@ import click
 
 from jobwatch.db import connect
 
-RESTORE_STATES = ("new", "seen")
+RESTORE_STATES = ("new", "seen", "later")
 _MATCH_ACTION_RE = re.compile(r"^/match/(\d+)/(later|discard|restore)$")
 
 STATUS_LABELS = {
@@ -949,8 +949,7 @@ _JS = """\
 
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const UNDO_WINDOW_MS = 7000;
-  const updateSectionCount = row => {
-    const section = row.closest('.section');
+  const updateSectionCount = section => {
     if (!section) return;
     const count = section.querySelector('.count');
     if (count && !q.value.trim()) count.textContent = String(section.querySelectorAll('.row').length);
@@ -967,11 +966,12 @@ _JS = """\
     toast.append(label, undoBtn);
     row.replaceWith(toast);
     rows.splice(rows.indexOf(row), 1, toast);
-    updateSectionCount(toast);
+    updateSectionCount(toast.closest('.section'));
     const timer = setTimeout(() => {
+      const section = toast.closest('.section');
       toast.remove();
       rows.splice(rows.indexOf(toast), 1);
-      updateSectionCount(toast);
+      updateSectionCount(section);
     }, UNDO_WINDOW_MS);
     undoBtn.addEventListener('click', () => {
       clearTimeout(timer);
