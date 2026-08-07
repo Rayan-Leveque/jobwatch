@@ -117,8 +117,8 @@ def test_undo_restores_previous_state(browser, dashboard) -> None:
     card = _card(page, "NewCo")
     card.locator(".action-later").click()
     page.locator(".undo-toast .undo-btn").wait_for(state="visible", timeout=5000)
-    page.locator(".undo-toast .undo-btn").click()
-    page.wait_for_load_state()
+    with page.expect_navigation():
+        page.locator(".undo-toast .undo-btn").click()
     conn = connect(db_path)
     state = conn.execute(
         "SELECT m.state AS state FROM match m JOIN offer o ON o.id = m.offer_id "

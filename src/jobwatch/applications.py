@@ -23,18 +23,23 @@ def record_application(
 ) -> int:
     """Crée la candidature, son événement 'applied', les documents éventuels,
     et passe le match à l'état 'applied'. Renvoie l'id de la candidature."""
-    match = conn.execute(
-        "SELECT id, offer_id FROM match WHERE id = ?", (match_id,)
-    ).fetchone()
-    if match is None:
-        raise ApplicationError(f"aucun match avec l'id {match_id}")
-    existing = conn.execute(
-        "SELECT id FROM application WHERE match_id = ?", (match_id,)
-    ).fetchone()
-    if existing is not None:
-        raise ApplicationError(
-            f"le match {match_id} a déjà été postulé (candidature {existing['id']})"
-        )
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        match = conn.execute(
+            "SELECT id, offer_id FROM match WHERE id = ?", (match_id,)
+        ).fetchone()
+        if match is None:
+            raise ApplicationError(f"aucun match avec l'id {match_id}")
+        existing = conn.execute(
+            "SELECT id FROM application WHERE match_id = ?", (match_id,)
+        ).fetchone()
+        if existing is not None:
+            raise ApplicationError(
+                f"le match {match_id} a déjà été postulé (candidature {existing['id']})"
+            )
+    except ApplicationError:
+        conn.rollback()
+        raise
     cur = conn.execute(
         "INSERT INTO application (match_id, offer_id, note) VALUES (?, ?, ?)",
         (match_id, match["offer_id"], note),
