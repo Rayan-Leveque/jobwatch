@@ -179,7 +179,7 @@ l'exécution.
 
 Les offres sont dédupliquées globalement par URL, et de plus ignorées quand la même société a déjà
 une offre avec le même titre. Chaque offre est mise en correspondance avec chaque recherche active ;
-les matchs sont stockés avec un état (`new`, `seen`, `applied`, `discarded`). Une candidature est
+les matchs sont stockés avec un état (`new`, `seen`, `later`, `applied`, `discarded`). Une candidature est
 créée depuis un match, et son statut actuel est le dernier événement de son journal d'événements.
 
 | Table | Rôle |
