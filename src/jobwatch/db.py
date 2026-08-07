@@ -13,6 +13,7 @@ SCHEMA_FILE = "schema.sql"
 COLUMN_MIGRATIONS = {
     "offer": ("deadline", "TEXT"),
     "match": ("fit", "TEXT"),
+    "offer_summary": ("source", "TEXT DEFAULT 'manual'"),
 }
 
 

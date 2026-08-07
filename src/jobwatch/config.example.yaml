@@ -33,3 +33,9 @@ sources: {}
 #     password: app-password
 #     to: you@example.com
 notify: {}
+
+# enrich : pour activer, supprimez la ligne « enrich: {} » ci-dessous,
+# puis décommentez et remplissez :
+#   opencode_bin: opencode              # binaire ou commande OpenCode
+#   model: opencode/deepseek-v4-flash-free
+enrich: {}

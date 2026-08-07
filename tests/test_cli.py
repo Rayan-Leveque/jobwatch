@@ -332,6 +332,18 @@ def test_ingest_daily_without_config_fails_cleanly(runner: CliRunner, tmp_path: 
     assert "erreur :" in result.output
 
 
+def test_enrich_without_config_block_fails_cleanly(runner: CliRunner, tmp_path: Path) -> None:
+    """`jw enrich` avec un bloc `enrich` inerte ne plante pas et explique quoi faire."""
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)  # enrich: {} implicite (absent du fichier)
+
+    result = runner.invoke(cli, ["enrich", "--config", str(config)])
+
+    assert result.exit_code == 1
+    assert "erreur :" in result.output
+    assert "enrich" in result.output
+
+
 def test_ingest_daily_json_only_success(runner: CliRunner, tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     config = _write_config(tmp_path, db_path)

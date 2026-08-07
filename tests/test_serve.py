@@ -112,6 +112,17 @@ def _add_summary(conn: sqlite3.Connection, offer_id: int, *bullets: str) -> None
     conn.commit()
 
 
+def _add_content(
+    conn: sqlite3.Connection, offer_id: int, markdown: str, status: str = "ok"
+) -> None:
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
+        "VALUES (?, ?, 'http', ?)",
+        (offer_id, markdown if status == "ok" else None, status),
+    )
+    conn.commit()
+
+
 def _section_html(page: str, key: str) -> str:
     marker = f'data-section="{key}"'
     start = page.index(marker)
@@ -354,6 +365,86 @@ def test_summary_toggle_script_preserves_external_link_interaction(
     assert 'target="_blank"' in page
     assert ".meta a { position:relative; z-index:3" in page
     assert "pointer-events:auto" in page
+
+
+def test_content_panel_renders_escaped_and_collapsible(conn: sqlite3.Connection) -> None:
+    _match_id, offer_id = _seed_offer(conn, company="ContentCo", title="AI Engineer", fit=None)
+    _add_content(conn, offer_id, "Poste <script>alert(1)</script>\n\nDeuxième paragraphe.")
+
+    page = render_page(conn)
+    section = _section_html(page, "new")
+
+    assert 'class="content-toggle"' in section
+    assert 'aria-expanded="false"' in section
+    assert 'aria-controls="content-match-' in section
+    assert "Annonce complète" in section
+    assert 'class="content-panel"' in section
+    assert "hidden" in section
+    assert "Poste &lt;script&gt;alert(1)&lt;/script&gt;" in section
+    assert "<script>alert(1)</script>" not in section
+    assert "Deuxième paragraphe." in section
+
+
+def test_content_panel_absent_without_offer_content(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="NoContentCo")
+
+    page = render_page(conn)
+
+    assert '<button class="content-toggle"' not in page
+    assert '<div class="content-panel"' not in page
+
+
+def test_content_panel_absent_when_fetch_failed(conn: sqlite3.Connection) -> None:
+    _match_id, offer_id = _seed_offer(conn, company="FailedCo")
+    _add_content(conn, offer_id, "peu importe", status="failed")
+
+    page = render_page(conn)
+
+    assert '<button class="content-toggle"' not in page
+    assert '<div class="content-panel"' not in page
+
+
+def test_content_panel_independent_from_summary_panel(conn: sqlite3.Connection) -> None:
+    """Le panneau En bref existant reste inchangé, que l'annonce complète existe ou non."""
+    _match_id, offer_id = _seed_offer(conn, company="BothCo", fit="high")
+    _add_summary(conn, offer_id, "Fait résumé")
+    _add_content(conn, offer_id, "Texte complet de annonce.")
+
+    page = render_page(conn)
+    section = _section_html(page, "priority")
+
+    assert 'class="summary-panel"' in section
+    assert "En bref" in section
+    assert "Fait résumé" in section
+    assert 'class="content-panel"' in section
+    assert "Texte complet de annonce." in section
+    # les deux panneaux ont des id distincts
+    assert 'aria-controls="summary-match-' in section
+    assert 'aria-controls="content-match-' in section
+
+
+def test_content_panel_rendered_for_low_fit_and_no_summary(conn: sqlite3.Connection) -> None:
+    """Contrairement à En bref, le panneau annonce complète n'est pas conditionné au fit."""
+    _match_id, offer_id = _seed_offer(conn, company="LowFitCo", fit="low")
+    _add_content(conn, offer_id, "Texte complet peu importe le fit.")
+
+    page = render_page(conn)
+
+    assert "content-toggle" in page
+    assert "Texte complet peu importe le fit." in page
+
+
+def test_content_panel_renders_for_application(conn: sqlite3.Connection) -> None:
+    match_id, offer_id = _seed_offer(conn, company="AppliedContentCo")
+    _add_content(conn, offer_id, "Annonce complete pour une candidature.")
+    _apply(conn, match_id, offer_id)
+
+    page = render_page(conn)
+    applied = _section_html(page, "applied")
+
+    assert "content-toggle" in applied
+    assert 'aria-controls="content-application-' in applied
+    assert "Annonce complete pour une candidature." in applied
 
 
 def test_no_fit_pill_when_fit_null(conn: sqlite3.Connection) -> None:
