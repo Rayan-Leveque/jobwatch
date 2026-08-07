@@ -132,6 +132,23 @@ def _summary_bullets(
     return summaries
 
 
+def _offer_contents(conn: sqlite3.Connection, offer_ids: list[int]) -> dict[int, str]:
+    if not offer_ids:
+        return {}
+    contents: dict[int, str] = {}
+    for start in range(0, len(offer_ids), 500):
+        chunk = offer_ids[start : start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            "SELECT offer_id AS offer_id, markdown AS markdown FROM offer_content "
+            f"WHERE offer_id IN ({placeholders}) AND status = 'ok'",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            contents[int(row["offer_id"])] = str(row["markdown"])
+    return contents
+
+
 def _link(url: object) -> str:
     """Renvoie le lien de l'offre si son schéma est http/https, sinon rien."""
     value = str(url or "")
@@ -205,7 +222,36 @@ def _summary_panel(row: sqlite3.Row, bullets: list[str], prefix: str) -> tuple[s
     return button, panel
 
 
-def _match_card(row: sqlite3.Row, bullets: list[str]) -> str:
+def _markdown_to_html(markdown: str) -> str:
+    """Rendu minimal et échappé : un <p> par paragraphe, <br> pour les retours à la ligne.
+
+    Pas de bibliothèque Markdown supplémentaire pour le dashboard : la syntaxe
+    Markdown (titres, gras, listes...) apparaît telle quelle, échappée.
+    """
+    paragraphs = re.split(r"\n\s*\n", markdown.strip())
+    rendered = (
+        f"<p>{html.escape(paragraph).replace(chr(10), '<br>')}</p>"
+        for paragraph in paragraphs
+        if paragraph.strip()
+    )
+    return "".join(rendered)
+
+
+def _content_panel(row: sqlite3.Row, markdown: str | None, prefix: str) -> tuple[str, str]:
+    if not markdown:
+        return "", ""
+    panel_id = f"content-{prefix}-{int(row['id'])}"
+    label = html.escape(f"Afficher l'annonce complète de {row['title'] or 'cette offre'}", quote=True)
+    button = (
+        f'<button class="content-toggle" type="button" aria-expanded="false" '
+        f'aria-controls="{panel_id}" aria-label="{label}">Annonce complète'
+        f'<span class="summary-chevron" aria-hidden="true"></span></button>'
+    )
+    panel = f'<div class="content-panel" id="{panel_id}" hidden>{_markdown_to_html(markdown)}</div>'
+    return button, panel
+
+
+def _match_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> str:
     cls = "new" if row["state"] == "new" else "seen"
     company = html.escape(str(row["company"] or "Société inconnue"))
     title = html.escape(str(row["title"] or ""))
@@ -214,16 +260,17 @@ def _match_card(row: sqlite3.Row, bullets: list[str]) -> str:
     button, summary = _summary_panel(row, bullets, "match")
     summary_class = " has-summary" if summary else ""
     chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
+    content_button, content_panel = _content_panel(row, content, "match")
     return (
         f'<article class="row row-{cls}{summary_class}">{button}<div class="body">'
         f'<div class="card-topline"><div class="company">{company}</div>'
         f'<div class="card-badges">{pill}{chevron}</div></div>'
         f'<div class="role">{title}</div>'
-        f'<div class="meta">{meta}</div></div>{summary}</article>'
+        f'<div class="meta">{meta}</div></div>{summary}{content_button}{content_panel}</article>'
     )
 
 
-def _application_card(row: sqlite3.Row, bullets: list[str]) -> str:
+def _application_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> str:
     status = str(row["status"] or "")
     cls = status if status in STATUS_LABELS else "unknown"
     label = STATUS_LABELS.get(status, STATUS_UNKNOWN)
@@ -235,20 +282,27 @@ def _application_card(row: sqlite3.Row, bullets: list[str]) -> str:
     button, summary = _summary_panel(row, bullets, "application")
     summary_class = " has-summary" if summary else ""
     chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
+    content_button, content_panel = _content_panel(row, content, "application")
     return (
         f'<article class="row row-applied{summary_class}">{button}<div class="body">'
         f'<div class="card-topline"><div class="company">{company}</div>'
         f'<div class="card-badges">{pill}{chevron}</div></div>'
         f'<div class="role">{title}</div>'
-        f'<div class="meta">{meta}</div>{note}</div>{summary}</article>'
+        f'<div class="meta">{meta}</div>{note}</div>{summary}{content_button}{content_panel}</article>'
     )
 
 
-def _card(row: sqlite3.Row, key: str, summaries: dict[int, list[str]]) -> str:
+def _card(
+    row: sqlite3.Row,
+    key: str,
+    summaries: dict[int, list[str]],
+    contents: dict[int, str],
+) -> str:
     bullets = summaries.get(int(row["offer_id"]), [])
+    content = contents.get(int(row["offer_id"]))
     if key == "applied":
-        return _application_card(row, bullets)
-    return _match_card(row, bullets)
+        return _application_card(row, bullets, content)
+    return _match_card(row, bullets, content)
 
 
 def _section(
@@ -259,9 +313,10 @@ def _section(
     empty_text: str,
     open_default: bool,
     summaries: dict[int, list[str]],
+    contents: dict[int, str],
 ) -> str:
     if rows:
-        cards = "\n".join(_card(row, key, summaries) for row in rows)
+        cards = "\n".join(_card(row, key, summaries, contents) for row in rows)
     else:
         cards = f'<p class="empty-note">{empty_text}</p>'
     open_attr = " open" if open_default else ""
@@ -288,23 +343,24 @@ def render_page(conn: sqlite3.Connection) -> str:
         {int(row["offer_id"]) for row in (*priority, *new, *seen, *applied)}
     )
     summaries = _summary_bullets(conn, offer_ids)
+    contents = _offer_contents(conn, offer_ids)
     body = "\n".join(
         (
             _section(
                 "priority", "Priorité haute", "À regarder en premier", priority,
-                "Aucune offre prioritaire pour l'instant.", True, summaries,
+                "Aucune offre prioritaire pour l'instant.", True, summaries, contents,
             ),
             _section(
                 "new", "Nouveaux matchs", "À découvrir", new,
-                "Aucun nouveau match pour l'instant.", True, summaries,
+                "Aucun nouveau match pour l'instant.", True, summaries, contents,
             ),
             _section(
                 "seen", "Vus", "Déjà parcourus", seen,
-                "Aucun match parcouru pour l'instant.", False, summaries,
+                "Aucun match parcouru pour l'instant.", False, summaries, contents,
             ),
             _section(
                 "applied", "Candidatures", "Dernier statut connu", applied,
-                "Aucune candidature pour l'instant.", False, summaries,
+                "Aucune candidature pour l'instant.", False, summaries, contents,
             ),
         )
     )
@@ -580,6 +636,19 @@ h1 span { color:var(--muted-2); font-weight:620 }
   text-transform:uppercase }
 .summary-panel ul { margin:9px 0 0; padding-left:19px; color:var(--muted); font-size:.76rem }
 .summary-panel li + li { margin-top:6px }
+.content-toggle { position:relative; z-index:3; margin:12px 13px 0; padding:9px 12px;
+  display:inline-flex; align-items:center; gap:7px; border:1px solid var(--line);
+  border-radius:11px; color:var(--fg); background:var(--surface); font-size:.71rem;
+  font-weight:700; letter-spacing:.02em; cursor:pointer; pointer-events:auto;
+  transition:border-color .15s ease, background .15s ease }
+.content-toggle .summary-chevron { margin:0 }
+.content-toggle[aria-expanded="true"] .summary-chevron { transform:rotate(225deg) }
+.content-panel { position:relative; z-index:2; margin:10px 13px 1px; padding:12px 13px;
+  border-top:1px solid var(--line); color:var(--muted); font-size:.76rem;
+  line-height:1.55; overflow-wrap:anywhere; pointer-events:none }
+.content-panel[hidden] { display:none }
+.content-panel p { margin:0 0 10px }
+.content-panel p:last-child { margin-bottom:0 }
 .empty-note { margin:0; padding:14px 13px; border:1px dashed var(--line-strong);
   border-radius:13px; color:var(--muted); background:var(--surface-2);
   font-size:.75rem; overflow-wrap:anywhere }
@@ -638,7 +707,7 @@ _JS = """\
   const searchDock = document.getElementById('search-dock');
   const details = [...document.querySelectorAll('.section')];
   const rows = [...document.querySelectorAll('.row')];
-  const cardToggles = [...document.querySelectorAll('.card-toggle')];
+  const cardToggles = [...document.querySelectorAll('.card-toggle, .content-toggle')];
   cardToggles.forEach(button => {
     button.addEventListener('click', () => {
       const expanded = button.getAttribute('aria-expanded') === 'true';

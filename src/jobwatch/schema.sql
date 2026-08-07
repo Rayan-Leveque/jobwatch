@@ -32,6 +32,14 @@ CREATE TABLE IF NOT EXISTS summary_bullet (
   text TEXT NOT NULL,
   PRIMARY KEY(summary_id, position)
 );
+CREATE TABLE IF NOT EXISTS offer_content (
+  id INTEGER PRIMARY KEY,
+  offer_id INTEGER NOT NULL UNIQUE REFERENCES offer(id) ON DELETE CASCADE,
+  markdown TEXT,                     -- texte complet de l'offre converti en Markdown ; NULL si status='failed'
+  fetch_method TEXT,                 -- 'http' | 'playwright'
+  status TEXT NOT NULL,              -- 'ok' | 'failed'
+  fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS search (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,

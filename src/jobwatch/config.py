@@ -78,11 +78,18 @@ class NotifyConfig:
 
 
 @dataclass
+class EnrichConfig:
+    opencode_bin: str
+    model: str
+
+
+@dataclass
 class Config:
     db: Path
     searches: list[SearchConfig]
     sources: SourcesConfig
     notify: NotifyConfig
+    enrich: EnrichConfig | None = None
 
 
 def _string_list(value: object, field_name: str) -> list[str]:
@@ -217,6 +224,22 @@ def _notify_from_dict(raw: object) -> NotifyConfig:
     )
 
 
+def _enrich_from_dict(raw: object) -> EnrichConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'enrich' doit être un mapping")
+    if not raw:
+        return None
+    opencode_bin = raw.get("opencode_bin")
+    model = raw.get("model")
+    if not isinstance(opencode_bin, str) or not opencode_bin:
+        raise ConfigError("enrich.opencode_bin est requis quand enrich est présent")
+    if not isinstance(model, str) or not model:
+        raise ConfigError("enrich.model est requis quand enrich est présent")
+    return EnrichConfig(opencode_bin=opencode_bin, model=model)
+
+
 def load_config(path: Path) -> Config:
     """Analyse et valide un fichier de config, levant ConfigError en cas de problème."""
     try:
@@ -249,6 +272,7 @@ def load_config(path: Path) -> Config:
         searches=searches,
         sources=_sources_from_dict(raw.get("sources")),
         notify=_notify_from_dict(raw.get("notify")),
+        enrich=_enrich_from_dict(raw.get("enrich")),
     )
 
 

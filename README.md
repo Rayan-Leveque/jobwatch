@@ -7,8 +7,10 @@ de suivre vos candidatures depuis la ligne de commande ou via un tableau de bord
 
 Flux : **collecter -> dédupliquer -> matcher -> notifier -> suivre**.
 
-Pas de fonctionnalités LLM intégrées, pas de cloud, pas de traçage. Vos données restent dans un seul
-fichier SQLite sur votre machine.
+Pas de cloud, pas de traçage : le tableau de bord et le stockage restent 100% locaux dans un seul
+fichier SQLite sur votre machine. Seule exception, optionnelle et explicitement activée :
+`jw enrich` résume les annonces collectées via un LLM (deepseek-v4-flash) appelé localement par
+OpenCode — voir [Enrichissement des offres](#enrichissement-des-offres).
 
 ## Démarrage rapide
 
@@ -19,6 +21,7 @@ python3 -m venv .venv
 .venv/bin/jw init                # crée config.yaml + une base de données vide
 # éditez config.yaml : décommentez et remplissez les blocs sources et notify, puis :
 .venv/bin/jw run                # collecter, matcher, notifier
+.venv/bin/jw enrich             # récupère et résume les offres collectées (bloc enrich requis)
 .venv/bin/jw serve              # tableau de bord web local : http://127.0.0.1:8000
 .venv/bin/jw list               # affiche les nouveaux matchs
 .venv/bin/jw apply 1 --note "cv envoyé"
@@ -31,10 +34,10 @@ python3 -m venv .venv
 
 ### Cron
 
-Exécutez `jw run` chaque jour via cron :
+Exécutez `jw run` chaque jour via cron ; enchaînez `jw enrich` si le bloc `enrich` est configuré :
 
 ```
-0 7 * * * cd ~/jobwatch && .venv/bin/jw run
+0 7 * * * cd ~/jobwatch && .venv/bin/jw run && .venv/bin/jw enrich
 ```
 
 ### Import des artefacts et résumés
@@ -70,12 +73,47 @@ jobwatch en mode dégradable via `JOBWATCH_DIR` (`~/jobwatch` par défaut) et `J
 supplémentaire et son échec ne casse pas le cron historique. Une fois la parité vérifiée,
 SQLite/jobwatch devient la source de vérité.
 
+## Enrichissement des offres
+
+`jw enrich` traite les offres collectées par les collecteurs jobwatch (`france_travail`,
+`smartrecruiters` — pas celles ingérées via `jw ingest-daily`) qui n'ont pas encore de contenu
+stocké :
+
+1. Récupère la page de l'offre (`url`) en HTTP simple.
+2. Convertit le HTML en Markdown brut (sans extraction intelligente du contenu principal :
+   le résumé LLM qui suit est censé faire le tri dans le bruit).
+3. Si le fetch HTTP échoue, ou si le Markdown obtenu est vide/trop court pour être une vraie
+   annonce, retente via Playwright (Chromium headless) et convertit la page rendue.
+4. Stocke le texte complet dans `offer_content`, avec son statut (`ok` ou `failed`) et sa méthode
+   de récupération (`http` ou `playwright`).
+5. Génère un résumé court (quelques puces) via `deepseek-v4-flash` appelé en subprocess OpenCode,
+   et l'écrit dans `offer_summary`/`summary_bullet` avec `source = 'auto'`. Un résumé `manual`
+   existant (importé via `jw import-summaries`) n'est jamais écrasé ; le contenu complet est tout
+   de même stocké dans ce cas.
+6. Patiente 1 à 2 secondes entre deux offres pour ne pas marteler les sites tiers.
+
+Un échec (réseau ou LLM) est consigné en avertissement et n'interrompt jamais le traitement des
+offres suivantes ; une offre déjà traitée (`offer_content` existant, `ok` ou `failed`) n'est
+jamais retraitée par un run ultérieur.
+
+`jw enrich` nécessite le bloc `enrich` de `config.yaml` (voir la référence de configuration
+ci-dessous) ; sans lui, la commande refuse proprement avec un message clair, sans réseau ni erreur
+inattendue.
+
+Playwright nécessite l'installation ponctuelle de son navigateur Chromium :
+
+```bash
+.venv/bin/playwright install chromium
+```
+
 ## Tableau de bord local
 
 `jw serve` sert un tableau de bord en lecture seule qui relit la base SQLite à chaque
 chargement de page. La section `Priorité haute` regroupe les matchs high avant `Nouveaux matchs`
 et `Vus`; les cartes high disposant d'un résumé affichent un bloc `En bref`, repliable en cliquant
-sur la carte ou au clavier :
+sur la carte ou au clavier. Indépendamment du fit ou d'un résumé, toute carte dont l'offre a un
+contenu récupéré (`jw enrich`, statut `ok`) affiche un bouton « Annonce complète » qui déplie le
+texte intégral de l'annonce :
 
 ```bash
 .venv/bin/jw serve                        # http://127.0.0.1:8000 (défaut)
@@ -90,7 +128,7 @@ ou une adresse privée, et ne le publiez pas tel quel sur Internet.
 
 ## Référence de configuration
 
-`config.yaml` (une copie de `config.example.yaml`) comporte quatre sections.
+`config.yaml` (une copie de `config.example.yaml`) comporte cinq sections.
 
 | Clé | Description |
 | --- | --- |
@@ -98,15 +136,17 @@ ou une adresse privée, et ne le publiez pas tel quel sur Internet.
 | `searches` | Liste des recherches enregistrées. Chaque recherche a : `name` (identifiant unique), `include` (mots-clés, au moins un, correspondance insensible à la casse sur le titre), `exclude` (mots-clés, aucun), `locations` (correspondance par sous-chaîne sur la localisation de l'offre ; vide = n'importe où), `contract` (optionnel : `permanent`, `fixed_term`, `internship`, `other`). |
 | `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` (requête côté serveur) et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. |
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
+| `enrich` | Configuration de `jw enrich` : `opencode_bin` (binaire ou commande OpenCode) et `model` (identifiant de modèle OpenCode, ex. `opencode/deepseek-v4-flash-free`). Les deux clés sont requises dès que `enrich` n'est pas vide. |
 
 Le filtre `locations` est une correspondance par sous-chaîne sur la localisation de l'offre :
 une offre située à « Puteaux » ou « Levallois-Perret » ne matche PAS une recherche avec
 `locations: ["Paris"]`. Listez explicitement les communes voulues dans `locations`, ou laissez
 la liste vide pour accepter n'importe quelle localisation.
 
-Dans `config.example.yaml`, les blocs `sources` et `notify` sont vides (`{}`) : décommentez-les
-et remplissez-les pour activer la collecte et les notifications. Avec la config d'exemple non
-modifiée, `jw init && jw run` ne fait aucun appel réseau et ne publie rien.
+Dans `config.example.yaml`, les blocs `sources`, `notify` et `enrich` sont vides (`{}`) :
+décommentez-les et remplissez-les pour activer la collecte, les notifications et
+l'enrichissement. Avec la config d'exemple non modifiée, `jw init && jw run` ne fait aucun appel
+réseau et ne publie rien ; `jw enrich` refuse de s'exécuter tant que `enrich` n'est pas rempli.
 
 Les recherches sont synchronisées dans la base à chaque `jw run` : les nouvelles sont insérées,
 les modifiées mises à jour, les supprimées désactivées (les matchs existants sont conservés).
@@ -134,7 +174,8 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `source` | Sources de job boards configurées et leur dernière exécution |
 | `company` | Sociétés (dédupliquées par nom) |
 | `offer` | Offres d'emploi (dédupliquées par URL et société+titre) |
-| `offer_summary` | Résumé factuel unique associé à une offre existante |
+| `offer_content` | Texte complet de l'annonce (Markdown), récupéré par `jw enrich` |
+| `offer_summary` | Résumé factuel unique associé à une offre existante (`source` : `manual` ou `auto`) |
 | `summary_bullet` | Bullets d'un résumé avec leur position explicite |
 | `search` | Recherches enregistrées (mots-clés, localisations, contrat) |
 | `match` | Paire offre/recherche avec état et statut de notification |
@@ -147,6 +188,7 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 - v0.2 : tableau de bord local en lecture seule (`jw serve`).
 - v0.3 : import des artefacts quotidiens (`jw ingest-daily`) et du suivi Markdown (`jw import-md`), fit LLM, échéances et documents.
 - v0.4 : résumés high stockés dans SQLite et affichés dans le tableau de bord.
+- v0.5 : `jw enrich` récupère le texte complet des annonces collectées et en génère un résumé via LLM.
 
 ## Licence
 

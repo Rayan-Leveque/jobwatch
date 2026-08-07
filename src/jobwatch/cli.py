@@ -14,6 +14,7 @@ from jobwatch.collectors.base import store_offers
 from jobwatch.config import Config, ConfigError, example_config_text, load_config
 from jobwatch.db import connect, init_db
 from jobwatch.digest import send_digest
+from jobwatch.enrich import EnrichError, enrich
 from jobwatch.matching import run_matching, sync_searches
 from jobwatch.serve import ServeError, serve_http
 
@@ -114,6 +115,25 @@ def run(config_path: Path | None) -> None:
 
     notified = f", notifié via {', '.join(channels)}" if channels else ""
     click.echo(f"{collected} nouvelles offres collectées, {len(new_matches)} nouveaux matchs{notified}")
+
+
+@cli.command("enrich")
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def enrich_cmd(config_path: Path | None) -> None:
+    """Récupère et résume les offres collectées sans contenu stocké."""
+    config = _require_config(config_path)
+    conn = _open_db(config)
+    try:
+        try:
+            result = enrich(conn, config.enrich)
+        except EnrichError as exc:
+            _fatal(str(exc))
+    finally:
+        conn.close()
+    click.echo(
+        f"{result.fetched_ok} offre(s) récupérée(s), {result.fetched_failed} échec(s), "
+        f"{result.summaries_written} résumé(s) généré(s)"
+    )
 
 
 @cli.command("ingest-daily")
