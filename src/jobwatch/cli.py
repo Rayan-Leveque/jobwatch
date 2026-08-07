@@ -72,15 +72,29 @@ def cli() -> None:
 
 @cli.command()
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
-def init(config_path: Path | None) -> None:
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Chemin de la base SQLite à écrire dans la config (défaut : ~/.local/share/jobwatch/jobwatch.db).",
+)
+def init(config_path: Path | None, db_path: Path | None) -> None:
     """Crée un fichier config.yaml et une base de données vide, puis affiche les prochaines étapes."""
     target = config_path or Path(DEFAULT_CONFIG)
     if target.exists():
         _fatal(f"refus d'écraser la config existante {target}")
 
+    text = example_config_text()
+    if db_path is not None:
+        default_db_line = "db: ~/.local/share/jobwatch/jobwatch.db"
+        if default_db_line not in text:
+            _fatal("ligne db par défaut introuvable dans la config d'exemple")
+        text = text.replace(default_db_line, f"db: {db_path}", 1)
+
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(example_config_text())
+        target.write_text(text)
         config = load_config(target)
     except (OSError, ConfigError) as exc:
         _fatal(str(exc))

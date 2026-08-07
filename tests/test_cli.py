@@ -128,6 +128,52 @@ def test_init_creates_config_and_db(runner: CliRunner, tmp_path: Path, monkeypat
     assert "refus d'écraser" in second.output
 
 
+def test_init_db_option_writes_given_path(runner: CliRunner, tmp_path: Path, monkeypatch) -> None:
+    from jobwatch import cli as cli_module
+
+    config_path = tmp_path / "config.yaml"
+    db_path = tmp_path / "isolated" / "jw.db"
+    opened: list[Path] = []
+    real_open_db = cli_module._open_db
+
+    def _spy_open_db(config):
+        opened.append(config.db)
+        return real_open_db(config)
+
+    monkeypatch.setattr(cli_module, "_open_db", _spy_open_db)
+
+    result = runner.invoke(cli, ["init", "--config", str(config_path), "--db", str(db_path)])
+    assert result.exit_code == 0, result.output
+    text = config_path.read_text()
+    assert f"db: {db_path}" in text
+    assert "~/.local/share/jobwatch/jobwatch.db" not in text
+    assert db_path.exists()
+
+    run_result = runner.invoke(cli, ["run", "--config", str(config_path)])
+    assert run_result.exit_code == 0, run_result.output
+    assert opened == [db_path, db_path]
+
+
+def test_init_without_db_keeps_default_line(runner: CliRunner, tmp_path: Path, monkeypatch) -> None:
+    from jobwatch import cli as cli_module
+
+    config_path = tmp_path / "config.yaml"
+    opened: list[Path] = []
+    real_open_db = cli_module._open_db
+
+    def _spy_open_db(config):
+        opened.append(config.db)
+        config.db = tmp_path / "default.db"
+        return real_open_db(config)
+
+    monkeypatch.setattr(cli_module, "_open_db", _spy_open_db)
+
+    result = runner.invoke(cli, ["init", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    assert "db: ~/.local/share/jobwatch/jobwatch.db" in config_path.read_text()
+    assert opened == [Path("~/.local/share/jobwatch/jobwatch.db").expanduser()]
+
+
 def test_run_with_no_sources_succeeds(runner: CliRunner, tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     config = _write_config(tmp_path, db_path)
