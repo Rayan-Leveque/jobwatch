@@ -10,11 +10,12 @@ from typing import Any
 SCHEMA_FILE = "schema.sql"
 
 # Colonnes ajoutées après la création de la table (migration d'une base v0.2 existante).
-COLUMN_MIGRATIONS = {
-    "offer": ("deadline", "TEXT"),
-    "match": ("fit", "TEXT"),
-    "offer_summary": ("source", "TEXT DEFAULT 'manual'"),
-}
+COLUMN_MIGRATIONS = (
+    ("offer", "deadline", "TEXT"),
+    ("match", "fit", "TEXT"),
+    ("offer_summary", "source", "TEXT DEFAULT 'manual'"),
+    ("match", "discarded_at", "TEXT"),
+)
 
 
 class JobwatchError(Exception):
@@ -38,7 +39,7 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 def _migrate_columns(conn: sqlite3.Connection) -> None:
     """Ajoute les colonnes manquantes avec ALTER TABLE, de façon idempotente."""
-    for table, (column, column_type) in COLUMN_MIGRATIONS.items():
+    for table, column, column_type in COLUMN_MIGRATIONS:
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")

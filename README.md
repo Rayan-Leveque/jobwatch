@@ -108,12 +108,22 @@ Playwright nécessite l'installation ponctuelle de son navigateur Chromium :
 
 ## Tableau de bord local
 
-`jw serve` sert un tableau de bord en lecture seule qui relit la base SQLite à chaque
-chargement de page. La section `Priorité haute` regroupe les matchs high avant `Nouveaux matchs`
-et `Vus`; les cartes high disposant d'un résumé affichent un bloc `En bref`, repliable en cliquant
-sur la carte ou au clavier. Indépendamment du fit ou d'un résumé, toute carte dont l'offre a un
+`jw serve` sert un tableau de bord qui relit la base SQLite à chaque chargement de page.
+La section `Priorité haute` regroupe les matchs high avant `Nouveaux matchs` et `Vus`; les
+cartes high disposant d'un résumé affichent un bloc `En bref`, repliable en cliquant sur la
+carte ou au clavier. Indépendamment du fit ou d'un résumé, toute carte dont l'offre a un
 contenu récupéré (`jw enrich`, statut `ok`) affiche un bouton « Annonce complète » qui déplie le
-texte intégral de l'annonce :
+texte intégral de l'annonce.
+
+Chaque carte des sections `Priorité haute`, `Nouveaux matchs`, `Vus` et `À candidater` propose
+deux actions : « Plus tard » (passe le match en `state='later'`, section `À candidater`) et
+« Écarter » (passe le match en `state='discarded'` avec `discarded_at` horodaté, section
+`Corbeille`). Ces actions appellent le serveur en JavaScript (`fetch` POST) et retirent la carte
+de son emplacement sans recharger la page ; un bouton « Annuler » apparaît quelques secondes à
+la place de la carte retirée pour revenir à l'état précédent. La section `Corbeille` n'affiche
+que les matchs écartés depuis moins de 30 jours (filtre d'affichage pur, réévalué à chaque
+chargement) : passé ce délai, la ligne disparaît du tableau de bord mais n'est jamais supprimée
+de la base.
 
 ```bash
 .venv/bin/jw serve                        # http://127.0.0.1:8000 (défaut)
@@ -122,9 +132,12 @@ texte intégral de l'annonce :
 ```
 
 `--host 0.0.0.0` rend le tableau de bord accessible à toutes les machines joignables sur
-votre réseau. Le tableau de bord reste en lecture seule, mais il expose vos offres et
-candidatures : réfléchissez à qui y a accès. Préférez l'accès local (`127.0.0.1`, le défaut)
-ou une adresse privée, et ne le publiez pas tel quel sur Internet.
+votre réseau. Le tableau de bord n'ajoute aucune authentification : les deux actions HTTP
+(`POST /match/<id>/later`, `/discard`, `/restore`) mutent la base sans jeton ni contrôle
+d'accès, c'est un choix délibéré qui repose sur le périmètre réseau (Tailscale) comme frontière
+de confiance. Le tableau de bord expose et modifie vos offres et candidatures : réfléchissez à
+qui y a accès. Préférez l'accès local (`127.0.0.1`, le défaut) ou une adresse privée, et ne le
+publiez pas tel quel sur Internet.
 
 ## Référence de configuration
 
@@ -166,7 +179,7 @@ l'exécution.
 
 Les offres sont dédupliquées globalement par URL, et de plus ignorées quand la même société a déjà
 une offre avec le même titre. Chaque offre est mise en correspondance avec chaque recherche active ;
-les matchs sont stockés avec un état (`new`, `seen`, `applied`, `discarded`). Une candidature est
+les matchs sont stockés avec un état (`new`, `seen`, `later`, `applied`, `discarded`). Une candidature est
 créée depuis un match, et son statut actuel est le dernier événement de son journal d'événements.
 
 | Table | Rôle |

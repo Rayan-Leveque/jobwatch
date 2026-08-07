@@ -24,7 +24,7 @@ DEFAULT_CONFIG = "config.yaml"
 FALLBACK_CONFIG = "~/.config/jobwatch/config.yaml"
 
 EVENT_TYPES = ("applied", "follow_up", "interview", "rejected", "offer")
-MATCH_STATES = ("new", "seen", "applied", "discarded")
+MATCH_STATES = ("new", "seen", "later", "applied", "discarded")
 
 
 class CliError(Exception):
@@ -386,7 +386,10 @@ def discard(config_path: Path | None, match_id: int) -> None:
     conn = _open_db(config)
     try:
         _require_match(conn, match_id)
-        conn.execute("UPDATE match SET state = 'discarded' WHERE id = ?", (match_id,))
+        conn.execute(
+            "UPDATE match SET state = 'discarded', discarded_at = datetime('now') WHERE id = ?",
+            (match_id,),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -455,7 +458,7 @@ def apps(config_path: Path | None) -> None:
 @click.option("--host", "host", default="127.0.0.1", show_default=True, help="adresse d'écoute")
 @click.option("--port", "port", type=int, default=8000, show_default=True, help="port d'écoute")
 def serve(config_path: Path | None, host: str, port: int) -> None:
-    """Sert un tableau de bord web local en lecture seule."""
+    """Sert un tableau de bord web local."""
     config = _require_config(config_path)
     conn = _open_db(config)
     conn.close()
