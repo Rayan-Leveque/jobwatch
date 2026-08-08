@@ -39,9 +39,10 @@ def list_library(conn: sqlite3.Connection, doc_type: str) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def resolve_path(conn: sqlite3.Connection, library_id: int) -> str | None:
+def resolve_path(conn: sqlite3.Connection, library_id: int, doc_type: str) -> str | None:
     row = conn.execute(
-        "SELECT file_path FROM document_library WHERE id = ?", (library_id,)
+        "SELECT file_path FROM document_library WHERE id = ? AND type = ?",
+        (library_id, doc_type),
     ).fetchone()
     return row["file_path"] if row else None
 

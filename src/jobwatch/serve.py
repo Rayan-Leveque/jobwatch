@@ -580,12 +580,12 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
                             )
                             return
                         cv_path = (
-                            resolve_path(conn, cv_library_id)
+                            resolve_path(conn, cv_library_id, "cv")
                             if cv_library_id is not None
                             else None
                         )
                         cover_letter_path = (
-                            resolve_path(conn, cover_letter_library_id)
+                            resolve_path(conn, cover_letter_library_id, "cover_letter")
                             if cover_letter_library_id is not None
                             else None
                         )

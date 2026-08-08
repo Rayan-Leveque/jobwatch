@@ -102,10 +102,18 @@ def test_list_library_filters_by_type_and_orders_newest_first(
 
 
 def test_resolve_path_returns_none_for_unknown_id(conn: sqlite3.Connection) -> None:
-    assert resolve_path(conn, 999) is None
+    assert resolve_path(conn, 999, "cv") is None
 
 
 def test_resolve_path_returns_file_path(conn: sqlite3.Connection, tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     entry = save_upload(conn, db_path, "cv", "CV", "a.pdf", _b64(b"x"))
-    assert resolve_path(conn, entry["id"]) == entry["file_path"]
+    assert resolve_path(conn, entry["id"], "cv") == entry["file_path"]
+
+
+def test_resolve_path_returns_none_for_mismatched_type(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "jw.db"
+    entry = save_upload(conn, db_path, "cv", "CV", "a.pdf", _b64(b"x"))
+    assert resolve_path(conn, entry["id"], "cover_letter") is None
