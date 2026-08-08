@@ -342,10 +342,10 @@ def _card_actions(row: sqlite3.Row, library: dict[str, list[sqlite3.Row]]) -> st
         '<div class="card-actions">'
         f'<button class="card-action action-later" type="button" data-match-id="{match_id}" '
         f'data-prev-state="{prev_state}" data-action="later">Plus tard</button>'
-        f'<button class="card-action action-discard" type="button" data-match-id="{match_id}" '
-        f'data-prev-state="{prev_state}" data-action="discard">Écarter</button>'
         f'<button class="card-action action-apply" type="button" aria-expanded="false" '
         f'aria-controls="{form_id}">Candidater</button>'
+        f'<button class="card-action action-discard" type="button" data-match-id="{match_id}" '
+        f'data-prev-state="{prev_state}" data-action="discard">Écarter</button>'
         "</div>"
         f'<form class="apply-form" id="{form_id}" data-match-id="{match_id}" hidden>'
         f'{_document_field(match_id, "cv", "cv_library_id", "CV", library["cv"])}'
