@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import socket
 import sqlite3
@@ -85,6 +86,17 @@ def _seed_offer(
     match_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.commit()
     return match_id, offer_id
+
+
+def _seed_library(
+    conn: sqlite3.Connection, doc_type: str, label: str, file_path: str
+) -> int:
+    cur = conn.execute(
+        "INSERT INTO document_library (type, label, file_path) VALUES (?, ?, ?)",
+        (doc_type, label, file_path),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
 
 
 def _apply(conn: sqlite3.Connection, match_id: int, offer_id: int, note: str = "note") -> int:
@@ -834,6 +846,8 @@ def test_post_apply_with_both_paths_creates_application_and_documents(tmp_path: 
     connection = connect(db_path)
     init_db(connection)
     match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="later")
+    cv_id = _seed_library(connection, "cv", "CV Acme", "cv/acme.pdf")
+    cover_letter_id = _seed_library(connection, "cover_letter", "LM Acme", "lm/acme.md")
     connection.close()
     server, thread = _start_server(db_path)
     try:
@@ -841,7 +855,7 @@ def test_post_apply_with_both_paths_creates_application_and_documents(tmp_path: 
         status, headers, body = _json_post(
             port,
             f"/match/{match_id}/apply",
-            {"cv_path": "cv/acme.pdf", "cover_letter_path": "lm/acme.md"},
+            {"cv_library_id": cv_id, "cover_letter_library_id": cover_letter_id},
         )
         assert status == 200
         assert "application/json" in headers["Content-Type"]
@@ -863,12 +877,15 @@ def test_post_apply_with_single_path_creates_one_document(tmp_path: Path) -> Non
     connection = connect(db_path)
     init_db(connection)
     match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="later")
+    cv_id = _seed_library(connection, "cv", "CV seul", "cv/seul.pdf")
     connection.close()
     server, thread = _start_server(db_path)
     try:
         port = server.server_address[1]
         status, _headers, _body = _json_post(
-            port, f"/match/{match_id}/apply", {"cv_path": "cv/seul.pdf", "cover_letter_path": ""}
+            port,
+            f"/match/{match_id}/apply",
+            {"cv_library_id": cv_id, "cover_letter_library_id": ""},
         )
         assert status == 200
         result = _apply_state(db_path, match_id)
@@ -902,7 +919,7 @@ def test_post_apply_without_paths_creates_application_only(tmp_path: Path) -> No
         thread.join(timeout=5)
 
 
-def test_post_apply_whitespace_paths_create_no_document(tmp_path: Path) -> None:
+def test_post_apply_blank_library_ids_create_no_document(tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     connection = connect(db_path)
     init_db(connection)
@@ -912,7 +929,9 @@ def test_post_apply_whitespace_paths_create_no_document(tmp_path: Path) -> None:
     try:
         port = server.server_address[1]
         status, _headers, _body = _json_post(
-            port, f"/match/{match_id}/apply", {"cv_path": "   ", "cover_letter_path": "\t"}
+            port,
+            f"/match/{match_id}/apply",
+            {"cv_library_id": "", "cover_letter_library_id": None},
         )
         assert status == 200
         assert _apply_state(db_path, match_id)["documents"] == []
@@ -987,7 +1006,7 @@ def test_post_apply_rejected_when_already_applied(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
-def test_post_apply_rejects_non_string_path(tmp_path: Path) -> None:
+def test_post_apply_rejects_non_integer_library_id(tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     connection = connect(db_path)
     init_db(connection)
@@ -997,7 +1016,7 @@ def test_post_apply_rejects_non_string_path(tmp_path: Path) -> None:
     try:
         port = server.server_address[1]
         status, _headers, _body = _json_post(
-            port, f"/match/{match_id}/apply", {"cv_path": 42}
+            port, f"/match/{match_id}/apply", {"cv_library_id": "not-an-id"}
         )
         assert status == 400
         assert _apply_state(db_path, match_id)["application"] is None
@@ -1068,12 +1087,151 @@ def test_apply_button_and_form_rendered_for_actionable_sections_only(
         section = _section_html(page, key)
         assert 'class="card-action action-apply"' in section
         assert 'class="apply-form"' in section
-        assert 'name="cv_path"' in section
-        assert 'name="cover_letter_path"' in section
+        assert 'name="cv_library_id"' in section
+        assert 'name="cover_letter_library_id"' in section
+        assert 'class="doc-upload-btn"' in section
     for key in ("discarded", "applied"):
         section = _section_html(page, key)
         assert 'class="card-action action-apply"' not in section
         assert 'class="apply-form"' not in section
+
+
+def test_post_documents_uploads_and_returns_library_entry(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        content = base64.b64encode(b"contenu pdf").decode("ascii")
+        status, headers, body = _json_post(
+            port,
+            "/documents",
+            {"filename": "mon cv.pdf", "type": "cv", "label": "CV principal", "content_base64": content},
+        )
+        assert status == 201
+        assert "application/json" in headers["Content-Type"]
+        payload = json.loads(body)
+        assert payload["label"] == "CV principal"
+        assert payload["type"] == "cv"
+
+        conn = connect(db_path)
+        row = conn.execute(
+            "SELECT type, label, file_path FROM document_library WHERE id = ?", (payload["id"],)
+        ).fetchone()
+        conn.close()
+        assert row["type"] == "cv"
+        assert row["label"] == "CV principal"
+        file_path = Path(row["file_path"])
+        assert file_path.parent == db_path.parent / "documents"
+        assert file_path.read_bytes() == b"contenu pdf"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_documents_sanitizes_traversal_filename(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        content = base64.b64encode(b"malicious").decode("ascii")
+        status, _headers, body = _json_post(
+            port,
+            "/documents",
+            {
+                "filename": "../../../etc/passwd",
+                "type": "cv",
+                "label": "",
+                "content_base64": content,
+            },
+        )
+        assert status == 201
+        payload = json.loads(body)
+
+        conn = connect(db_path)
+        row = conn.execute(
+            "SELECT file_path FROM document_library WHERE id = ?", (payload["id"],)
+        ).fetchone()
+        conn.close()
+        file_path = Path(row["file_path"])
+        assert file_path.parent == db_path.parent / "documents"
+        assert file_path.name.endswith("_passwd")
+        assert not (db_path.parent / "etc" / "passwd").exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_documents_rejects_invalid_type(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        content = base64.b64encode(b"x").decode("ascii")
+        status, _headers, body = _json_post(
+            port,
+            "/documents",
+            {"filename": "a.pdf", "type": "resume", "label": "", "content_base64": content},
+        )
+        assert status == 400
+        assert "error" in json.loads(body)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_post_documents_rejects_missing_fields(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, _headers, body = _json_post(port, "/documents", {"filename": "a.pdf"})
+        assert status == 400
+        assert "error" in json.loads(body)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_uploaded_document_appears_in_dropdown_on_next_render(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    _seed_offer(connection, company="Acme", title="Role", state="later")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        content = base64.b64encode(b"x").decode("ascii")
+        status, _headers, body = _json_post(
+            port,
+            "/documents",
+            {"filename": "cv.pdf", "type": "cv", "label": "Mon CV", "content_base64": content},
+        )
+        assert status == 201
+        library_id = json.loads(body)["id"]
+
+        _, _headers, page_body = _get(port, "/")
+        assert f'<option value="{library_id}">Mon CV</option>' in page_body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_http_missing_route_returns_plain_404(tmp_path: Path) -> None:
