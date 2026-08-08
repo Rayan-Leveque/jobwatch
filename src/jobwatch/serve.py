@@ -4,9 +4,11 @@ La page est regénérée à chaque requête GET / depuis l'état actuel de la ba
 Le rendu est pur (`render_page`) et le serveur HTTP n'utilise que la
 bibliothèque standard. Les actions HTTP (POST /match/<id>/later,
 /match/<id>/discard, /match/<id>/restore pour l'annulation et
-/match/<id>/apply pour enregistrer une candidature avec chemins de
-documents) mutent l'état d'un match ; aucune authentification n'est
-ajoutée, le périmètre Tailscale est la frontière de confiance.
+/match/<id>/apply pour enregistrer une candidature avec des documents
+choisis dans la bibliothèque) mutent l'état d'un match ; POST /documents
+uploade un nouveau document (JSON base64, voir jobwatch.library) sans
+mutation de match. Aucune authentification n'est ajoutée, le périmètre
+Tailscale est la frontière de confiance.
 """
 
 from __future__ import annotations
@@ -24,9 +26,11 @@ import click
 
 from jobwatch.applications import ApplicationError, record_application
 from jobwatch.db import connect
+from jobwatch.library import LibraryError, list_library, resolve_path, save_upload
 
 RESTORE_STATES = ("new", "seen", "later")
 _MATCH_ACTION_RE = re.compile(r"^/match/(\d+)/(later|discard|restore|apply)$")
+_UPLOAD_PATH = "/documents"
 
 STATUS_LABELS = {
     "applied": "Candidature envoyée",
@@ -301,7 +305,36 @@ def _row_class(state: object) -> str:
     return value if value in ("new", "seen", "later", "discarded") else "seen"
 
 
-def _card_actions(row: sqlite3.Row) -> str:
+def _document_options(rows: list[sqlite3.Row]) -> str:
+    options = ['<option value="">Aucun</option>']
+    options.extend(
+        f'<option value="{int(r["id"])}">{html.escape(str(r["label"]))}</option>' for r in rows
+    )
+    return "".join(options)
+
+
+def _document_field(match_id: int, doc_type: str, name: str, label: str, rows: list[sqlite3.Row]) -> str:
+    select_id = f"{doc_type}-select-{match_id}"
+    options = _document_options(rows)
+    return (
+        f'<div class="doc-field" data-doc-type="{doc_type}">'
+        f'<label class="doc-label" for="{select_id}">{html.escape(label)}</label>'
+        '<div class="doc-row">'
+        f'<select class="apply-input doc-select" id="{select_id}" name="{name}" '
+        f'data-doc-type="{doc_type}">{options}</select>'
+        f'<button class="doc-upload-btn" type="button" data-doc-type="{doc_type}">Uploader</button>'
+        "</div>"
+        f'<input class="doc-file-input" type="file" data-doc-type="{doc_type}" hidden>'
+        '<div class="doc-label-prompt" hidden>'
+        '<input class="apply-input doc-label-input" type="text" autocomplete="off" '
+        'placeholder="Nom du document (optionnel)" aria-label="Nom du document">'
+        '<button class="card-action doc-label-confirm" type="button">Ajouter à la bibliothèque</button>'
+        "</div>"
+        "</div>"
+    )
+
+
+def _card_actions(row: sqlite3.Row, library: dict[str, list[sqlite3.Row]]) -> str:
     match_id = int(row["id"])
     prev_state = html.escape(str(row["state"]), quote=True)
     form_id = f"apply-form-{match_id}"
@@ -315,18 +348,19 @@ def _card_actions(row: sqlite3.Row) -> str:
         f'aria-controls="{form_id}">Candidater</button>'
         "</div>"
         f'<form class="apply-form" id="{form_id}" data-match-id="{match_id}" hidden>'
-        '<input class="apply-input" name="cv_path" type="text" autocomplete="off" '
-        'placeholder="Chemin du CV (optionnel)" aria-label="Chemin du CV">'
-        '<input class="apply-input" name="cover_letter_path" type="text" autocomplete="off" '
-        'placeholder="Chemin de la lettre de motivation (optionnel)" '
-        'aria-label="Chemin de la lettre de motivation">'
+        f'{_document_field(match_id, "cv", "cv_library_id", "CV", library["cv"])}'
+        f'{_document_field(match_id, "cover_letter", "cover_letter_library_id", "Lettre de motivation", library["cover_letter"])}'
         '<button class="card-action apply-submit" type="submit">Enregistrer la candidature</button>'
         "</form>"
     )
 
 
 def _match_card(
-    row: sqlite3.Row, bullets: list[str], content: str | None, actions: bool = False
+    row: sqlite3.Row,
+    bullets: list[str],
+    content: str | None,
+    library: dict[str, list[sqlite3.Row]],
+    actions: bool = False,
 ) -> str:
     cls = _row_class(row["state"])
     company = html.escape(str(row["company"] or "Société inconnue"))
@@ -337,7 +371,7 @@ def _match_card(
     summary_class = " has-summary" if summary else ""
     chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
     content_button, content_panel = _content_panel(row, content, "match")
-    actions_html = _card_actions(row) if actions else ""
+    actions_html = _card_actions(row, library) if actions else ""
     return (
         f'<article class="row row-{cls}{summary_class}">{button}<div class="body">'
         f'<div class="card-topline"><div class="company">{company}</div>'
@@ -378,12 +412,13 @@ def _card(
     key: str,
     summaries: dict[int, list[str]],
     contents: dict[int, str],
+    library: dict[str, list[sqlite3.Row]],
 ) -> str:
     bullets = summaries.get(int(row["offer_id"]), [])
     content = contents.get(int(row["offer_id"]))
     if key == "applied":
         return _application_card(row, bullets, content)
-    return _match_card(row, bullets, content, actions=key in ACTIONABLE_SECTIONS)
+    return _match_card(row, bullets, content, library, actions=key in ACTIONABLE_SECTIONS)
 
 
 def _section(
@@ -395,9 +430,10 @@ def _section(
     open_default: bool,
     summaries: dict[int, list[str]],
     contents: dict[int, str],
+    library: dict[str, list[sqlite3.Row]],
 ) -> str:
     if rows:
-        cards = "\n".join(_card(row, key, summaries, contents) for row in rows)
+        cards = "\n".join(_card(row, key, summaries, contents, library) for row in rows)
     else:
         cards = f'<p class="empty-note">{empty_text}</p>'
     open_attr = " open" if open_default else ""
@@ -427,31 +463,32 @@ def render_page(conn: sqlite3.Connection) -> str:
     )
     summaries = _summary_bullets(conn, offer_ids)
     contents = _offer_contents(conn, offer_ids)
+    library = {"cv": list_library(conn, "cv"), "cover_letter": list_library(conn, "cover_letter")}
     body = "\n".join(
         (
             _section(
                 "priority", "Priorité haute", "À regarder en premier", priority,
-                "Aucune offre prioritaire pour l'instant.", True, summaries, contents,
+                "Aucune offre prioritaire pour l'instant.", True, summaries, contents, library,
             ),
             _section(
                 "new", "Nouveaux matchs", "À découvrir", new,
-                "Aucun nouveau match pour l'instant.", True, summaries, contents,
+                "Aucun nouveau match pour l'instant.", True, summaries, contents, library,
             ),
             _section(
                 "seen", "Vus", "Déjà parcourus", seen,
-                "Aucun match parcouru pour l'instant.", False, summaries, contents,
+                "Aucun match parcouru pour l'instant.", False, summaries, contents, library,
             ),
             _section(
                 "later", "À candidater", "Mis de côté pour plus tard", later,
-                "Aucune offre à candidater plus tard pour l'instant.", False, summaries, contents,
+                "Aucune offre à candidater plus tard pour l'instant.", False, summaries, contents, library,
             ),
             _section(
                 "discarded", "Corbeille", "Écartées dans les 30 derniers jours", discarded,
-                "Aucune offre écartée récemment.", False, summaries, contents,
+                "Aucune offre écartée récemment.", False, summaries, contents, library,
             ),
             _section(
                 "applied", "Candidatures", "Dernier statut connu", applied,
-                "Aucune candidature pour l'instant.", False, summaries, contents,
+                "Aucune candidature pour l'instant.", False, summaries, contents, library,
             ),
         )
     )
@@ -495,6 +532,9 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
+            if path == _UPLOAD_PATH:
+                self._handle_upload()
+                return
             match = _MATCH_ACTION_RE.match(path)
             if not match:
                 self._send_text(404, "404 Not Found\n")
@@ -502,8 +542,8 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
             match_id = int(match.group(1))
             action = match.group(2)
             target_state: str | None = None
-            cv_path: str | None = None
-            cover_letter_path: str | None = None
+            cv_library_id: int | None = None
+            cover_letter_library_id: int | None = None
             if action == "restore":
                 body = self._read_json_body()
                 target_state = body.get("state") if isinstance(body, dict) else None
@@ -513,17 +553,17 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
             elif action == "apply":
                 body = self._read_json_body()
                 fields = body if isinstance(body, dict) else {}
-                paths: list[str | None] = []
-                for key in ("cv_path", "cover_letter_path"):
+                library_ids: list[int | None] = []
+                for key in ("cv_library_id", "cover_letter_library_id"):
                     value = fields.get(key)
-                    if value is None:
-                        paths.append(None)
-                    elif isinstance(value, str):
-                        paths.append(value.strip() or None)
+                    if value in (None, ""):
+                        library_ids.append(None)
+                    elif isinstance(value, int) and not isinstance(value, bool):
+                        library_ids.append(value)
                     else:
                         self._send_json(400, {"error": f"champ {key} invalide"})
                         return
-                cv_path, cover_letter_path = paths
+                cv_library_id, cover_letter_library_id = library_ids
             try:
                 conn = connect(db_path)
                 try:
@@ -539,6 +579,16 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
                                 409, {"error": "match écarté : restaurez-le d'abord"}
                             )
                             return
+                        cv_path = (
+                            resolve_path(conn, cv_library_id)
+                            if cv_library_id is not None
+                            else None
+                        )
+                        cover_letter_path = (
+                            resolve_path(conn, cover_letter_library_id)
+                            if cover_letter_library_id is not None
+                            else None
+                        )
                         try:
                             record_application(
                                 conn, match_id,
@@ -570,6 +620,37 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
                 self._send_text(500, f"erreur base de données : {exc}\n")
                 return
             self._send_json(200, {"ok": True})
+
+        def _handle_upload(self) -> None:
+            body = self._read_json_body()
+            fields = body if isinstance(body, dict) else {}
+            filename = fields.get("filename")
+            doc_type = fields.get("type")
+            label = fields.get("label")
+            content_base64 = fields.get("content_base64")
+            if not isinstance(filename, str) or not isinstance(doc_type, str) or not isinstance(
+                content_base64, str
+            ):
+                self._send_json(400, {"error": "champs requis manquants ou invalides"})
+                return
+            if label is not None and not isinstance(label, str):
+                self._send_json(400, {"error": "champ label invalide"})
+                return
+            try:
+                conn = connect(db_path)
+                try:
+                    entry = save_upload(conn, db_path, doc_type, label, filename, content_base64)
+                except LibraryError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            self._send_json(
+                201, {"id": int(entry["id"]), "label": str(entry["label"]), "type": str(entry["type"])}
+            )
 
         def _read_json_body(self) -> object:
             try:
@@ -860,6 +941,19 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .apply-input::placeholder { color:var(--muted-2); opacity:1 }
 .apply-input:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
 .apply-submit { justify-self:start }
+.doc-field { display:grid; gap:6px; padding:8px; border:1px dashed var(--line-strong);
+  border-radius:11px; transition:border-color .15s ease, background .15s ease }
+.doc-field.doc-dragover { border-color:var(--accent); background:var(--accent-soft) }
+.doc-label { color:var(--muted); font-size:.68rem; font-weight:700; letter-spacing:.03em;
+  text-transform:uppercase }
+.doc-row { display:flex; gap:8px }
+.doc-select { flex:1; min-width:0 }
+.doc-upload-btn { flex:none; min-height:44px; padding:0 14px; border:1px solid var(--line);
+  border-radius:11px; color:var(--fg); background:var(--surface); font-size:.71rem; font-weight:700;
+  letter-spacing:.02em; cursor:pointer; transition:border-color .15s ease, background .15s ease }
+.doc-upload-btn:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
+.doc-label-prompt { display:flex; gap:8px }
+.doc-label-prompt[hidden] { display:none }
 .undo-toast { display:flex; align-items:center; justify-content:space-between; gap:12px;
   color:var(--muted); font-size:.78rem }
 .undo-toast .undo-btn { flex:none; min-height:38px; padding:0 14px; border:1px solid var(--line);
@@ -1081,17 +1175,81 @@ _JS = """\
       event.preventDefault();
       const row = form.closest('.row');
       const matchId = form.dataset.matchId;
+      const toId = value => value ? Number(value) : null;
       fetch(`/match/${matchId}/apply`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
-          cv_path: form.elements.cv_path.value.trim(),
-          cover_letter_path: form.elements.cover_letter_path.value.trim(),
+          cv_library_id: toId(form.elements.cv_library_id.value),
+          cover_letter_library_id: toId(form.elements.cover_letter_library_id.value),
         }),
       }).then(resp => {
         if (!resp.ok) return;
         removeRow(row, () => showToast(row, 'Candidature enregistrée.'));
       });
+    });
+  });
+
+  const readAsBase64 = file => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',', 2)[1] || '');
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+  const pendingUploads = new WeakMap();
+  const startUpload = (field, file) => {
+    pendingUploads.set(field, file);
+    const prompt = field.querySelector('.doc-label-prompt');
+    const labelInput = field.querySelector('.doc-label-input');
+    labelInput.value = '';
+    prompt.hidden = false;
+    labelInput.focus();
+  };
+  const finishUpload = async field => {
+    const file = pendingUploads.get(field);
+    if (!file) return;
+    const docType = field.dataset.docType;
+    const labelInput = field.querySelector('.doc-label-input');
+    const select = field.querySelector('.doc-select');
+    const contentBase64 = await readAsBase64(file);
+    const resp = await fetch('/documents', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        filename: file.name,
+        type: docType,
+        label: labelInput.value.trim(),
+        content_base64: contentBase64,
+      }),
+    });
+    if (!resp.ok) return;
+    const entry = await resp.json();
+    const option = document.createElement('option');
+    option.value = String(entry.id);
+    option.textContent = entry.label;
+    select.append(option);
+    select.value = String(entry.id);
+    pendingUploads.delete(field);
+    field.querySelector('.doc-label-prompt').hidden = true;
+  };
+  [...document.querySelectorAll('.doc-field')].forEach(field => {
+    const fileInput = field.querySelector('.doc-file-input');
+    field.querySelector('.doc-upload-btn').addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files[0]) startUpload(field, fileInput.files[0]);
+      fileInput.value = '';
+    });
+    field.querySelector('.doc-label-confirm').addEventListener('click', () => finishUpload(field));
+    field.querySelector('.doc-label-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); finishUpload(field); }
+    });
+    field.addEventListener('dragover', e => { e.preventDefault(); field.classList.add('doc-dragover'); });
+    field.addEventListener('dragleave', () => field.classList.remove('doc-dragover'));
+    field.addEventListener('drop', e => {
+      e.preventDefault();
+      field.classList.remove('doc-dragover');
+      const file = e.dataTransfer.files[0];
+      if (file) startUpload(field, file);
     });
   });
 })();

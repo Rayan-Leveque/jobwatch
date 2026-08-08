@@ -129,16 +129,38 @@ def test_undo_restores_previous_state(browser, dashboard) -> None:
     page.close()
 
 
-def test_apply_form_submits_and_removes_card_without_reload(browser, dashboard) -> None:
+def test_apply_form_submits_and_removes_card_without_reload(browser, dashboard, tmp_path: Path) -> None:
     url, db_path = dashboard
+    cv_src = tmp_path / "moncv.pdf"
+    cv_src.write_bytes(b"%PDF-1.4 cv content")
+    letter_src = tmp_path / "lettre.md"
+    letter_src.write_bytes(b"# Lettre de motivation")
+
     page = _open_page(browser, url)
     page.locator('[data-section="later"] > summary').click()
     card = _card(page, "LaterCo")
     card.locator(".action-apply").click()
     form = card.locator(".apply-form")
     form.wait_for(state="visible", timeout=5000)
-    form.locator('[name="cv_path"]').fill("cv/laterco.pdf")
-    form.locator('[name="cover_letter_path"]').fill("lm/laterco.md")
+
+    cv_field = form.locator('.doc-field[data-doc-type="cv"]')
+    cv_field.locator(".doc-file-input").set_input_files(str(cv_src))
+    cv_field.locator(".doc-label-prompt").wait_for(state="visible", timeout=5000)
+    cv_field.locator(".doc-label-input").fill("CV LaterCo")
+    cv_field.locator(".doc-label-confirm").click()
+    page.wait_for_function(
+        "el => el.value !== ''", arg=cv_field.locator('[name="cv_library_id"]').element_handle()
+    )
+
+    letter_field = form.locator('.doc-field[data-doc-type="cover_letter"]')
+    letter_field.locator(".doc-file-input").set_input_files(str(letter_src))
+    letter_field.locator(".doc-label-prompt").wait_for(state="visible", timeout=5000)
+    letter_field.locator(".doc-label-confirm").click()
+    page.wait_for_function(
+        "el => el.value !== ''",
+        arg=letter_field.locator('[name="cover_letter_library_id"]').element_handle(),
+    )
+
     form.locator(".apply-submit").click()
     page.locator(".undo-toast").wait_for(state="visible", timeout=5000)
     assert card.count() == 0
@@ -159,8 +181,7 @@ def test_apply_form_submits_and_removes_card_without_reload(browser, dashboard) 
     ).fetchall()
     conn.close()
     assert row["state"] == "applied"
-    assert [(d["type"], d["path"]) for d in documents] == [
-        ("cover_letter", "lm/laterco.md"),
-        ("cv", "cv/laterco.pdf"),
-    ]
+    assert [d["type"] for d in documents] == ["cover_letter", "cv"]
+    assert Path(documents[1]["path"]).read_bytes() == b"%PDF-1.4 cv content"
+    assert Path(documents[0]["path"]).read_bytes() == b"# Lettre de motivation"
     page.close()

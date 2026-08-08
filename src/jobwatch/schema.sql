@@ -81,3 +81,10 @@ CREATE TABLE IF NOT EXISTS document (
   path TEXT NOT NULL,
   sent_at TEXT
 );
+CREATE TABLE IF NOT EXISTS document_library (
+  id INTEGER PRIMARY KEY,
+  type TEXT NOT NULL,                -- 'cv' | 'cover_letter'
+  label TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
