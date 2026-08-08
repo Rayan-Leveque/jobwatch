@@ -120,12 +120,18 @@ texte intégral de l'annonce.
 Chaque carte des sections `Priorité haute`, `Nouveaux matchs`, `Vus` et `À candidater` propose
 trois actions : « Plus tard » (passe le match en `state='later'`, section `À candidater`),
 « Écarter » (passe le match en `state='discarded'` avec `discarded_at` horodaté, section
-`Corbeille`) et « Candidater ». Cette dernière déplie un petit formulaire avec deux champs
-texte optionnels - chemin du CV et chemin de la lettre de motivation - et enregistre en une
+`Corbeille`) et « Candidater ». Cette dernière déplie un petit formulaire avec deux menus
+déroulants optionnels - CV et lettre de motivation - peuplés depuis une bibliothèque de
+documents réutilisables (table `document_library`) ; un bouton « Uploader » à côté de chaque
+menu ouvre le sélecteur de fichiers natif (le glisser-déposer fonctionne aussi), envoie le
+fichier en base64 vers `POST /documents`, et sélectionne automatiquement la nouvelle entrée
+dans le menu. Aucune sélection n'est obligatoire, comme avant. La soumission enregistre en une
 seule action la candidature (même logique que `jw apply` : ligne `application`, événement
 `applied`, match en `state='applied'`) plus une ligne `document` par champ rempli (`cv` ou
-`cover_letter`). Les chemins sont du texte libre, sans validation d'existence sur le disque :
-simplification délibérée pour un usage personnel à ce stade. Ces actions appellent le serveur
+`cover_letter`), en résolvant l'entrée de bibliothèque choisie vers son chemin sur disque. Les
+fichiers uploadés sont stockés sous `<db>/../documents/`, préfixés d'un identifiant aléatoire ;
+seul le nom de base du fichier client est utilisé, ce qui empêche toute traversée de chemin.
+Ces actions appellent le serveur
 en JavaScript (`fetch` POST) et retirent la carte de son emplacement sans recharger la page ;
 pour « Plus tard » et « Écarter », un bouton « Annuler » apparaît quelques secondes à
 la place de la carte retirée pour revenir à l'état précédent. La section `Corbeille` n'affiche
