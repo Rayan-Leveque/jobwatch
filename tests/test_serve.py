@@ -198,6 +198,64 @@ def test_placement_of_later_and_recently_discarded(conn: sqlite3.Connection) -> 
     assert "TrashCo" not in _section_html(page, "applied")
 
 
+def test_tracks_split_matches_exclusively(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="NewPO", title="Chef de projet IA", state="new")
+    _seed_offer(conn, company="SeenPO", title="Chef(fe) de projets IA — innovation", state="seen")
+    _seed_offer(conn, company="LaterPO", title="Product Owner Data & IA", state="later")
+    _seed_offer(conn, company="EngCo", title="AI Engineer", state="new")
+
+    engineer = render_page(conn)
+    project = render_page(conn, "project")
+    assert "EngCo" in _section_html(engineer, "new")
+    assert "EngCo" not in project
+    assert "NewPO" in _section_html(project, "new")
+    assert "SeenPO" in _section_html(project, "seen")
+    assert "LaterPO" in _section_html(project, "later")
+    for company in ("NewPO", "SeenPO", "LaterPO"):
+        assert company not in engineer
+
+
+def test_track_title_variants_and_case(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="ProduitCo", title="CHEF DE PRODUIT Applicatif IA", state="new")
+    _seed_offer(conn, company="PMCo", title="Product manager IA (H/F)", state="seen")
+
+    project = render_page(conn, "project")
+    assert "ProduitCo" in _section_html(project, "new")
+    assert "PMCo" in _section_html(project, "seen")
+
+
+def test_track_pages_have_full_sections_and_tabs(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="HighPO", title="Chef de projet IA", state="new", fit="high")
+
+    engineer = render_page(conn)
+    project = render_page(conn, "project")
+    assert "HighPO" in _section_html(project, "priority")
+    assert "HighPO" not in engineer
+    assert 'class="card-action action-later"' in _section_html(project, "priority")
+    for page, active in ((engineer, ">Ingénieur IA<"), (project, ">Chef de projet / PO<")):
+        assert 'href="/"' in page and 'href="/po"' in page
+        assert f'aria-current="page"{active}' in page
+
+
+def test_tracks_split_applied_and_discarded(conn: sqlite3.Connection) -> None:
+    match_id, offer_id = _seed_offer(conn, company="AppPO", title="Chef de projet IA", state="new")
+    _apply(conn, match_id, offer_id)
+    eng_match, eng_offer = _seed_offer(conn, company="AppEng", title="AI Engineer", state="new")
+    _apply(conn, eng_match, eng_offer)
+    trash_id, _ = _seed_offer(conn, company="TrashPO", title="Product Owner IA", state="discarded")
+    conn.execute("UPDATE match SET discarded_at = datetime('now') WHERE id = ?", (trash_id,))
+    conn.commit()
+
+    engineer = render_page(conn)
+    project = render_page(conn, "project")
+    assert "AppPO" in _section_html(project, "applied")
+    assert "TrashPO" in _section_html(project, "discarded")
+    assert "AppPO" not in engineer
+    assert "TrashPO" not in engineer
+    assert "AppEng" in _section_html(engineer, "applied")
+    assert "AppEng" not in project
+
+
 def test_discarded_matches_older_than_30_days_are_hidden_but_row_kept(
     conn: sqlite3.Connection,
 ) -> None:
@@ -638,6 +696,32 @@ def test_http_root_serves_page(tmp_path: Path) -> None:
         assert body.startswith("<!DOCTYPE html>")
         assert "Nouveaux matchs" in body
         assert "Acme" in body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_http_po_route_serves_project_track(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    _seed_offer(connection, company="EngCo", title="AI Engineer")
+    _seed_offer(connection, company="POCo", title="Product Owner IA")
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, _, body = _get(port, "/po")
+        assert status == 200
+        assert "POCo" in body
+        assert "EngCo" not in body
+        status, _, root_body = _get(port, "/")
+        assert status == 200
+        assert "EngCo" in root_body
+        assert "POCo" not in root_body
+        status, _, _ = _get(port, "/autre")
+        assert status == 404
     finally:
         server.shutdown()
         server.server_close()
