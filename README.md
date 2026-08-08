@@ -118,9 +118,9 @@ contenu récupéré (`jw enrich`, statut `ok`) affiche un bouton « Annonce comp
 texte intégral de l'annonce.
 
 Chaque carte des sections `Priorité haute`, `Nouveaux matchs`, `Vus` et `À candidater` propose
-trois actions : « Plus tard » (passe le match en `state='later'`, section `À candidater`),
-« Écarter » (passe le match en `state='discarded'` avec `discarded_at` horodaté, section
-`Corbeille`) et « Candidater ». Cette dernière déplie un petit formulaire avec deux menus
+trois actions, dans cet ordre : « Plus tard » (passe le match en `state='later'`, section
+`À candidater`), « Candidater » et « Écarter » (passe le match en `state='discarded'` avec
+`discarded_at` horodaté, section `Corbeille`). « Candidater » déplie un petit formulaire avec deux menus
 déroulants optionnels - CV et lettre de motivation - peuplés depuis une bibliothèque de
 documents réutilisables (table `document_library`) ; un bouton « Uploader » à côté de chaque
 menu ouvre le sélecteur de fichiers natif (le glisser-déposer fonctionne aussi), envoie le

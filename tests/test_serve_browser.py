@@ -185,3 +185,11 @@ def test_apply_form_submits_and_removes_card_without_reload(browser, dashboard, 
     assert Path(documents[1]["path"]).read_bytes() == b"%PDF-1.4 cv content"
     assert Path(documents[0]["path"]).read_bytes() == b"# Lettre de motivation"
     page.close()
+
+
+def test_card_action_buttons_render_in_order_later_apply_discard(browser, dashboard) -> None:
+    url, _db_path = dashboard
+    page = _open_page(browser, url)
+    buttons = _card(page, "NewCo").locator(".card-actions .card-action")
+    assert buttons.all_inner_texts() == ["Plus tard", "Candidater", "Écarter"]
+    page.close()
