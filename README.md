@@ -48,6 +48,7 @@ nommée. Chaque instance possède sa configuration, sa base SQLite et son dossie
 .venv/bin/jw --instance rayan serve --port 8765
 
 .venv/bin/jw --instance alice init
+.venv/bin/jw --instance alice account invite alice@example.com
 .venv/bin/jw --instance alice serve --port 8766
 ```
 
@@ -55,6 +56,9 @@ Les configurations vivent sous `~/.config/jobwatch/instances/<nom>/config.yaml` 
 données sous `~/.local/share/jobwatch/instances/<nom>/`. Les variables XDG sont respectées.
 `JOBWATCH_INSTANCE=alice` est équivalent à `--instance alice`, notamment pour cron ou un service.
 Un `--config PATH` explicite reste prioritaire.
+`account invite` active l'authentification de l'instance et produit un chemin d'invitation
+propriétaire valable 48 heures. Les routes web de consommation de cette invitation sont en cours
+d'intégration ; n'activez pas encore cette commande sur une instance de production.
 
 ### Cron
 

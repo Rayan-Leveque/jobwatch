@@ -111,3 +111,55 @@ CREATE TABLE IF NOT EXISTS draft_job (
   finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_draft_job_match ON draft_job(match_id, id);
+
+-- Authentification et espaces. Une base d'instance ne contient actuellement qu'un
+-- espace, mais ce modèle permet la future mutualisation de plusieurs espaces.
+CREATE TABLE IF NOT EXISTS workspace (
+  id INTEGER PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS account (
+  id INTEGER PRIMARY KEY,
+  email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  password_hash TEXT,
+  disabled INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS membership (
+  account_id INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,                 -- 'owner' pour la phase instance isolée
+  PRIMARY KEY(account_id, workspace_id)
+);
+CREATE TABLE IF NOT EXISTS account_invite (
+  id INTEGER PRIMARY KEY,
+  workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+  email TEXT NOT NULL COLLATE NOCASE,
+  role TEXT NOT NULL DEFAULT 'owner',
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at TEXT NOT NULL,
+  accepted_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS web_session (
+  token_hash TEXT PRIMARY KEY,
+  account_id INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+  csrf_token TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_web_session_account ON web_session(account_id);
+CREATE TABLE IF NOT EXISTS instance_setting (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS login_throttle (
+  key_hash TEXT PRIMARY KEY,
+  failures INTEGER NOT NULL,
+  window_started_at TEXT NOT NULL,
+  blocked_until TEXT
+);

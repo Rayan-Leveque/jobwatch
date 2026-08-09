@@ -10,6 +10,7 @@ import click
 
 from jobwatch import __version__, importing
 from jobwatch.applications import ApplicationError, record_application
+from jobwatch.auth import AuthError, create_invite
 from jobwatch.collectors import build_collectors
 from jobwatch.collectors.base import store_offers
 from jobwatch.config import Config, ConfigError, example_config_text, load_config
@@ -296,6 +297,32 @@ def migrate_storage(config_path: Path | None, source_root: Path | None) -> None:
     )
     for path in result.missing:
         click.echo(f"avertissement : document introuvable : {path}", err=True)
+
+
+@cli.group("account")
+def account_group() -> None:
+    """Gère le compte propriétaire de l'instance."""
+
+
+@account_group.command("invite")
+@click.argument("email")
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def account_invite(config_path: Path | None, email: str) -> None:
+    """Crée un lien d'invitation propriétaire valable 48 heures."""
+    instance = _current_instance()
+    if instance is None:
+        _fatal("account invite nécessite --instance NAME ou JOBWATCH_INSTANCE")
+    config = _require_config(config_path)
+    conn = _open_db(config)
+    try:
+        try:
+            token = create_invite(conn, instance, email)
+        except AuthError as exc:
+            _fatal(str(exc))
+    finally:
+        conn.close()
+    click.echo(f"invitation créée pour {email.strip().casefold()} (valable 48 h)")
+    click.echo(f"/invite/{token}")
 
 
 @cli.command("list")
