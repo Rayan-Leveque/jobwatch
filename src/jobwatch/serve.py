@@ -43,6 +43,7 @@ from jobwatch.auth import (
     clear_login_failures,
     create_session,
     delete_session,
+    invite_status,
     login_allowed,
     login_throttle_key,
     record_login_failure,
@@ -1101,7 +1102,29 @@ def make_handler(
                 return
             invite = re.fullmatch(r"/invite/([^/]+)", path)
             if invite:
-                self._send_auth_page("Créer votre compte", _invite_form(invite.group(1)))
+                required, session, _token = self._authentication()
+                if required and session is not None:
+                    self._redirect("/")
+                    return
+                if workspace_slug is None:
+                    self._send_text(503, "instance nommée requise pour l'authentification\n")
+                    return
+                conn = connect(db_path)
+                try:
+                    status = invite_status(conn, invite.group(1), workspace_slug)
+                finally:
+                    conn.close()
+                if status == "accepted":
+                    self._redirect("/login")
+                elif status == "valid":
+                    self._send_auth_page("Créer votre compte", _invite_form(invite.group(1)))
+                else:
+                    self._send_auth_page(
+                        "Invitation indisponible",
+                        '<p class="auth-intro">Ce lien est invalide ou expiré.</p>'
+                        '<a class="auth-link" href="/login">Aller à la connexion</a>',
+                        status=410,
+                    )
                 return
             required, session = self._auth_enabled_without_session(path)
             if required and session is None:
@@ -1581,6 +1604,14 @@ def make_handler(
                     status=503,
                 )
                 return
+            conn = connect(db_path)
+            try:
+                status = invite_status(conn, token, workspace_slug)
+            finally:
+                conn.close()
+            if status == "accepted":
+                self._redirect("/login")
+                return
             if password != confirmation:
                 self._send_auth_page(
                     "Créer votre compte",
@@ -1832,6 +1863,8 @@ button {{ margin-top:4px; padding:14px 18px; border:0; border-radius:12px;
 .auth-intro {{ color:#686d76; line-height:1.5; }}
 .auth-error {{ padding:12px 14px; border-radius:12px; color:#8f2940;
   background:rgba(182,60,84,.10); }}
+.auth-link {{ display:inline-flex; padding:12px 16px; border-radius:12px; color:#fff;
+  background:#42752d; font-weight:750; text-decoration:none; }}
 </style></head><body><main class="auth-card"><div class="auth-brand">jobwatch</div>
 <h1>{html.escape(title)}</h1>{body}</main><script>
 document.querySelectorAll('[data-password-target]').forEach(button => {{

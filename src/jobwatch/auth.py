@@ -184,6 +184,29 @@ def create_invite(
     return token
 
 
+def invite_status(
+    conn: sqlite3.Connection,
+    token: str,
+    workspace_slug: str,
+    *,
+    now: datetime.datetime | None = None,
+) -> str:
+    """Renvoie `valid`, `accepted`, `expired` ou `invalid` pour un lien d'invitation."""
+    row = conn.execute(
+        "SELECT i.expires_at, i.accepted_at FROM account_invite i "
+        "JOIN workspace w ON w.id = i.workspace_id "
+        "WHERE i.token_hash = ? AND w.slug = ?",
+        (_token_hash(token), workspace_slug),
+    ).fetchone()
+    if row is None:
+        return "invalid"
+    if row["accepted_at"] is not None:
+        return "accepted"
+    if row["expires_at"] <= _timestamp(_now(now)):
+        return "expired"
+    return "valid"
+
+
 def accept_invite(
     conn: sqlite3.Connection,
     token: str,
