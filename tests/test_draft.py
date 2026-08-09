@@ -699,3 +699,68 @@ def test_render_page_shows_swipe_invites_only_with_new_offers(db_path: Path) -> 
     assert "C'est le moment de swiper." in page
     assert 'swipe-fab-count">1<' in page
     conn.close()
+
+
+def test_config_parses_codex_draft_runner(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "draft:\n"
+        "  runner: codex\n"
+        "  model: gpt-5.6-luna\n"
+        "  variant: max\n"
+    )
+    config = load_config(config_file).draft
+    assert config is not None
+    assert config.runner == "codex"
+    assert config.codex_bin == "codex"
+    assert config.variant == "max"
+
+    # Le runner opencode exige toujours opencode_bin explicitement.
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "draft:\n"
+        "  model: m\n"
+    )
+    with pytest.raises(ConfigError, match="opencode_bin"):
+        load_config(config_file)
+
+
+def test_call_llm_codex_builds_command_and_reads_output(monkeypatch) -> None:
+    import subprocess as sp
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["input"] = kwargs.get("input")
+        out_path = Path(command[command.index("-o") + 1])
+        out_path.write_text(MINIMAL_TEX, encoding="utf-8")
+        return sp.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("jobwatch.draft.subprocess.run", fake_run)
+    config = DraftConfig(model="gpt-5.6-luna", runner="codex", variant="max")
+    text = draft._call_llm(config, "Rédige la lettre.", "# OFFRE\n\ncontenu")
+
+    assert text == MINIMAL_TEX
+    command = captured["command"]
+    assert command[:2] == ["codex", "exec"]
+    assert command[command.index("--model") + 1] == "gpt-5.6-luna"
+    assert "model_reasoning_effort=max" in command
+    assert command[command.index("-s") + 1] == "danger-full-access"
+    assert captured["input"] == "# OFFRE\n\ncontenu"
+    assert command[-1].endswith("Rédige la lettre.")
+
+
+def test_call_llm_codex_failure_raises_drafterror(monkeypatch) -> None:
+    import subprocess as sp
+
+    monkeypatch.setattr(
+        "jobwatch.draft.subprocess.run",
+        lambda command, **kwargs: sp.CompletedProcess(command, 1, stdout="", stderr="boom"),
+    )
+    config = DraftConfig(model="m", runner="codex")
+    with pytest.raises(DraftError, match="codex"):
+        draft._call_llm(config, "prompt", "bundle")

@@ -99,8 +99,14 @@ DRAFT_TRACKS = ("engineer", "project")
 
 @dataclass
 class DraftConfig:
-    opencode_bin: str
     model: str
+    # Exécuteur LLM : 'opencode' (API, facturé à l'appel) ou 'codex' (CLI codex exec,
+    # couvert par l'abonnement ChatGPT).
+    runner: str = "opencode"
+    opencode_bin: str = "opencode"
+    codex_bin: str = "codex"
+    # Effort de raisonnement : --variant OpenCode ou model_reasoning_effort codex.
+    variant: str | None = None
     # Lettres exemples .tex par piste métier ('engineer' | 'project') : elles
     # donnent au LLM le format LaTeX et le ton des vraies lettres du candidat.
     examples: dict[str, list[Path]] = field(default_factory=dict)
@@ -290,12 +296,25 @@ def _draft_from_dict(raw: object) -> DraftConfig | None:
         raise ConfigError("'draft' doit être un mapping")
     if not raw:
         return None
-    opencode_bin = raw.get("opencode_bin")
     model = raw.get("model")
-    if not isinstance(opencode_bin, str) or not opencode_bin:
-        raise ConfigError("draft.opencode_bin est requis quand draft est présent")
     if not isinstance(model, str) or not model:
         raise ConfigError("draft.model est requis quand draft est présent")
+    runner = raw.get("runner", "opencode")
+    if runner not in ENRICH_RUNNERS:
+        raise ConfigError(
+            f"draft.runner doit être l'un de {list(ENRICH_RUNNERS)}, reçu : {runner!r}"
+        )
+    opencode_bin = raw.get("opencode_bin", "opencode")
+    if not isinstance(opencode_bin, str) or not opencode_bin:
+        raise ConfigError("draft.opencode_bin doit être une chaîne non vide")
+    if runner == "opencode" and "opencode_bin" not in raw:
+        raise ConfigError("draft.opencode_bin est requis avec le runner opencode")
+    codex_bin = raw.get("codex_bin", "codex")
+    if not isinstance(codex_bin, str) or not codex_bin:
+        raise ConfigError("draft.codex_bin doit être une chaîne non vide")
+    variant = raw.get("variant")
+    if variant is not None and (not isinstance(variant, str) or not variant):
+        raise ConfigError("draft.variant doit être une chaîne non vide")
     examples_raw = raw.get("examples", {})
     if not isinstance(examples_raw, dict):
         raise ConfigError("draft.examples doit être un mapping piste -> liste de chemins .tex")
@@ -309,7 +328,10 @@ def _draft_from_dict(raw: object) -> DraftConfig | None:
     for track, paths in examples_raw.items():
         entries = _string_list(paths, f"draft.examples.{track}")
         examples[track] = [Path(os.path.expanduser(p)) for p in entries]
-    return DraftConfig(opencode_bin=opencode_bin, model=model, examples=examples)
+    return DraftConfig(
+        model=model, runner=runner, opencode_bin=opencode_bin, codex_bin=codex_bin,
+        variant=variant, examples=examples,
+    )
 
 
 def load_config(path: Path) -> Config:

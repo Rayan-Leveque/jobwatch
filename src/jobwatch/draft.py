@@ -57,7 +57,7 @@ _MONTHS_FR = (
 
 PROMPT = (
     "Rédige une lettre de motivation en français pour l'offre d'emploi décrite dans la "
-    "section OFFRE du fichier joint, au nom du candidat décrit dans la section CV. "
+    "section OFFRE du document fourni, au nom du candidat décrit dans la section CV. "
     "Les sections EXEMPLE contiennent de vraies lettres du candidat : imite fidèlement "
     "leur format LaTeX (préambule, mise en page, formules d'ouverture et de clôture, "
     "signature) et leur ton. Réponds uniquement avec le document LaTeX complet, de "
@@ -208,7 +208,62 @@ def _build_bundle(
     return "\n\n".join(parts)
 
 
+CODEX_PREAMBLE = (
+    "Le bloc <stdin> ci-dessous contient le document fourni (sections OFFRE, CV, "
+    "EXEMPLE...). N'exécute aucune commande et ne lis aucun fichier : réponds "
+    "directement. "
+)
+CODEX_TIMEOUT_SECONDS = 600
+
+
 def _call_llm(config: DraftConfig, prompt: str, attachment: str) -> str:
+    if config.runner == "codex":
+        return _call_codex(config, prompt, attachment)
+    return _call_opencode(config, prompt, attachment)
+
+
+def _call_codex(config: DraftConfig, prompt: str, attachment: str) -> str:
+    # Le bundle passe par stdin (bloc <stdin> côté codex) et la réponse finale
+    # est écrite par codex dans un fichier (-o) : pas de limite d'argument ni
+    # de parsing de log. Sandbox danger-full-access : le bwrap de codex exec
+    # est cassé sur la machine cible, c'est le seul mode fonctionnel.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        out_path = Path(tmp_dir) / "reponse.txt"
+        command = [
+            config.codex_bin, "exec",
+            "--model", config.model,
+            "-s", "danger-full-access",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "-o", str(out_path),
+        ]
+        if config.variant:
+            command += ["-c", f"model_reasoning_effort={config.variant}"]
+        command.append(CODEX_PREAMBLE + prompt)
+        try:
+            completed = subprocess.run(
+                command,
+                input=attachment,
+                capture_output=True,
+                text=True,
+                timeout=CODEX_TIMEOUT_SECONDS,
+                check=False,
+                cwd=tmp_dir,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DraftError(f"appel codex échoué : {exc}") from exc
+        if completed.returncode != 0:
+            raise DraftError(f"codex a quitté avec le code {completed.returncode}")
+        try:
+            text = out_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise DraftError("codex n'a pas écrit sa réponse finale") from exc
+    if not text.strip():
+        raise DraftError("réponse vide du modèle")
+    return text
+
+
+def _call_opencode(config: DraftConfig, prompt: str, attachment: str) -> str:
     # Pièce jointe via --file et non en argument : le noyau limite chaque
     # argument à ~128 Ko (MAX_ARG_STRLEN), un bundle offre+CV+exemples dépasse.
     with tempfile.TemporaryDirectory() as tmp_dir:
