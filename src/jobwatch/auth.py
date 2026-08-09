@@ -12,7 +12,7 @@ import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 
-PASSWORD_MIN_LENGTH = 15
+PASSWORD_MIN_LENGTH = 8
 PASSWORD_MAX_LENGTH = 1024
 SCRYPT_N = 2**17
 SCRYPT_R = 8
