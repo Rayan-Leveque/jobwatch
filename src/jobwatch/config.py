@@ -81,6 +81,8 @@ class NotifyConfig:
 class EnrichConfig:
     opencode_bin: str
     model: str
+    # Variante de raisonnement OpenCode (--variant : minimal, high, max...), optionnelle.
+    variant: str | None = None
 
 
 DRAFT_TRACKS = ("engineer", "project")
@@ -250,7 +252,10 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
         raise ConfigError("enrich.opencode_bin est requis quand enrich est présent")
     if not isinstance(model, str) or not model:
         raise ConfigError("enrich.model est requis quand enrich est présent")
-    return EnrichConfig(opencode_bin=opencode_bin, model=model)
+    variant = raw.get("variant")
+    if variant is not None and (not isinstance(variant, str) or not variant):
+        raise ConfigError("enrich.variant doit être une chaîne non vide")
+    return EnrichConfig(opencode_bin=opencode_bin, model=model, variant=variant)
 
 
 def _draft_from_dict(raw: object) -> DraftConfig | None:

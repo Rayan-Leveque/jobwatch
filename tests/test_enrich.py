@@ -410,3 +410,31 @@ def test_enrich_adds_fields_to_offer_with_content_without_refetch(
     # Une fois les champs écrits, l'offre n'est plus jamais retraitée.
     second = enrich(conn, _config(), client=_http_client(handler), sleep=sleeps.append)
     assert second.fields_written == 0
+
+
+def test_summarize_passes_variant_to_opencode(monkeypatch) -> None:
+    import json
+    import subprocess as sp
+
+    from jobwatch.enrich import _summarize
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        event = json.dumps({"type": "text", "part": {"text": "EXPERIENCE: 2 ans\n- Puce"}})
+        return sp.CompletedProcess(command, 0, stdout=event, stderr="")
+
+    monkeypatch.setattr("jobwatch.enrich.subprocess.run", fake_run)
+    result = _summarize(
+        EnrichConfig(opencode_bin="opencode", model="opencode-go/gpt-5.6-luna", variant="max"),
+        "texte d'offre",
+    )
+    assert result == ({"experience": "2 ans"}, ["Puce"])
+    command = captured["command"]
+    assert command[command.index("--variant") + 1] == "max"
+    assert command[command.index("--model") + 1] == "opencode-go/gpt-5.6-luna"
+
+    # Sans variant configuré, le drapeau n'apparaît pas.
+    _summarize(EnrichConfig(opencode_bin="opencode", model="m"), "texte")
+    assert "--variant" not in captured["command"]

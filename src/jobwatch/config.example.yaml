@@ -38,6 +38,7 @@ notify: {}
 # puis décommentez et remplissez :
 #   opencode_bin: opencode              # binaire ou commande OpenCode
 #   model: opencode/deepseek-v4-flash-free
+#   variant: max                        # optionnel : effort de raisonnement (--variant OpenCode)
 enrich: {}
 
 # draft : génération de lettre de motivation depuis le dashboard (bouton « Générer LM »).
