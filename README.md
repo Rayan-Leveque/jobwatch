@@ -163,8 +163,11 @@ publiez pas tel quel sur Internet.
 
 ## Tri des offres (swipe)
 
-Quand un onglet contient de nouvelles offres, un bouton « Trier N nouvelles offres » mène à
-une interface de tri une-par-une (`/swipe` pour Ingénieur IA, `/po/swipe` pour Chef de
+Quand un onglet contient de nouvelles offres, un popup d'accueil « N nouvelles offres -
+C'est le moment de swiper. » s'affiche à l'arrivée sur le tableau de bord (une fois par
+session de navigation et par piste ; « Plus tard », un clic hors du panneau ou Échap le
+ferment) et un bouton discret avec badge dans la barre du haut reste disponible en
+permanence. Les deux mènent à une interface de tri une-par-une (`/swipe` pour Ingénieur IA, `/po/swipe` pour Chef de
 projet / PO) : une carte plein écran par offre (titre, société, métadonnées, résumé, annonce
 complète dépliable, lien), les offres `fit high` d'abord. Flèche droite, bouton ✓ ou glisser
 vers la droite : l'offre part dans `À candidater` ; flèche gauche, bouton ✕ ou glisser vers la

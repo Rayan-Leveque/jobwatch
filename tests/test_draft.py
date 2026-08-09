@@ -636,9 +636,15 @@ def test_run_job_processes_queued_job(db_path: Path, tmp_path: Path, monkeypatch
     assert job["status"] == "ok"
 
 
-def test_render_page_shows_sort_link_only_with_new_offers(db_path: Path) -> None:
+def test_render_page_shows_swipe_invites_only_with_new_offers(db_path: Path) -> None:
     conn = _conn(db_path)
-    assert 'href="/swipe"' not in render_page(conn)
+    page = render_page(conn)
+    assert 'href="/swipe"' not in page
+    assert 'id="swipe-popup"' not in page
     _seed_match(conn)
-    assert 'href="/swipe"' in render_page(conn)
+    page = render_page(conn)
+    assert 'class="swipe-fab" href="/swipe"' in page
+    assert 'id="swipe-popup"' in page
+    assert "C'est le moment de swiper." in page
+    assert 'swipe-fab-count">1<' in page
     conn.close()

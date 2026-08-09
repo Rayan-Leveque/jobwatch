@@ -791,13 +791,7 @@ def render_page(
     priority_new = sum(row["state"] == "new" for row in priority)
     priority_seen = len(priority) - priority_new
     deck_count = priority_new + len(new)
-    if deck_count:
-        swipe_href = "/swipe" if track == "engineer" else "/po/swipe"
-        offres = "offres" if deck_count > 1 else "offre"
-        body = (
-            f'<a class="sort-link" href="{swipe_href}">Trier {deck_count} '
-            f"nouvelle{'s' if deck_count > 1 else ''} {offres} →</a>\n" + body
-        )
+    swipe_fab, swipe_popup = _swipe_invites(track, deck_count)
     total = len(priority) + len(new) + len(seen) + len(later) + len(discarded) + len(applied)
     stamp = datetime.now(UTC).astimezone().strftime("%d/%m/%Y %H:%M")
     return _page_template(
@@ -807,7 +801,46 @@ def render_page(
         applied_count=len(applied),
         stamp=stamp,
         track=track,
+        swipe_fab=swipe_fab,
+        swipe_popup=swipe_popup,
     )
+
+
+_CARDS_SVG = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<rect x="7.2" y="4.2" width="12" height="16" rx="2.4" '
+    'transform="rotate(8 13.2 12.2)"/>'
+    '<path d="M8.6 6.5 6.2 7.1a2.4 2.4 0 0 0-1.7 2.9l2.6 9.8"/></svg>'
+)
+
+
+def _swipe_invites(track: str, deck_count: int) -> tuple[str, str]:
+    """Bouton badge de la barre du haut + popup d'accueil « c'est le moment de swiper »."""
+    if not deck_count:
+        return "", ""
+    href = "/swipe" if track == "engineer" else "/po/swipe"
+    plural = "s" if deck_count > 1 else ""
+    label = html.escape(
+        f"Trier {deck_count} nouvelle{plural} offre{plural}", quote=True
+    )
+    fab = (
+        f'<a class="swipe-fab" href="{href}" aria-label="{label}">{_CARDS_SVG}'
+        f'<span class="swipe-fab-count">{deck_count}</span></a>'
+    )
+    popup = (
+        f'<div class="swipe-popup" id="swipe-popup" data-track="{track}" hidden>'
+        '<div class="swipe-popup-card" role="dialog" aria-modal="true" '
+        'aria-label="Nouvelles offres à trier">'
+        f'<div class="swipe-popup-icon" aria-hidden="true">{_CARDS_SVG}</div>'
+        f'<h2>{deck_count} nouvelle{plural} offre{plural}</h2>'
+        "<p>C'est le moment de swiper.</p>"
+        '<div class="swipe-popup-actions">'
+        f'<a class="swipe-popup-go" href="{href}">Swiper →</a>'
+        '<button class="swipe-popup-later" type="button">Plus tard</button>'
+        "</div></div></div>"
+    )
+    return fab, popup
 
 
 def _swipe_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> str:
@@ -1646,6 +1679,45 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .letter-page { display:block; width:100%; max-width:560px; margin:0 auto 10px;
   border:1px solid var(--line-strong); border-radius:10px; background:#fff }
 .letter-links { margin:4px 0 8px; text-align:center; font-size:.72rem }
+.swipe-fab { position:relative; width:48px; height:48px; flex:0 0 48px; display:grid;
+  place-items:center; border:1px solid var(--line); border-radius:15px; color:var(--violet);
+  background:color-mix(in srgb, var(--surface) 86%, transparent); box-shadow:var(--card-shadow);
+  transition:transform .2s ease, background .2s ease, border-color .2s ease }
+.swipe-fab svg { width:20px; height:20px }
+.swipe-fab:active { transform:scale(.94) }
+.swipe-fab-count { position:absolute; top:-6px; right:-6px; min-width:20px; height:20px;
+  display:grid; place-items:center; padding:0 5px; border-radius:999px;
+  color:var(--accent-ink); background:var(--accent); font-size:.62rem; font-weight:820;
+  font-variant-numeric:tabular-nums; box-shadow:0 0 0 3px var(--bg) }
+@media (hover:hover) { .swipe-fab:hover { background:var(--surface-hover) } }
+.topbar-tools { display:flex; align-items:center; gap:10px }
+.swipe-popup { position:fixed; inset:0; z-index:60; display:flex; align-items:flex-end;
+  justify-content:center; padding:16px; background:rgba(0,0,0,.45);
+  -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+  opacity:0; transition:opacity .25s ease }
+.swipe-popup[hidden] { display:none }
+.swipe-popup.visible { opacity:1 }
+.swipe-popup-card { width:min(100%, 420px);
+  margin-bottom:max(8px, env(safe-area-inset-bottom));
+  padding:26px 22px 20px; border:1px solid var(--line-strong);
+  border-radius:var(--radius-xl); background:var(--surface); box-shadow:var(--shadow);
+  text-align:center; transform:translateY(24px); transition:transform .28s cubic-bezier(.2,.8,.2,1) }
+.swipe-popup.visible .swipe-popup-card { transform:translateY(0) }
+.swipe-popup-icon { width:54px; height:54px; margin:0 auto 12px; display:grid;
+  place-items:center; border-radius:17px; color:var(--violet); background:var(--violet-soft);
+  box-shadow:0 0 0 6px color-mix(in srgb, var(--violet) 6%, transparent) }
+.swipe-popup-icon svg { width:26px; height:26px }
+.swipe-popup-card h2 { margin:0 0 4px; font-size:1.3rem; font-weight:790; letter-spacing:-.03em }
+.swipe-popup-card p { margin:0 0 18px; color:var(--muted); font-size:.86rem }
+.swipe-popup-actions { display:grid; gap:8px }
+.swipe-popup-go { display:flex; align-items:center; justify-content:center; min-height:50px;
+  border-radius:14px; color:var(--accent-ink); background:var(--accent); font-size:.9rem;
+  font-weight:790; text-decoration:none; box-shadow:0 0 0 5px var(--accent-soft) }
+.swipe-popup-later { min-height:44px; border:0; border-radius:12px; color:var(--muted);
+  background:transparent; font-size:.8rem; font-weight:700; cursor:pointer }
+.swipe-popup-later:focus-visible, .swipe-popup-go:focus-visible {
+  outline:3px solid var(--violet); outline-offset:2px }
+@media (min-width:620px) { .swipe-popup { align-items:center } }
 .undo-toast { display:flex; align-items:center; justify-content:space-between; gap:12px;
   color:var(--muted); font-size:.78rem }
 .undo-toast .undo-btn { flex:none; min-height:38px; padding:0 14px; border:1px solid var(--line);
@@ -1998,6 +2070,25 @@ _JS = """\
     });
   });
 
+  const swipePopup = document.getElementById('swipe-popup');
+  if (swipePopup) {
+    const popupKey = `jw-swipe-popup-${swipePopup.dataset.track}`;
+    const dismiss = () => {
+      swipePopup.classList.remove('visible');
+      setTimeout(() => { swipePopup.hidden = true; }, 260);
+      writeSession(popupKey, '1');
+    };
+    if (!readSession(popupKey, '')) {
+      swipePopup.hidden = false;
+      requestAnimationFrame(() => swipePopup.classList.add('visible'));
+    }
+    swipePopup.querySelector('.swipe-popup-later').addEventListener('click', dismiss);
+    swipePopup.addEventListener('click', e => { if (e.target === swipePopup) dismiss(); });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && !swipePopup.hidden) dismiss();
+    });
+  }
+
   [...document.querySelectorAll('.doc-preview-btn')].forEach(btn => {
     const select = btn.closest('.doc-row').querySelector('select');
     const sync = () => { btn.disabled = !select.value; };
@@ -2092,7 +2183,10 @@ def _track_nav(track: str) -> str:
     return f'<nav class="track-tabs" aria-label="Piste métier">{"".join(links)}</nav>'
 
 
-def _page_template(*, body, total, new_count, seen_count, applied_count, stamp, track) -> str:
+def _page_template(
+    *, body, total, new_count, seen_count, applied_count, stamp, track,
+    swipe_fab="", swipe_popup="",
+) -> str:
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="dark"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -2121,6 +2215,8 @@ def _page_template(*, body, total, new_count, seen_count, applied_count, stamp, 
         <div class="identity-copy"><span class="identity-name">jobwatch</span>
           <span class="identity-sub">Suivi de vos offres</span></div>
       </div>
+      <div class="topbar-tools">
+      {swipe_fab}
       <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Passer au thème clair">
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
           <circle cx="12" cy="12" r="3.7"/><path d="M12 2v2.1M12 19.9V22M4.93 4.93l1.49 1.49M17.58 17.58l1.49 1.49M2 12h2.1M19.9 12H22M4.93 19.07l1.49-1.49M17.58 6.42l1.49-1.49"/>
@@ -2129,6 +2225,7 @@ def _page_template(*, body, total, new_count, seen_count, applied_count, stamp, 
           <path d="M20.2 15.1A8.4 8.4 0 0 1 8.9 3.8 8.5 8.5 0 1 0 20.2 15.1Z"/>
         </svg>
       </button>
+      </div>
     </div>
     <div class="hero">
       <p class="eyebrow">Tableau de bord</p>
@@ -2165,20 +2262,13 @@ def _page_template(*, body, total, new_count, seen_count, applied_count, stamp, 
   </main>
   <footer class="footer">Lecture seule · données locales · base SQLite jobwatch</footer>
 </div>
+{swipe_popup}
 <script>
 {_JS}</script></body></html>
 """
 
 
 _SWIPE_CSS = """\
-.sort-link { display:flex; align-items:center; justify-content:center; min-height:52px;
-  margin:0 0 14px; border:1px solid color-mix(in srgb, var(--violet) 40%, transparent);
-  border-radius:var(--radius-lg); color:var(--violet); background:var(--violet-soft);
-  font-size:.85rem; font-weight:750; text-decoration:none;
-  transition:background .15s ease, border-color .15s ease }
-@media (hover:hover) {
-  .sort-link:hover { border-color:var(--violet); background:color-mix(in srgb, var(--violet) 18%, transparent) }
-}
 .swipe-shell { position:relative; z-index:1; display:flex; flex-direction:column;
   width:min(100%, 560px); min-height:100vh; min-height:100dvh; margin:0 auto;
   padding:max(14px, env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right))
