@@ -40,9 +40,39 @@ class SmartRecruitersSource:
 
 
 @dataclass
+class LinkedInQuery:
+    keywords: str
+    location: str
+
+
+@dataclass
+class LinkedInSource:
+    queries: list[LinkedInQuery]
+    hours: int = 48
+
+
+@dataclass
+class WttjAlgoliaConfig:
+    app_id: str
+    api_key: str
+    index: str
+
+
+@dataclass
+class WttjSource:
+    queries: list[str]
+    countries: list[str]
+    cities: dict[str, list[str]]
+    algolia: WttjAlgoliaConfig
+    hours: int = 48
+
+
+@dataclass
 class SourcesConfig:
     france_travail: FranceTravailSource | None = None
     smartrecruiters: SmartRecruitersSource | None = None
+    linkedin: LinkedInSource | None = None
+    wttj: WttjSource | None = None
 
     def configured(self) -> list[tuple[str, object]]:
         """Renvoie les paires (source_type, config) pour chaque source configurée."""
@@ -51,6 +81,10 @@ class SourcesConfig:
             pairs.append(("france_travail", self.france_travail))
         if self.smartrecruiters is not None:
             pairs.append(("smartrecruiters", self.smartrecruiters))
+        if self.linkedin is not None:
+            pairs.append(("linkedin", self.linkedin))
+        if self.wttj is not None:
+            pairs.append(("wttj", self.wttj))
         return pairs
 
 
@@ -191,12 +225,76 @@ def _smartrecruiters_from_dict(raw: object) -> SmartRecruitersSource:
     return SmartRecruitersSource(companies=list(companies))
 
 
+def _positive_hours(value: object, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ConfigError(f"{field_name} doit être un entier >= 1")
+    return value
+
+
+def _linkedin_from_dict(raw: object) -> LinkedInSource:
+    if not isinstance(raw, dict):
+        raise ConfigError("sources.linkedin doit être un mapping")
+    queries_raw = raw.get("queries")
+    if not isinstance(queries_raw, list) or not queries_raw:
+        raise ConfigError("sources.linkedin.queries doit être une liste non vide")
+    queries: list[LinkedInQuery] = []
+    for index, query in enumerate(queries_raw):
+        if not isinstance(query, dict):
+            raise ConfigError(f"sources.linkedin.queries[{index}] doit être un mapping")
+        keywords = query.get("keywords")
+        location = query.get("location")
+        if not isinstance(keywords, str) or not keywords:
+            raise ConfigError(f"sources.linkedin.queries[{index}].keywords est requis")
+        if not isinstance(location, str) or not location:
+            raise ConfigError(f"sources.linkedin.queries[{index}].location est requis")
+        queries.append(LinkedInQuery(keywords=keywords, location=location))
+    return LinkedInSource(
+        queries=queries,
+        hours=_positive_hours(raw.get("hours", 48), "sources.linkedin.hours"),
+    )
+
+
+def _wttj_from_dict(raw: object) -> WttjSource:
+    if not isinstance(raw, dict):
+        raise ConfigError("sources.wttj doit être un mapping")
+    queries = _string_list(raw.get("queries"), "sources.wttj.queries")
+    if not queries or not all(queries):
+        raise ConfigError("sources.wttj.queries doit être une liste non vide")
+    countries = _string_list(raw.get("countries", ["FR"]), "sources.wttj.countries")
+    if not countries or any(len(country) != 2 or country.upper() != country for country in countries):
+        raise ConfigError("sources.wttj.countries doit contenir des codes pays ISO en majuscules")
+    cities_raw = raw.get("cities", {})
+    if not isinstance(cities_raw, dict):
+        raise ConfigError("sources.wttj.cities doit être un mapping pays -> liste de villes")
+    cities: dict[str, list[str]] = {}
+    for country, values in cities_raw.items():
+        if not isinstance(country, str) or country not in countries:
+            raise ConfigError(f"sources.wttj.cities : pays inconnu {country!r}")
+        cities[country] = _string_list(values, f"sources.wttj.cities.{country}")
+    algolia_raw = raw.get("algolia")
+    if not isinstance(algolia_raw, dict):
+        raise ConfigError("sources.wttj.algolia doit être un mapping")
+    algolia_values = {}
+    for key in ("app_id", "api_key", "index"):
+        value = algolia_raw.get(key)
+        if not isinstance(value, str) or not value:
+            raise ConfigError(f"sources.wttj.algolia.{key} est requis")
+        algolia_values[key] = value
+    return WttjSource(
+        queries=queries,
+        countries=countries,
+        cities=cities,
+        algolia=WttjAlgoliaConfig(**algolia_values),
+        hours=_positive_hours(raw.get("hours", 48), "sources.wttj.hours"),
+    )
+
+
 def _sources_from_dict(raw: object) -> SourcesConfig:
     if raw is None:
         return SourcesConfig()
     if not isinstance(raw, dict):
         raise ConfigError("'sources' doit être un mapping")
-    known = {"france_travail", "smartrecruiters"}
+    known = {"france_travail", "smartrecruiters", "linkedin", "wttj"}
     unknown = set(raw) - known
     if unknown:
         raise ConfigError(f"type(s) de source inconnu(s) : {sorted(unknown)}")
@@ -207,6 +305,8 @@ def _sources_from_dict(raw: object) -> SourcesConfig:
         smartrecruiters=_smartrecruiters_from_dict(raw.get("smartrecruiters"))
         if "smartrecruiters" in raw
         else None,
+        linkedin=_linkedin_from_dict(raw.get("linkedin")) if "linkedin" in raw else None,
+        wttj=_wttj_from_dict(raw.get("wttj")) if "wttj" in raw else None,
     )
 
 

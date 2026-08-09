@@ -35,22 +35,38 @@ class SmartRecruitersCollector:
 
     def _postings_for(self, slug: str) -> list[dict]:
         client = self._request_client()
-        try:
-            response = client.get(BASE_URL.format(slug=slug), params={"limit": 100})
-        except httpx.HTTPError as exc:
-            log.warning("smartrecruiters request for '%s' failed: %s", slug, exc)
-            return []
-        if response.status_code != 200:
-            log.warning(
-                "smartrecruiters request for '%s' returned status %s", slug, response.status_code
-            )
-            return []
-        try:
-            payload = response.json()
-        except ValueError:
-            return []
-        content = payload.get("content", []) if isinstance(payload, dict) else []
-        return content if isinstance(content, list) else []
+        postings: list[dict] = []
+        offset = 0
+        total = 1
+        while offset < total:
+            try:
+                response = client.get(
+                    BASE_URL.format(slug=slug), params={"limit": 100, "offset": offset}
+                )
+            except httpx.HTTPError as exc:
+                log.warning("smartrecruiters request for '%s' failed: %s", slug, exc)
+                break
+            if response.status_code != 200:
+                log.warning(
+                    "smartrecruiters request for '%s' returned status %s",
+                    slug,
+                    response.status_code,
+                )
+                break
+            try:
+                payload = response.json()
+            except ValueError:
+                break
+            if not isinstance(payload, dict):
+                break
+            content = payload.get("content", [])
+            if not isinstance(content, list) or not content:
+                break
+            postings.extend(item for item in content if isinstance(item, dict))
+            offset += len(content)
+            found = payload.get("totalFound")
+            total = found if isinstance(found, int) and found >= 0 else offset
+        return postings
 
     def fetch(self) -> list[RawOffer]:
         offers = []

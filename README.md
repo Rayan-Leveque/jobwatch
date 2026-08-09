@@ -1,7 +1,8 @@
 # jobwatch
 
-Observateur d'offres d'emploi auto-hébergé. Il collecte les offres d'emploi via les API des
-job boards, les déduplique dans une base SQLite locale, les met en correspondance avec vos
+Observateur d'offres d'emploi auto-hébergé. Il collecte les offres d'emploi via France Travail,
+SmartRecruiters, l'API invitée LinkedIn et l'index public WTTJ, les déduplique dans une base
+SQLite locale, les met en correspondance avec vos
 recherches enregistrées, envoie un digest des nouveaux matchs par notification, et vous permet
 de suivre vos candidatures depuis la ligne de commande ou via un tableau de bord web local.
 
@@ -250,7 +251,7 @@ RAG »...) transmet la lettre précédente au modèle et remplace la même entr�
 | --- | --- |
 | `db` | Chemin vers la base SQLite. `~` est développé. Les répertoires sont créés automatiquement. |
 | `searches` | Liste des recherches enregistrées. Chaque recherche a : `name` (identifiant unique), `include` (mots-clés, au moins un, correspondance insensible à la casse sur le titre), `exclude` (mots-clés, aucun), `locations` (correspondance par sous-chaîne sur la localisation de l'offre ; vide = n'importe où), `contract` (optionnel : `permanent`, `fixed_term`, `internship`, `other`). |
-| `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` (requête côté serveur) et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. |
+| `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. `linkedin` prend une liste de couples `keywords`/`location` et une fenêtre `hours`. `wttj` prend ses requêtes, pays, villes internationales, fenêtre `hours` et les identifiants publics de l'index Algolia utilisé par le site. |
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
 | `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, ou `codex` pour passer par le CLI `codex exec` couvert par un abonnement ChatGPT), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (ex. `opencode/deepseek-v4-flash-free` ou `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). |
 | `draft` | Génération de lettre de motivation depuis le tableau de bord : `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. |
