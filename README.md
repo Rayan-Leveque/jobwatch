@@ -8,8 +8,8 @@ de suivre vos candidatures depuis la ligne de commande ou via un tableau de bord
 
 Flux : **collecter -> dédupliquer -> matcher -> notifier -> suivre**.
 
-Pas de cloud, pas de traçage : le tableau de bord et le stockage restent 100% locaux dans un seul
-fichier SQLite sur votre machine. Seules exceptions, optionnelles et explicitement activées,
+Pas de cloud, pas de traçage : le tableau de bord, SQLite et les documents gérés restent 100%
+locaux dans le dossier de l'instance sur votre machine. Seules exceptions, optionnelles et explicitement activées,
 deux fonctionnalités LLM appelées localement par OpenCode : `jw enrich` résume les annonces
 collectées — voir [Enrichissement des offres](#enrichissement-des-offres) — et le tableau de
 bord peut rédiger des lettres de motivation — voir
@@ -57,8 +57,10 @@ données sous `~/.local/share/jobwatch/instances/<nom>/`. Les variables XDG sont
 `JOBWATCH_INSTANCE=alice` est équivalent à `--instance alice`, notamment pour cron ou un service.
 Un `--config PATH` explicite reste prioritaire.
 `account invite` active l'authentification de l'instance et produit un chemin d'invitation
-propriétaire valable 48 heures. Les routes web de consommation de cette invitation sont en cours
-d'intégration ; n'activez pas encore cette commande sur une instance de production.
+propriétaire valable 48 heures. Ouvrez ce chemin sur le serveur de l'instance pour choisir le mot
+de passe. Les pages, documents et actions deviennent alors inaccessibles sans session. Le cookie
+est réservé à HTTPS par défaut. Pour un serveur HTTP strictement local ou privé, lancez
+explicitement `jw --instance alice serve --no-secure-cookie`; ne publiez jamais ce mode sur Internet.
 
 ### Cron
 
@@ -192,12 +194,13 @@ de la base.
 ```
 
 `--host 0.0.0.0` rend le tableau de bord accessible à toutes les machines joignables sur
-votre réseau. Le tableau de bord n'ajoute aucune authentification : les actions HTTP
-(`POST /match/<id>/later`, `/discard`, `/restore`, `/apply`) mutent la base sans jeton ni contrôle
-d'accès, c'est un choix délibéré qui repose sur le périmètre réseau (Tailscale) comme frontière
-de confiance. Le tableau de bord expose et modifie vos offres et candidatures : réfléchissez à
-qui y a accès. Préférez l'accès local (`127.0.0.1`, le défaut) ou une adresse privée, et ne le
-publiez pas tel quel sur Internet.
+votre réseau. Une installation historique sans compte conserve son comportement local ouvert.
+Pour protéger une instance nommée, créez son invitation avec `account invite` : toutes les routes,
+y compris les documents et les actions qui mutent SQLite, exigent alors une session, et les POST
+exigent aussi le jeton CSRF de cette session. Les mots de passe font au moins 15 caractères, les
+sessions expirent après 24 heures et cinq échecs de connexion bloquent la paire email/adresse
+pendant 15 minutes. Préférez HTTPS avec le cookie sécurisé par défaut. `--no-secure-cookie` existe
+uniquement pour un accès HTTP local ou sur un réseau privé chiffré comme Tailscale.
 
 ## Tri des offres (swipe)
 
@@ -309,6 +312,8 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `document` | Fichiers CV et lettre de motivation attachés à une candidature |
 | `document_library` | Bibliothèque de documents réutilisables (CV, lettres) du tableau de bord |
 | `draft_job` | Jobs de génération de lettre de motivation (état, fichiers produits, avertissements) |
+| `workspace`, `account`, `membership` | Instance, comptes et droits préparant le passage au multi-utilisateur |
+| `account_invite`, `web_session` | Invitations à durée limitée et sessions web opaques |
 
 ## Feuille de route
 

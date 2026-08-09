@@ -189,15 +189,17 @@ def accept_invite(
     token: str,
     password: str,
     *,
+    workspace_slug: str | None = None,
     now: datetime.datetime | None = None,
 ) -> int:
     """Consomme une invitation et crée le compte et son appartenance."""
     current = _now(now)
     password_hash = hash_password(password)
     row = conn.execute(
-        "SELECT id, workspace_id, email, role, expires_at, accepted_at "
-        "FROM account_invite WHERE token_hash = ?",
-        (_token_hash(token),),
+        "SELECT i.id, i.workspace_id, i.email, i.role, i.expires_at, i.accepted_at "
+        "FROM account_invite i JOIN workspace w ON w.id = i.workspace_id "
+        "WHERE i.token_hash = ? AND (? IS NULL OR w.slug = ?)",
+        (_token_hash(token), workspace_slug, workspace_slug),
     ).fetchone()
     if row is None or row["accepted_at"] is not None or row["expires_at"] <= _timestamp(current):
         raise AuthError("invitation invalide ou expirée")

@@ -1591,7 +1591,9 @@ def make_handler(
             conn = connect(db_path)
             try:
                 try:
-                    account_id = accept_invite(conn, token, password)
+                    account_id = accept_invite(
+                        conn, token, password, workspace_slug=workspace_slug
+                    )
                     account = conn.execute(
                         "SELECT email FROM account WHERE id = ?", (account_id,)
                     ).fetchone()

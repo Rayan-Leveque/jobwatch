@@ -76,6 +76,13 @@ def test_expired_invite_is_rejected(conn: sqlite3.Connection) -> None:
         accept_invite(conn, token, PASSWORD, now=later)
 
 
+def test_invite_cannot_be_consumed_by_another_workspace(conn: sqlite3.Connection) -> None:
+    token = create_invite(conn, "alice", "alice@example.com", now=NOW)
+    with pytest.raises(AuthError, match="invalide"):
+        accept_invite(conn, token, PASSWORD, workspace_slug="bob", now=NOW)
+    assert accept_invite(conn, token, PASSWORD, workspace_slug="alice", now=NOW) > 0
+
+
 def test_new_invite_expires_previous_for_same_email(conn: sqlite3.Connection) -> None:
     first = create_invite(conn, "alice", "alice@example.com", now=NOW)
     second = create_invite(conn, "alice", "alice@example.com", now=NOW)

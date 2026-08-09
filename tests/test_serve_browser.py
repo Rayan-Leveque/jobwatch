@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from test_serve import _seed_offer
 
+from jobwatch.auth import create_invite
 from jobwatch.db import connect, init_db
 from jobwatch.serve import make_handler
 
@@ -57,6 +58,27 @@ def dashboard(tmp_path: Path):
     thread.join(timeout=5)
 
 
+@pytest.fixture()
+def protected_dashboard(tmp_path: Path):
+    """Instance nommée protégée, avec invitation propriétaire à consommer."""
+    db_path = tmp_path / "jw.db"
+    conn = connect(db_path)
+    init_db(conn)
+    _seed_offer(conn, company="AuthCo", title="Auth Role", state="new")
+    invite = create_invite(conn, "alice", "alice@example.com")
+    conn.close()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        make_handler(db_path, workspace_slug="alice", secure_cookie=False),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", invite
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
 def _open_page(browser, url: str, dismiss_popup: bool = True):
     page = browser.new_page()
     page.goto(url)
@@ -76,6 +98,25 @@ def _assert_not_reloaded(page) -> None:
 
 def _card(page, company: str):
     return page.locator(f'.row:has(.company:text-is("{company}"))')
+
+
+def test_invite_then_protected_action_in_browser(browser, protected_dashboard) -> None:
+    url, invite = protected_dashboard
+    page = browser.new_page()
+    page.goto(f"{url}/invite/{invite}")
+    password = "une très longue phrase secrète"
+    page.get_by_label("Mot de passe", exact=True).fill(password)
+    page.get_by_label("Confirmation", exact=True).fill(password)
+    page.get_by_role("button", name="Créer mon compte").click()
+    page.wait_for_url(f"{url}/")
+    popup = page.locator("#swipe-popup")
+    if popup.is_visible():
+        page.locator(".swipe-popup-later").click()
+    card = _card(page, "AuthCo")
+    card.locator(".action-later").click()
+    page.locator(".undo-toast").wait_for(state="visible", timeout=5000)
+    assert card.count() == 0
+    page.close()
 
 
 def test_later_click_removes_card_and_shows_undo_without_reload(browser, dashboard) -> None:
