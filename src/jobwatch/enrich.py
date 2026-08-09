@@ -155,19 +155,13 @@ def _summarize(config: EnrichConfig, markdown: str) -> tuple[dict[str, str], lis
     with tempfile.TemporaryDirectory() as tmp_dir:
         content_path = Path(tmp_dir) / "offer.md"
         content_path.write_text(markdown, encoding="utf-8")
+        command = [config.opencode_bin, "run", "--model", config.model]
+        if config.variant:
+            command += ["--variant", config.variant]
+        command += ["--format", "json", f"--file={content_path}", "--", SUMMARY_PROMPT]
         try:
             completed = subprocess.run(
-                [
-                    config.opencode_bin,
-                    "run",
-                    "--model",
-                    config.model,
-                    "--format",
-                    "json",
-                    f"--file={content_path}",
-                    "--",
-                    SUMMARY_PROMPT,
-                ],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=120,
