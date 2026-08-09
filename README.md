@@ -8,9 +8,11 @@ de suivre vos candidatures depuis la ligne de commande ou via un tableau de bord
 Flux : **collecter -> dédupliquer -> matcher -> notifier -> suivre**.
 
 Pas de cloud, pas de traçage : le tableau de bord et le stockage restent 100% locaux dans un seul
-fichier SQLite sur votre machine. Seule exception, optionnelle et explicitement activée :
-`jw enrich` résume les annonces collectées via un LLM (deepseek-v4-flash) appelé localement par
-OpenCode — voir [Enrichissement des offres](#enrichissement-des-offres).
+fichier SQLite sur votre machine. Seules exceptions, optionnelles et explicitement activées,
+deux fonctionnalités LLM appelées localement par OpenCode : `jw enrich` résume les annonces
+collectées — voir [Enrichissement des offres](#enrichissement-des-offres) — et le tableau de
+bord peut rédiger des lettres de motivation — voir
+[Génération de lettre de motivation](#génération-de-lettre-de-motivation).
 
 ## Démarrage rapide
 
