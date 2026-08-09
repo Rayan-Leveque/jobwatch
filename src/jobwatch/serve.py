@@ -358,16 +358,16 @@ _BATCH_ELIGIBLE_SQL = (
 )
 
 
-_BATCH_PILL_HTML = (
-    '<div class="batch-pill" id="batch-pill" hidden aria-live="polite">'
-    '<span class="draft-spinner" id="batch-pill-spinner" aria-hidden="true"></span>'
-    '<span class="batch-pill-text">'
-    '<span id="batch-pill-line1"></span><span id="batch-pill-line2"></span></span>'
-    '<button class="batch-pill-close" id="batch-pill-close" type="button" '
-    'aria-label="Masquer l\'avancement">'
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
-    'stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>'
-    "</button></div>"
+_BATCH_BADGE_HTML = (
+    '<div class="batch-badge-wrap" id="batch-badge-wrap" hidden>'
+    '<button class="batch-badge" id="batch-badge" type="button" aria-expanded="false" '
+    'aria-controls="batch-panel" aria-label="Avancement des lettres">'
+    '<span class="batch-ring" id="batch-ring" aria-hidden="true"></span>'
+    '<span class="batch-badge-count" id="batch-badge-count"></span>'
+    "</button>"
+    '<div class="batch-panel" id="batch-panel" hidden aria-live="polite">'
+    '<p class="batch-panel-title" id="batch-panel-line1"></p>'
+    '<p class="batch-panel-note" id="batch-panel-line2"></p></div></div>'
 )
 
 
@@ -1785,29 +1785,29 @@ def _invite_form(token: str, error: str = "") -> str:
 
 def _auth_page(title: str, body: str) -> str:
     return f"""<!DOCTYPE html>
-<html lang="fr" data-theme="dark"><head><meta charset="utf-8">
+<html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#090b10"><title>jobwatch · {html.escape(title)}</title>
+<meta name="theme-color" content="#f3f1eb"><title>jobwatch · {html.escape(title)}</title>
 <style>
-:root {{ color-scheme:dark; font-family:Inter,ui-sans-serif,system-ui,sans-serif; }}
+:root {{ color-scheme:light; font-family:Inter,ui-sans-serif,system-ui,sans-serif; }}
 * {{ box-sizing:border-box; }}
 body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24px;
-  color:#f3f5f8; background:radial-gradient(circle at 20% 0,#202934 0,transparent 35%),#090b10; }}
-.auth-card {{ width:min(100%,430px); padding:32px; border:1px solid rgba(255,255,255,.12);
-  border-radius:24px; background:#11141c; box-shadow:0 24px 80px rgba(0,0,0,.4); }}
-.auth-brand {{ color:#b9f46f; font-size:.78rem; font-weight:800; letter-spacing:.16em;
+  color:#191b1f; background:radial-gradient(circle at 20% 0,#e5def7 0,transparent 35%),#f3f1eb; }}
+.auth-card {{ width:min(100%,430px); padding:32px; border:1px solid rgba(29,31,35,.12);
+  border-radius:24px; background:#fffefa; box-shadow:0 24px 70px rgba(52,46,34,.13); }}
+.auth-brand {{ color:#42752d; font-size:.78rem; font-weight:800; letter-spacing:.16em;
   text-transform:uppercase; }}
 h1 {{ margin:12px 0 24px; font-size:clamp(1.8rem,8vw,2.5rem); line-height:1.05; }}
 form {{ display:grid; gap:18px; }}
-label {{ display:grid; gap:8px; color:#b7bdc9; font-size:.86rem; font-weight:650; }}
-input {{ width:100%; padding:13px 14px; border:1px solid rgba(255,255,255,.16);
-  border-radius:12px; color:#f3f5f8; background:#090b10; font:inherit; }}
-input:focus {{ outline:2px solid #b9f46f; outline-offset:2px; }}
+label {{ display:grid; gap:8px; color:#686d76; font-size:.86rem; font-weight:650; }}
+input {{ width:100%; padding:13px 14px; border:1px solid rgba(29,31,35,.17);
+  border-radius:12px; color:#191b1f; background:#f8f6ef; font:inherit; }}
+input:focus {{ outline:2px solid #42752d; outline-offset:2px; }}
 button {{ margin-top:4px; padding:14px 18px; border:0; border-radius:12px;
-  color:#17210d; background:#b9f46f; font:inherit; font-weight:800; cursor:pointer; }}
-.auth-intro {{ color:#9198a8; line-height:1.5; }}
-.auth-error {{ padding:12px 14px; border-radius:12px; color:#ffd5dc;
-  background:rgba(255,135,155,.14); }}
+  color:#fff; background:#42752d; font:inherit; font-weight:800; cursor:pointer; }}
+.auth-intro {{ color:#686d76; line-height:1.5; }}
+.auth-error {{ padding:12px 14px; border-radius:12px; color:#8f2940;
+  background:rgba(182,60,84,.10); }}
 </style></head><body><main class="auth-card"><div class="auth-brand">jobwatch</div>
 <h1>{html.escape(title)}</h1>{body}</main></body></html>"""
 
@@ -2089,29 +2089,30 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .draft-area { position:relative; z-index:3; display:flex; align-items:center; flex-wrap:wrap;
   gap:9px; margin:0 13px; pointer-events:auto; color:var(--muted); font-size:.75rem }
 .draft-area:not(:empty) { margin-top:12px }
-/* centrée dans le tiers droit de l'écran : même écart à gauche, à droite et en bas */
-.batch-pill { --pill-gap:16px;
-  position:fixed; z-index:40; display:flex; align-items:center; gap:12px;
-  right:calc(var(--pill-gap) + env(safe-area-inset-right));
-  bottom:calc(var(--pill-gap) + env(safe-area-inset-bottom));
-  /* la largeur suit le texte, jamais la fenêtre : sur un grand écran, une
-     largeur proportionnelle donnait un large aplat vide qui mordait la carte */
-  width:max-content; max-width:min(340px, calc(100vw - 2 * var(--pill-gap)));
-  padding:14px 12px 14px 17px;
-  border:1px solid var(--line); border-radius:var(--radius-lg);
-  background:var(--surface-2); box-shadow:var(--shadow); color:var(--fg);
-  font-size:.88rem; line-height:1.4;
-  /* laisse passer le glissement des cartes de tri, sauf sur la croix */
-  pointer-events:none }
-.batch-pill[hidden] { display:none }
-.batch-pill .draft-spinner { width:18px; height:18px; border-width:2.5px }
-.batch-pill-text { display:flex; flex-direction:column; min-width:0;
-  overflow-wrap:anywhere }
-.batch-pill-text span:last-child { color:var(--muted) }
-.batch-pill-close { display:flex; flex:none; padding:5px; border:0; border-radius:9px;
-  background:none; color:var(--muted-2); cursor:pointer; pointer-events:auto }
-.batch-pill-close svg { width:17px; height:17px }
-.batch-pill-close:hover { color:var(--fg); background:var(--surface-hover) }
+/* avancement des lettres : ancré dans la barre du haut, jamais posé sur le
+   contenu - un panneau flottant paraissait perdu à droite sur grand écran et
+   mordait la carte dès que la fenêtre rétrécissait */
+.batch-badge-wrap { position:relative; display:flex }
+.batch-badge-wrap[hidden] { display:none }
+.batch-badge { display:flex; align-items:center; gap:7px; height:38px; padding:0 12px 0 9px;
+  border:1px solid var(--line-strong); border-radius:999px; background:var(--surface);
+  color:var(--fg); font-size:.8rem; font-weight:650; cursor:pointer;
+  transition:background .15s ease }
+.batch-badge:hover { background:var(--surface-hover) }
+.batch-ring { width:19px; height:19px; flex:none; border-radius:50%;
+  background:conic-gradient(var(--violet) calc(var(--batch-progress, 0) * 1%),
+    var(--line-strong) 0) }
+.batch-ring::after { content:""; display:block; width:11px; height:11px; margin:4px;
+  border-radius:50%; background:var(--surface) }
+.batch-badge:hover .batch-ring::after { background:var(--surface-hover) }
+.batch-ring-done { background:var(--accent) }
+.batch-panel { position:absolute; z-index:30; right:0; top:calc(100% + 9px);
+  width:max-content; max-width:min(250px, calc(100vw - 32px)); padding:13px 15px;
+  border:1px solid var(--line); border-radius:var(--radius-md);
+  background:var(--surface-2); box-shadow:var(--shadow); text-align:left }
+.batch-panel[hidden] { display:none }
+.batch-panel p { margin:0; font-size:.82rem; line-height:1.4 }
+.batch-panel-note { margin-top:3px; color:var(--muted) }
 .draft-spinner { width:14px; height:14px; flex:none; border:2px solid var(--line-strong);
   border-top-color:var(--violet); border-radius:50%; animation:draft-spin .8s linear infinite }
 @keyframes draft-spin { to { transform:rotate(360deg) } }
@@ -2205,17 +2206,18 @@ a { color:var(--blue) }
 }
 """
 
-_BATCH_PILL_JS = """\
+_BATCH_BADGE_JS = """\
 (function () {
-  const pill = document.getElementById('batch-pill');
-  if (!pill) return;
-  const spinner = document.getElementById('batch-pill-spinner');
-  const line1 = document.getElementById('batch-pill-line1');
-  const line2 = document.getElementById('batch-pill-line2');
-  const say = (first, second) => { line1.textContent = first; line2.textContent = second; };
+  const wrap = document.getElementById('batch-badge-wrap');
+  if (!wrap) return;
+  const badge = document.getElementById('batch-badge');
+  const ring = document.getElementById('batch-ring');
+  const count = document.getElementById('batch-badge-count');
+  const panel = document.getElementById('batch-panel');
+  const line1 = document.getElementById('batch-panel-line1');
+  const line2 = document.getElementById('batch-panel-line2');
   const track = document.body.dataset.track || 'engineer';
   let timer = null;
-  let dismissed = false;
 
   const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
   const poll = () => fetch(`/draft/batch/status?track=${track}`)
@@ -2223,37 +2225,48 @@ _BATCH_PILL_JS = """\
     .then(payload => {
       if (!payload) return;
       const active = payload.queued + payload.running;
+      const done = payload.ok + payload.failed;
       const failed = payload.failed ? ` · ${payload.failed} échec(s)` : '';
       if (active > 0) {
-        if (!dismissed) pill.hidden = false;
-        spinner.hidden = false;
-        say(`${active} lettre(s) en cours`, `${payload.ok} prête(s)${failed}`);
+        wrap.hidden = false;
+        ring.classList.remove('batch-ring-done');
+        ring.style.setProperty('--batch-progress', Math.round(100 * done / (done + active)));
+        count.textContent = String(active);
+        line1.textContent = `${active} lettre(s) en cours`;
+        line2.textContent = `${payload.ok} prête(s)${failed}`;
         if (!timer) timer = setInterval(poll, 3000);
         return;
       }
       stop();
-      if (pill.hidden) return;
-      spinner.hidden = true;
-      say(
-        `Terminé · ${payload.ok} lettre(s) prête(s)`,
-        `sur le tableau de bord${failed}`,
-      );
+      if (wrap.hidden) return;          // rien n'a tourné pendant cette visite
+      ring.classList.add('batch-ring-done');
+      ring.style.setProperty('--batch-progress', 100);
+      count.textContent = String(payload.ok);
+      line1.textContent = `Terminé · ${payload.ok} lettre(s) prête(s)`;
+      line2.textContent = `à joindre depuis les cartes${failed}`;
     })
     .catch(() => {});
 
-  document.getElementById('batch-pill-close').addEventListener('click', () => {
-    dismissed = true;
-    pill.hidden = true;
-    stop();
+  badge.addEventListener('click', () => {
+    const open = badge.getAttribute('aria-expanded') === 'true';
+    badge.setAttribute('aria-expanded', open ? 'false' : 'true');
+    panel.hidden = open;
+  });
+  document.addEventListener('click', event => {
+    if (panel.hidden || wrap.contains(event.target)) return;
+    badge.setAttribute('aria-expanded', 'false');
+    panel.hidden = true;
   });
 
   window.jwBatchPill = {
     poll,
     start: () => {
-      dismissed = false;
-      pill.hidden = false;
-      spinner.hidden = false;
-      say('Génération lancée…', '');
+      wrap.hidden = false;
+      ring.classList.remove('batch-ring-done');
+      ring.style.setProperty('--batch-progress', 0);
+      count.textContent = '…';
+      line1.textContent = 'Génération lancée…';
+      line2.textContent = '';
       if (!timer) timer = setInterval(poll, 3000);
       poll();
     },
@@ -2698,9 +2711,9 @@ def _page_template(
         else ""
     )
     return f"""<!DOCTYPE html>
-<html lang="fr" data-theme="dark"><head><meta charset="utf-8">
+<html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#090b10" id="theme-color">
+<meta name="theme-color" content="#f3f1eb" id="theme-color">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>jobwatch · tableau de bord</title>
@@ -2709,9 +2722,9 @@ def _page_template(
 (function () {{
   try {{
     const saved = localStorage.getItem('jw-theme');
-    document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = saved === 'dark' ? 'dark' : 'light';
   }} catch (_) {{
-    document.documentElement.dataset.theme = 'dark';
+    document.documentElement.dataset.theme = 'light';
   }}
 }})();
 </script>
@@ -3015,9 +3028,9 @@ def _swipe_page_template(
     *, track, cards, total, pending, batch, back_href, batch_pill="", csrf_token=""
 ) -> str:
     return f"""<!DOCTYPE html>
-<html lang="fr" data-theme="dark"><head><meta charset="utf-8">
+<html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#090b10">
+<meta name="theme-color" content="#f3f1eb">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>jobwatch · tri des offres</title>
 {_csrf_head(csrf_token)}
@@ -3025,9 +3038,9 @@ def _swipe_page_template(
 (function () {{
   try {{
     const saved = localStorage.getItem('jw-theme');
-    document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = saved === 'dark' ? 'dark' : 'light';
   }} catch (_) {{
-    document.documentElement.dataset.theme = 'dark';
+    document.documentElement.dataset.theme = 'light';
   }}
 }})();
 </script>
