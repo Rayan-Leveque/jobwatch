@@ -160,9 +160,16 @@ def test_codex_research_uses_schema_and_candidate_attachment(monkeypatch) -> Non
 
 def test_opencode_research_denies_local_tools_and_allows_web(monkeypatch) -> None:
     def fake_run(command, **kwargs):
+        from jobwatch.enrich import OPENCODE_TOOLS
+
+        expected = {"*": "deny"}
+        expected.update(
+            {tool: "deny" for tool in OPENCODE_TOOLS if tool not in ("webfetch", "websearch")}
+        )
+        expected.update({"webfetch": "allow", "websearch": "allow"})
         config_path = Path(kwargs["cwd"]) / "opencode.json"
-        permissions = json.loads(config_path.read_text(encoding="utf-8"))["permission"]
-        assert permissions == {"*": "deny", "webfetch": "allow", "websearch": "allow"}
+        assert json.loads(config_path.read_text(encoding="utf-8"))["permission"] == expected
+        assert json.loads(kwargs["env"]["OPENCODE_PERMISSION"]) == expected
         assert "--pure" in command
         assert "--auto" in command
         event = {"type": "text", "part": {"text": json.dumps({"offers": []})}}

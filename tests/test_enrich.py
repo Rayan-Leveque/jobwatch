@@ -570,21 +570,22 @@ def test_summarize_codex_builds_command_and_reads_output(monkeypatch) -> None:
     assert captured["input"] == "texte de l'offre"
 
 
-def test_summarize_opencode_denies_every_tool_and_ignores_user_config(monkeypatch) -> None:
-    """Le fichier opencode.json écrit à côté du prompt est le contrat lu par opencode."""
+def test_summarize_opencode_denies_every_tool_by_name(monkeypatch) -> None:
+    """opencode.json et OPENCODE_PERMISSION sont les contrats lus par opencode."""
     import json
     import subprocess as sp
     from pathlib import Path as P
 
-    from jobwatch.enrich import _summarize
+    from jobwatch.enrich import OPENCODE_TOOLS, _summarize
 
     captured: dict[str, object] = {}
 
     def fake_run(command, **kwargs):
         captured["command"] = list(command)
-        captured["permissions"] = json.loads(
+        captured["file"] = json.loads(
             (P(kwargs["cwd"]) / "opencode.json").read_text(encoding="utf-8")
         )
+        captured["env"] = json.loads(kwargs["env"]["OPENCODE_PERMISSION"])
         event = json.dumps({"type": "text", "part": {"text": "EXPERIENCE: 2 ans\n- Puce"}})
         return sp.CompletedProcess(command, 0, stdout=event, stderr="")
 
@@ -592,4 +593,6 @@ def test_summarize_opencode_denies_every_tool_and_ignores_user_config(monkeypatc
     _summarize(EnrichConfig(opencode_bin="opencode", model="m"), "texte d'offre")
 
     assert "--pure" in captured["command"]
-    assert captured["permissions"]["permission"] == {"*": "deny"}
+    expected = {"*": "deny", **{tool: "deny" for tool in OPENCODE_TOOLS}}
+    assert captured["file"]["permission"] == expected
+    assert captured["env"] == expected

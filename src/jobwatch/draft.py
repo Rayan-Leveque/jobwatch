@@ -30,7 +30,7 @@ import httpx
 
 from jobwatch.config import DRAFT_TRACKS, DraftConfig
 from jobwatch.db import connect
-from jobwatch.enrich import _extract_text, _fetch_and_extract, write_opencode_denials
+from jobwatch.enrich import _extract_text, _fetch_and_extract, opencode_sandbox
 from jobwatch.library import documents_dir
 
 log = logging.getLogger(__name__)
@@ -283,7 +283,7 @@ def _call_opencode(config: DraftConfig, prompt: str, attachment: str) -> str:
     with tempfile.TemporaryDirectory() as tmp_dir:
         bundle_path = Path(tmp_dir) / "bundle.md"
         bundle_path.write_text(attachment, encoding="utf-8")
-        write_opencode_denials(Path(tmp_dir))
+        env = opencode_sandbox(Path(tmp_dir))
         try:
             completed = subprocess.run(
                 [
@@ -303,6 +303,7 @@ def _call_opencode(config: DraftConfig, prompt: str, attachment: str) -> str:
                 timeout=LLM_TIMEOUT_SECONDS,
                 check=False,
                 cwd=tmp_dir,
+                env=env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise DraftError(f"appel OpenCode échoué : {exc}") from exc

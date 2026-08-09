@@ -817,17 +817,20 @@ def test_call_llm_codex_failure_raises_drafterror(monkeypatch) -> None:
         draft._call_llm(config, "prompt", "bundle")
 
 
-def test_call_opencode_denies_every_tool_and_ignores_user_config(monkeypatch) -> None:
-    """Le fichier opencode.json écrit à côté du bundle est le contrat lu par opencode."""
+def test_call_opencode_denies_every_tool_by_name(monkeypatch) -> None:
+    """opencode.json et OPENCODE_PERMISSION sont les contrats lus par opencode."""
     import subprocess as sp
+
+    from jobwatch.enrich import OPENCODE_TOOLS
 
     captured: dict[str, object] = {}
 
     def fake_run(command, **kwargs):
         captured["command"] = list(command)
-        captured["permissions"] = json.loads(
+        captured["file"] = json.loads(
             (Path(kwargs["cwd"]) / "opencode.json").read_text(encoding="utf-8")
         )
+        captured["env"] = json.loads(kwargs["env"]["OPENCODE_PERMISSION"])
         event = json.dumps({"type": "text", "part": {"text": MINIMAL_TEX}})
         return sp.CompletedProcess(command, 0, stdout=event, stderr="")
 
@@ -837,4 +840,6 @@ def test_call_opencode_denies_every_tool_and_ignores_user_config(monkeypatch) ->
 
     assert text.strip() == MINIMAL_TEX.strip()
     assert "--pure" in captured["command"]
-    assert captured["permissions"]["permission"] == {"*": "deny"}
+    expected = {"*": "deny", **{tool: "deny" for tool in OPENCODE_TOOLS}}
+    assert captured["file"]["permission"] == expected
+    assert captured["env"] == expected

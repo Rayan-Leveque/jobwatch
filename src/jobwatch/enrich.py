@@ -27,6 +27,7 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
@@ -276,21 +277,42 @@ def _summarize_codex(
     return fields, _verified_quotes(quotes, markdown), bullets
 
 
-def write_opencode_denials(tmp_dir: Path) -> Path:
-    """Écrit un opencode.json qui refuse tout outil, à côté du prompt.
+OPENCODE_TOOLS = (
+    "bash",
+    "read",
+    "edit",
+    "write",
+    "patch",
+    "glob",
+    "grep",
+    "list",
+    "lsp",
+    "skill",
+    "task",
+    "todowrite",
+    "webfetch",
+    "websearch",
+)
 
-    Le texte vient d'une page tierce : le modèle ne doit pouvoir ni lire, ni
-    écrire, ni exécuter quoi que ce soit, seulement répondre. Avec --pure, la
-    configuration utilisateur est ignorée et seul ce fichier s'applique.
+
+def opencode_sandbox(tmp_dir: Path, allow: tuple[str, ...] = ()) -> dict[str, str]:
+    """Refuse à OpenCode tout outil hors `allow`, et renvoie l'environnement à utiliser.
+
+    Le texte fourni au modèle vient d'une page tierce. `--pure` ne coupe que les
+    plugins externes : la configuration globale de l'utilisateur reste fusionnée
+    avec le fichier de projet écrit ici, et une permission nommée qu'elle
+    accorderait l'emporterait sur un simple `*`. Chaque outil connu est donc
+    refusé nommément, dans le fichier et dans OPENCODE_PERMISSION, que OpenCode
+    applique après tous les fichiers de configuration.
     """
-    path = tmp_dir / "opencode.json"
-    path.write_text(
-        json.dumps(
-            {"$schema": "https://opencode.ai/config.json", "permission": {"*": "deny"}}
-        ),
+    permission = {"*": "deny"}
+    permission.update({tool: "deny" for tool in OPENCODE_TOOLS if tool not in allow})
+    permission.update({tool: "allow" for tool in allow})
+    (tmp_dir / "opencode.json").write_text(
+        json.dumps({"$schema": "https://opencode.ai/config.json", "permission": permission}),
         encoding="utf-8",
     )
-    return path
+    return {**os.environ, "OPENCODE_PERMISSION": json.dumps(permission)}
 
 
 def _summarize_opencode(
@@ -301,7 +323,7 @@ def _summarize_opencode(
     with tempfile.TemporaryDirectory() as tmp_dir:
         content_path = Path(tmp_dir) / "offer.md"
         content_path.write_text(markdown, encoding="utf-8")
-        write_opencode_denials(Path(tmp_dir))
+        env = opencode_sandbox(Path(tmp_dir))
         command = [config.opencode_bin, "run", "--pure", "--model", config.model]
         if config.variant:
             command += ["--variant", config.variant]
@@ -314,6 +336,7 @@ def _summarize_opencode(
                 timeout=120,
                 check=False,
                 cwd=tmp_dir,
+                env=env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             log.warning("enrich: opencode subprocess failed: %s", exc)

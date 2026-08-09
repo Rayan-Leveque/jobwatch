@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from jobwatch.collectors.base import RawOffer
 from jobwatch.config import ResearchConfig, SearchConfig
+from jobwatch.enrich import opencode_sandbox
 
 log = logging.getLogger(__name__)
 
@@ -198,20 +199,7 @@ def _run_opencode(config: ResearchConfig, prompt: str, candidates: str) -> str |
     with tempfile.TemporaryDirectory() as tmp_dir:
         candidates_path = Path(tmp_dir) / "candidates.json"
         candidates_path.write_text(candidates, encoding="utf-8")
-        permissions_path = Path(tmp_dir) / "opencode.json"
-        permissions_path.write_text(
-            json.dumps(
-                {
-                    "$schema": "https://opencode.ai/config.json",
-                    "permission": {
-                        "*": "deny",
-                        "webfetch": "allow",
-                        "websearch": "allow",
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
+        env = opencode_sandbox(Path(tmp_dir), allow=("webfetch", "websearch"))
         command = [
             config.opencode_bin,
             "run",
@@ -231,6 +219,7 @@ def _run_opencode(config: ResearchConfig, prompt: str, candidates: str) -> str |
                 timeout=RESEARCH_TIMEOUT_SECONDS,
                 check=False,
                 cwd=tmp_dir,
+                env=env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             log.warning("research: appel OpenCode échoué : %s", exc)
