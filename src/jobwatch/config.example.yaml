@@ -20,6 +20,20 @@ searches:
 #     department: "75"
 #   smartrecruiters:
 #     companies: [Wavestone1, Devoteam]
+#   linkedin:
+#     hours: 48
+#     queries:
+#       - keywords: "ingénieur IA"
+#         location: "Paris, Île-de-France, France"
+#   wttj:
+#     hours: 48
+#     queries: ["ingénieur IA", "LLM engineer"]
+#     countries: [FR]
+#     cities: {}
+#     algolia:                         # identifiants publics exposés par le site WTTJ
+#       app_id: YOUR_PUBLIC_APP_ID
+#       api_key: YOUR_PUBLIC_SEARCH_KEY
+#       index: jobs_production
 sources: {}
 
 # notify : pour activer, supprimez la ligne « notify: {} » ci-dessous,
