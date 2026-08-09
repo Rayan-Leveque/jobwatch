@@ -46,10 +46,8 @@ _PROMPT_LABEL_TO_KEY = {
 }
 FIELD_UNKNOWN = "non précisé"
 
-SUMMARY_PROMPT = (
-    "Le fichier attaché contient le texte Markdown d'une offre d'emploi (converti "
-    "automatiquement depuis sa page web, peut contenir du bruit de navigation/pied de "
-    "page). Réponds exactement au format suivant, sans introduction ni conclusion :\n"
+_SUMMARY_FORMAT = (
+    "Réponds exactement au format suivant, sans introduction ni conclusion :\n"
     "EXPERIENCE: <expérience souhaitée (années, séniorité), ou 'non précisé'>\n"
     "SALAIRE: <salaire ou fourchette, ou 'non précisé'>\n"
     "TELETRAVAIL: <politique de télétravail (full remote, hybride N jours, sur site), "
@@ -57,6 +55,21 @@ SUMMARY_PROMPT = (
     "STACK: <technos et compétences clés condensées en une ligne, ou 'non précisé'>\n"
     "- <puis 3 à 6 puces courtes et factuelles : poste, mission, lieu, contrat>"
 )
+
+SUMMARY_PROMPT = (
+    "Le fichier attaché contient le texte Markdown d'une offre d'emploi (converti "
+    "automatiquement depuis sa page web, peut contenir du bruit de navigation/pied de "
+    f"page). {_SUMMARY_FORMAT}"
+)
+
+CODEX_SUMMARY_PROMPT = (
+    "Le bloc <stdin> ci-dessous contient le texte Markdown d'une offre d'emploi "
+    "(converti automatiquement depuis sa page web, peut contenir du bruit de "
+    "navigation/pied de page). N'exécute aucune commande et ne lis aucun fichier : "
+    f"réponds directement. {_SUMMARY_FORMAT}"
+)
+
+CODEX_TIMEOUT_SECONDS = 300
 
 
 class EnrichError(Exception):
@@ -151,6 +164,62 @@ def _store_content(
 
 
 def _summarize(config: EnrichConfig, markdown: str) -> tuple[dict[str, str], list[str]] | None:
+    if config.runner == "codex":
+        return _summarize_codex(config, markdown)
+    return _summarize_opencode(config, markdown)
+
+
+def _summarize_codex(
+    config: EnrichConfig, markdown: str
+) -> tuple[dict[str, str], list[str]] | None:
+    # Le texte de l'offre passe par stdin (bloc <stdin> côté codex) : pas de
+    # limite d'argument ni de fichier temporaire à faire lire au modèle. La
+    # réponse finale est écrite par codex dans un fichier (-o), donc aucun
+    # parsing de log. Sandbox danger-full-access : le bwrap de codex exec est
+    # cassé dans ce conteneur, c'est le seul mode fonctionnel.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        out_path = Path(tmp_dir) / "reponse.txt"
+        command = [
+            config.codex_bin, "exec",
+            "--model", config.model,
+            "-s", "danger-full-access",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "-o", str(out_path),
+        ]
+        if config.variant:
+            command += ["-c", f"model_reasoning_effort={config.variant}"]
+        command.append(CODEX_SUMMARY_PROMPT)
+        try:
+            completed = subprocess.run(
+                command,
+                input=markdown,
+                capture_output=True,
+                text=True,
+                timeout=CODEX_TIMEOUT_SECONDS,
+                check=False,
+                cwd=tmp_dir,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log.warning("enrich: codex subprocess failed: %s", exc)
+            return None
+        if completed.returncode != 0:
+            log.warning("enrich: codex exited with status %s", completed.returncode)
+            return None
+        try:
+            text = out_path.read_text(encoding="utf-8")
+        except OSError:
+            log.warning("enrich: codex did not write its final message")
+            return None
+    fields, bullets = _parse_summary(text)
+    if not fields and not bullets:
+        return None
+    return fields, bullets
+
+
+def _summarize_opencode(
+    config: EnrichConfig, markdown: str
+) -> tuple[dict[str, str], list[str]] | None:
     # Le Markdown est passé en pièce jointe (--file) et non en argument CLI :
     # le noyau Linux limite chaque argument individuel à ~128 Ko (MAX_ARG_STRLEN).
     with tempfile.TemporaryDirectory() as tmp_dir:

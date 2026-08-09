@@ -77,11 +77,18 @@ class NotifyConfig:
         return self.ntfy is not None or self.smtp is not None
 
 
+ENRICH_RUNNERS = ("opencode", "codex")
+
+
 @dataclass
 class EnrichConfig:
-    opencode_bin: str
     model: str
-    # Variante de raisonnement OpenCode (--variant : minimal, high, max...), optionnelle.
+    # Exécuteur LLM : 'opencode' (API, facturé à l'appel) ou 'codex' (CLI codex exec,
+    # couvert par l'abonnement ChatGPT).
+    runner: str = "opencode"
+    opencode_bin: str = "opencode"
+    codex_bin: str = "codex"
+    # Effort de raisonnement : --variant OpenCode ou model_reasoning_effort codex.
     variant: str | None = None
     # Appels LLM de résumé simultanés (les fetchs web restent séquentiels et espacés).
     concurrency: int = 4
@@ -248,12 +255,22 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
         raise ConfigError("'enrich' doit être un mapping")
     if not raw:
         return None
-    opencode_bin = raw.get("opencode_bin")
     model = raw.get("model")
-    if not isinstance(opencode_bin, str) or not opencode_bin:
-        raise ConfigError("enrich.opencode_bin est requis quand enrich est présent")
     if not isinstance(model, str) or not model:
         raise ConfigError("enrich.model est requis quand enrich est présent")
+    runner = raw.get("runner", "opencode")
+    if runner not in ENRICH_RUNNERS:
+        raise ConfigError(
+            f"enrich.runner doit être l'un de {list(ENRICH_RUNNERS)}, reçu : {runner!r}"
+        )
+    opencode_bin = raw.get("opencode_bin", "opencode")
+    if not isinstance(opencode_bin, str) or not opencode_bin:
+        raise ConfigError("enrich.opencode_bin doit être une chaîne non vide")
+    if runner == "opencode" and "opencode_bin" not in raw:
+        raise ConfigError("enrich.opencode_bin est requis avec le runner opencode")
+    codex_bin = raw.get("codex_bin", "codex")
+    if not isinstance(codex_bin, str) or not codex_bin:
+        raise ConfigError("enrich.codex_bin doit être une chaîne non vide")
     variant = raw.get("variant")
     if variant is not None and (not isinstance(variant, str) or not variant):
         raise ConfigError("enrich.variant doit être une chaîne non vide")
@@ -261,7 +278,8 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
     if not isinstance(concurrency, int) or isinstance(concurrency, bool) or concurrency < 1:
         raise ConfigError("enrich.concurrency doit être un entier >= 1")
     return EnrichConfig(
-        opencode_bin=opencode_bin, model=model, variant=variant, concurrency=concurrency
+        model=model, runner=runner, opencode_bin=opencode_bin, codex_bin=codex_bin,
+        variant=variant, concurrency=concurrency,
     )
 
 
