@@ -200,6 +200,14 @@ def _sync_intent_searches(
             (account_id,),
         )
     }
+    foreign = {
+        int(row["search_id"])
+        for row in conn.execute(
+            "SELECT DISTINCT search_id FROM career_intent "
+            "WHERE account_id <> ? AND search_id IS NOT NULL",
+            (account_id,),
+        )
+    }
     searches = [
         SearchConfig(name=intent.label, include=intent.keywords, exclude=intent.exclude)
         for intent in intents
@@ -213,10 +221,12 @@ def _sync_intent_searches(
                 "SELECT id FROM search WHERE id = ?", (intent.search_id,)
             ).fetchone()
         if row is None:
+            # Une recherche portée par la catégorie d'un autre compte n'est
+            # jamais reprise par son nom : elle est refusée plus bas.
             row = conn.execute(
                 "SELECT id FROM search WHERE name = ?", (search.name,)
             ).fetchone()
-            if row is not None and int(row["id"]) in taken:
+            if row is not None and (int(row["id"]) in taken or int(row["id"]) in foreign):
                 row = None
         search_id = None if row is None else int(row["id"])
         if search_id is not None:

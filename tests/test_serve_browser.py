@@ -432,3 +432,26 @@ def test_swipe_popup_shows_once_per_session(browser, dashboard) -> None:
     page.wait_for_selector(".swipe-fab")
     assert not page.locator("#swipe-popup").is_visible()
     page.close()
+
+
+def test_onboarding_refuses_to_drop_an_incomplete_category(browser, onboarding_instance) -> None:
+    url, invite = onboarding_instance
+    page = browser.new_page()
+    _sign_in_to_onboarding(page, url, invite)
+    page.get_by_role("button", name=re.compile(r"^Créer mes catégories")).click()
+    page.locator(".intent-label").fill("Ingénierie IA")
+    page.locator(".keywords").fill("AI Engineer")
+    page.locator("#add-intent").click()
+    page.locator(".intent").nth(1).locator(".intent-label").fill("Produit")
+
+    page.locator("#confirm").click()
+
+    status = page.locator("#intent-status")
+    assert "nom et au moins un mot-clé" in status.inner_text()
+    assert page.url.endswith("/onboarding")
+
+    page.locator(".intent").nth(1).locator(".keywords").fill("Product Owner")
+    page.locator("#confirm").click()
+
+    page.wait_for_url(f"{url}/")
+    page.close()

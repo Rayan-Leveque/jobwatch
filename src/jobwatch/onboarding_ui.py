@@ -307,12 +307,19 @@ document.getElementById('add-intent').addEventListener('click', () => {{
 document.getElementById('confirm').addEventListener('click', async event => {{
   const button = event.currentTarget; const status = document.getElementById('intent-status');
   const split = value => value.split(',').map(item => item.trim()).filter(Boolean);
-  const intents = [...document.querySelectorAll('.intent')].map(card => ({{
+  const cards = [...document.querySelectorAll('.intent')].map(card => ({{
     id:card.dataset.intentId ? Number(card.dataset.intentId) : null,
     label:card.querySelector('.intent-label').value.trim(),
     keywords:split(card.querySelector('.keywords').value),
     exclude:split(card.querySelector('.exclude').value),
-  }})).filter(intent => intent.label && intent.keywords.length);
+  }}));
+  const complete = card => card.label && card.keywords.length;
+  const started = card => card.label || card.keywords.length || card.exclude.length;
+  if (cards.some(card => started(card) && !complete(card))) {{
+    status.textContent = 'Chaque catégorie doit avoir un nom et au moins un mot-clé.';
+    status.classList.add('error'); return;
+  }}
+  const intents = cards.filter(complete);
   if (!intents.length) {{ status.textContent = 'Ajoutez au moins une catégorie avec un mot-clé.';
     status.classList.add('error'); return; }}
   button.disabled = true; status.textContent = 'Enregistrement de vos catégories…';

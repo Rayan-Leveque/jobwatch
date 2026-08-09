@@ -454,3 +454,45 @@ def test_manual_category_with_code_fence_is_saved(tmp_path) -> None:
     assert conn.execute("SELECT label FROM career_intent").fetchone()[0] == label
     assert conn.execute("SELECT active FROM search WHERE name = ?", (label,)).fetchone()[0] == 1
     conn.close()
+
+
+def test_category_name_owned_by_another_account_is_rejected(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    other_id = int(
+        conn.execute("INSERT INTO account (email) VALUES ('autre@example.com')").lastrowid
+    )
+    conn.execute(
+        "INSERT INTO membership (account_id, workspace_id, role) VALUES (?, ?, 'owner')",
+        (other_id, workspace_id),
+    )
+    conn.commit()
+    complete_profile(
+        conn,
+        other_id,
+        workspace_id,
+        [cv_id],
+        [{"label": "Data", "keywords": ["Data Engineer"], "exclude": []}],
+    )
+    other_search_id = conn.execute(
+        "SELECT search_id FROM career_intent WHERE account_id = ?", (other_id,)
+    ).fetchone()[0]
+
+    with pytest.raises(OnboardingError, match="existe déjà"):
+        complete_profile(
+            conn,
+            account_id,
+            workspace_id,
+            [cv_id],
+            [{"label": "Data", "keywords": ["AI Engineer"], "exclude": []}],
+        )
+
+    row = conn.execute(
+        "SELECT name, include_json, active FROM search WHERE id = ?", (other_search_id,)
+    ).fetchone()
+    assert row["name"] == "Data"
+    assert json.loads(row["include_json"]) == ["Data Engineer"]
+    assert row["active"] == 1
+    assert conn.execute(
+        "SELECT count(*) FROM career_intent WHERE account_id = ?", (account_id,)
+    ).fetchone()[0] == 0
+    conn.close()
