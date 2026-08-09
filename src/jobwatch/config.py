@@ -106,6 +106,7 @@ class SmtpConfig:
 class NotifyConfig:
     ntfy: NtfyConfig | None = None
     smtp: SmtpConfig | None = None
+    heartbeat: bool = False
 
     def enabled(self) -> bool:
         return self.ntfy is not None or self.smtp is not None
@@ -126,6 +127,18 @@ class EnrichConfig:
     variant: str | None = None
     # Appels LLM de résumé simultanés (les fetchs web restent séquentiels et espacés).
     concurrency: int = 4
+
+
+@dataclass
+class ResearchConfig:
+    model: str
+    runner: str = "codex"
+    opencode_bin: str = "opencode"
+    codex_bin: str = "codex"
+    variant: str | None = None
+    instructions: str = ""
+    recency_days: int = 7
+    max_results: int = 50
 
 
 DRAFT_TRACKS = ("engineer", "project")
@@ -152,6 +165,7 @@ class Config:
     searches: list[SearchConfig]
     sources: SourcesConfig
     notify: NotifyConfig
+    research: ResearchConfig | None = None
     enrich: EnrichConfig | None = None
     draft: DraftConfig | None = None
 
@@ -349,8 +363,54 @@ def _notify_from_dict(raw: object) -> NotifyConfig:
         return NotifyConfig()
     if not isinstance(raw, dict):
         raise ConfigError("'notify' doit être un mapping")
+    heartbeat = raw.get("heartbeat", False)
+    if not isinstance(heartbeat, bool):
+        raise ConfigError("notify.heartbeat doit être un booléen")
     return NotifyConfig(
-        ntfy=_ntfy_from_dict(raw.get("ntfy")), smtp=_smtp_from_dict(raw.get("smtp"))
+        ntfy=_ntfy_from_dict(raw.get("ntfy")),
+        smtp=_smtp_from_dict(raw.get("smtp")),
+        heartbeat=heartbeat,
+    )
+
+
+def _research_from_dict(raw: object) -> ResearchConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'research' doit être un mapping")
+    if not raw:
+        return None
+    model = raw.get("model")
+    if not isinstance(model, str) or not model:
+        raise ConfigError("research.model est requis quand research est présent")
+    runner = raw.get("runner", "codex")
+    if runner not in ENRICH_RUNNERS:
+        raise ConfigError(
+            f"research.runner doit être l'un de {list(ENRICH_RUNNERS)}, reçu : {runner!r}"
+        )
+    opencode_bin = raw.get("opencode_bin", "opencode")
+    if not isinstance(opencode_bin, str) or not opencode_bin:
+        raise ConfigError("research.opencode_bin doit être une chaîne non vide")
+    codex_bin = raw.get("codex_bin", "codex")
+    if not isinstance(codex_bin, str) or not codex_bin:
+        raise ConfigError("research.codex_bin doit être une chaîne non vide")
+    variant = raw.get("variant")
+    if variant is not None and (not isinstance(variant, str) or not variant):
+        raise ConfigError("research.variant doit être une chaîne non vide")
+    instructions = raw.get("instructions", "")
+    if not isinstance(instructions, str):
+        raise ConfigError("research.instructions doit être une chaîne")
+    recency_days = _positive_hours(raw.get("recency_days", 7), "research.recency_days")
+    max_results = _positive_hours(raw.get("max_results", 50), "research.max_results")
+    return ResearchConfig(
+        model=model,
+        runner=runner,
+        opencode_bin=opencode_bin,
+        codex_bin=codex_bin,
+        variant=variant,
+        instructions=instructions.strip(),
+        recency_days=recency_days,
+        max_results=max_results,
     )
 
 
@@ -466,6 +526,7 @@ def load_config(path: Path) -> Config:
         searches=searches,
         sources=_sources_from_dict(raw.get("sources")),
         notify=_notify_from_dict(raw.get("notify")),
+        research=_research_from_dict(raw.get("research")),
         enrich=_enrich_from_dict(raw.get("enrich")),
         draft=_draft_from_dict(raw.get("draft")),
     )

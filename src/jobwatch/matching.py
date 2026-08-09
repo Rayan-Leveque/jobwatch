@@ -64,6 +64,24 @@ def sync_searches(conn: sqlite3.Connection, searches: list[SearchConfig]) -> Non
     conn.commit()
 
 
+def active_search_configs(conn: sqlite3.Connection) -> list[SearchConfig]:
+    """Relit les recherches actives, y compris celles confirmées dans l'onboarding."""
+    rows = conn.execute(
+        "SELECT name, include_json, exclude_json, locations_json, contract "
+        "FROM search WHERE active = 1 ORDER BY id"
+    ).fetchall()
+    return [
+        SearchConfig(
+            name=str(row["name"]),
+            include=list(json.loads(str(row["include_json"]))),
+            exclude=list(json.loads(str(row["exclude_json"]))),
+            locations=list(json.loads(str(row["locations_json"]))),
+            contract=row["contract"],
+        )
+        for row in rows
+    ]
+
+
 def _search_row(conn: sqlite3.Connection, search_id: int) -> sqlite3.Row:
     row = conn.execute("SELECT * FROM search WHERE id = ? AND active = 1", (search_id,)).fetchone()
     if row is None:

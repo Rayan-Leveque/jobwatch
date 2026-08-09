@@ -12,14 +12,16 @@ from jobwatch import __version__, importing
 from jobwatch.applications import ApplicationError, record_application
 from jobwatch.auth import AuthError, create_invite
 from jobwatch.collectors import build_collectors
-from jobwatch.collectors.base import store_offers
+from jobwatch.collectors.base import RawOffer, store_offers
 from jobwatch.config import Config, ConfigError, example_config_text, load_config
 from jobwatch.db import connect, init_db
 from jobwatch.digest import send_digest
 from jobwatch.enrich import EnrichError, enrich
-from jobwatch.library import migrate_external_documents
-from jobwatch.matching import run_matching, sync_searches
+from jobwatch.library import LibraryError, migrate_draft_examples, migrate_external_documents
+from jobwatch.matching import active_search_configs, run_matching, sync_searches
+from jobwatch.onboarding import sync_profile_searches
 from jobwatch.paths import INSTANCE_ENV, instance_paths, validate_instance_name
+from jobwatch.research import apply_research_fits, research_offers
 from jobwatch.serve import ServeError, serve_http
 
 logger = logging.getLogger(__name__)
@@ -151,19 +153,45 @@ def run(config_path: Path | None) -> None:
     conn = _open_db(config)
     try:
         sync_searches(conn, config.searches)
+        sync_profile_searches(conn)
+        searches = active_search_configs(conn)
         collected = 0
+        direct_candidates: list[RawOffer] = []
         for collector in build_collectors(config.sources):
             offers = collector.fetch()
             new_ids = store_offers(conn, collector.name, collector.source_type, offers)
             collected += len(new_ids)
+            if new_ids:
+                placeholders = ",".join("?" for _ in new_ids)
+                new_urls = {
+                    str(row["url"])
+                    for row in conn.execute(
+                        f"SELECT url FROM offer WHERE id IN ({placeholders})", new_ids
+                    ).fetchall()
+                }
+                direct_candidates.extend(offer for offer in offers if offer.url in new_urls)
             logger.info("collected %d new offers from %s", len(new_ids), collector.name)
+        research_failed = False
+        research_fits: dict[str, str] = {}
+        if config.research is not None:
+            result = research_offers(config.research, searches, direct_candidates)
+            research_failed = result.failed
+            research_fits = result.fits_by_url
+            new_ids = store_offers(conn, "research", "research", result.offers)
+            collected += len(new_ids)
         new_matches = run_matching(conn)
+        fitted = apply_research_fits(conn, research_fits)
         channels = send_digest(conn, config)
     finally:
         conn.close()
 
     notified = f", notifié via {', '.join(channels)}" if channels else ""
-    click.echo(f"{collected} nouvelles offres collectées, {len(new_matches)} nouveaux matchs{notified}")
+    research_note = ", recherche large en échec" if research_failed else ""
+    fit_note = f", {fitted} fit(s) renseigné(s)" if fitted else ""
+    click.echo(
+        f"{collected} nouvelles offres collectées, {len(new_matches)} nouveaux matchs"
+        f"{fit_note}{notified}{research_note}"
+    )
 
 
 @cli.command("enrich")
@@ -285,18 +313,36 @@ def import_summaries(config_path: Path | None, path: Path) -> None:
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def migrate_storage(config_path: Path | None, source_root: Path | None) -> None:
     """Copie les documents externes dans le stockage géré par jobwatch."""
+    try:
+        resolved_config_path = _resolve_config_path(
+            str(config_path) if config_path is not None else None
+        )
+    except CliError as exc:
+        _fatal(str(exc))
     config = _require_config(config_path)
     conn = _open_db(config)
     try:
         result = migrate_external_documents(conn, config.db, source_root)
     finally:
         conn.close()
+    try:
+        examples = migrate_draft_examples(
+            resolved_config_path, config.db, source_root
+        )
+    except (OSError, LibraryError) as exc:
+        _fatal(f"migration des exemples impossible : {exc}")
     click.echo(
         f"{result.copied} document(s) copié(s), "
         f"{result.already_managed} déjà géré(s), {len(result.missing)} introuvable(s)"
     )
     for path in result.missing:
         click.echo(f"avertissement : document introuvable : {path}", err=True)
+    click.echo(
+        f"{examples.copied} exemple(s) LaTeX copié(s), "
+        f"{examples.already_managed} déjà géré(s), {len(examples.missing)} introuvable(s)"
+    )
+    for path in examples.missing:
+        click.echo(f"avertissement : exemple introuvable : {path}", err=True)
 
 
 @cli.group("account")
@@ -563,6 +609,7 @@ def serve(config_path: Path | None, host: str, port: int, secure_cookie: bool) -
             draft_config=config.draft,
             workspace_slug=_current_instance(),
             secure_cookie=secure_cookie,
+            onboarding_enabled=_current_instance() is not None,
         )
     except ServeError as exc:
         _fatal(str(exc))

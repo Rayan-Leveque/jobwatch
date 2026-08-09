@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS summary_field (
   summary_id INTEGER NOT NULL REFERENCES offer_summary(id) ON DELETE CASCADE,
   key TEXT NOT NULL,                 -- 'experience' | 'salary' | 'remote' | 'stack'
   value TEXT NOT NULL,               -- texte libre du LLM ; 'non précisé' si l'offre ne dit rien
+  quote TEXT,                        -- citation littérale de l'annonce, vérifiée présente dans offer_content ; NULL si le champ n'est pas ancré
   PRIMARY KEY(summary_id, key)
 );
 CREATE TABLE IF NOT EXISTS summary_bullet (
@@ -41,8 +42,10 @@ CREATE TABLE IF NOT EXISTS summary_bullet (
 CREATE TABLE IF NOT EXISTS offer_content (
   id INTEGER PRIMARY KEY,
   offer_id INTEGER NOT NULL UNIQUE REFERENCES offer(id) ON DELETE CASCADE,
-  markdown TEXT,                     -- texte complet de l'offre converti en Markdown ; NULL si status='failed'
+  markdown TEXT,                     -- bloc utile de l'offre en Markdown ; NULL si status='failed'
   fetch_method TEXT,                 -- 'http' | 'playwright'
+  extract_method TEXT,               -- 'jsonld' | 'readable' | 'raw' (repli : page entière)
+  html_gz BLOB,                      -- HTML brut compressé, pour re-extraire sans refetch
   status TEXT NOT NULL,              -- 'ok' | 'failed'
   fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -163,3 +166,31 @@ CREATE TABLE IF NOT EXISTS login_throttle (
   window_started_at TEXT NOT NULL,
   blocked_until TEXT
 );
+
+-- Profil candidat et pistes confirmées pendant l'onboarding. Le profil est lié
+-- au compte, pas à l'instance, afin de rester compatible avec le futur mode C.
+CREATE TABLE IF NOT EXISTS candidate_profile (
+  account_id INTEGER PRIMARY KEY REFERENCES account(id) ON DELETE CASCADE,
+  workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+  cv_library_id INTEGER REFERENCES document_library(id),
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS candidate_profile_document (
+  account_id INTEGER NOT NULL REFERENCES candidate_profile(account_id) ON DELETE CASCADE,
+  document_library_id INTEGER NOT NULL REFERENCES document_library(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, document_library_id)
+);
+CREATE TABLE IF NOT EXISTS career_intent (
+  id INTEGER PRIMARY KEY,
+  account_id INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  keywords_json TEXT NOT NULL,
+  exclude_json TEXT NOT NULL DEFAULT '[]',
+  position INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(account_id, label)
+);
+CREATE INDEX IF NOT EXISTS idx_career_intent_account ON career_intent(account_id, position);

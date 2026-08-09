@@ -38,6 +38,7 @@ sources: {}
 
 # notify : pour activer, supprimez la ligne « notify: {} » ci-dessous,
 # puis décommentez et remplissez :
+#   heartbeat: true                       # notifier aussi les journées sans nouvelle offre
 #   ntfy:
 #     topic: your-private-topic          # optionnel ; POST https://ntfy.sh/<topic>
 #   smtp:                                # optionnel
@@ -47,6 +48,20 @@ sources: {}
 #     password: app-password
 #     to: you@example.com
 notify: {}
+
+# research : recherche web large facultative après les collecteurs directs.
+# Les offres directement collectées sont aussi transmises au modèle pour recevoir un fit.
+# Pour activer, remplacez « research: {} » par un bloc rempli :
+#   runner: codex                       # codex ou opencode
+#   codex_bin: codex
+#   opencode_bin: opencode
+#   model: gpt-5.6-luna
+#   variant: max                        # optionnel
+#   recency_days: 7                     # optionnel, défaut 7
+#   max_results: 50                     # optionnel, défaut 50
+#   instructions: |                     # profil et priorités propres à cette instance
+#     Candidat junior. Prioriser les postes IA agentique à Paris.
+research: {}
 
 # enrich : pour activer, supprimez la ligne « enrich: {} » ci-dessous,
 # puis décommentez et remplissez :

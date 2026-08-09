@@ -10,9 +10,12 @@ import pytest
 
 from jobwatch.db import connect, init_db
 from jobwatch.library import (
+    MAX_UPLOAD_BASE64_CHARS,
     LibraryError,
     documents_dir,
+    examples_dir,
     list_library,
+    migrate_draft_examples,
     migrate_external_documents,
     resolve_path,
     save_upload,
@@ -33,12 +36,13 @@ def _b64(data: bytes) -> str:
 
 def test_save_upload_writes_file_and_library_row(conn: sqlite3.Connection, tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
-    entry = save_upload(conn, db_path, "cv", "Mon CV", "cv.pdf", _b64(b"contenu pdf"))
+    data = b"%PDF-1.4\ncontenu pdf"
+    entry = save_upload(conn, db_path, "cv", "Mon CV", "cv.pdf", _b64(data))
     assert entry["type"] == "cv"
     assert entry["label"] == "Mon CV"
     file_path = Path(entry["file_path"])
     assert file_path.parent == documents_dir(db_path)
-    assert file_path.read_bytes() == b"contenu pdf"
+    assert file_path.read_bytes() == data
     assert file_path.name.endswith("_cv.pdf")
 
 
@@ -46,7 +50,7 @@ def test_save_upload_blank_label_falls_back_to_sanitized_filename(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
     db_path = tmp_path / "jw.db"
-    entry = save_upload(conn, db_path, "cv", "  ", "mon cv final.pdf", _b64(b"x"))
+    entry = save_upload(conn, db_path, "cv", "  ", "mon cv final.pdf", _b64(b"%PDF-1.4\nx"))
     assert entry["label"] == "mon cv final.pdf"
 
 
@@ -54,7 +58,7 @@ def test_save_upload_sanitizes_path_traversal_filename(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
     db_path = tmp_path / "jw.db"
-    entry = save_upload(conn, db_path, "cv", None, "../../etc/passwd", _b64(b"x"))
+    entry = save_upload(conn, db_path, "cv", None, "../../etc/passwd", _b64(b"%PDF-1.4\nx"))
     file_path = Path(entry["file_path"])
     assert file_path.parent == documents_dir(db_path)
     assert file_path.name.endswith("_passwd")
@@ -65,7 +69,7 @@ def test_save_upload_sanitizes_absolute_path_filename(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
     db_path = tmp_path / "jw.db"
-    entry = save_upload(conn, db_path, "cv", None, "/etc/passwd", _b64(b"x"))
+    entry = save_upload(conn, db_path, "cv", None, "/etc/passwd", _b64(b"%PDF-1.4\nx"))
     file_path = Path(entry["file_path"])
     assert file_path.parent == documents_dir(db_path)
     assert file_path.name.endswith("_passwd")
@@ -75,11 +79,13 @@ def test_save_upload_two_uploads_same_filename_do_not_collide(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
     db_path = tmp_path / "jw.db"
-    first = save_upload(conn, db_path, "cv", "A", "cv.pdf", _b64(b"un"))
-    second = save_upload(conn, db_path, "cv", "B", "cv.pdf", _b64(b"deux"))
+    first_data = b"%PDF-1.4\nun"
+    second_data = b"%PDF-1.4\ndeux"
+    first = save_upload(conn, db_path, "cv", "A", "cv.pdf", _b64(first_data))
+    second = save_upload(conn, db_path, "cv", "B", "cv.pdf", _b64(second_data))
     assert first["file_path"] != second["file_path"]
-    assert Path(first["file_path"]).read_bytes() == b"un"
-    assert Path(second["file_path"]).read_bytes() == b"deux"
+    assert Path(first["file_path"]).read_bytes() == first_data
+    assert Path(second["file_path"]).read_bytes() == second_data
 
 
 def test_save_upload_rejects_invalid_type(conn: sqlite3.Connection, tmp_path: Path) -> None:
@@ -94,13 +100,32 @@ def test_save_upload_rejects_invalid_base64(conn: sqlite3.Connection, tmp_path: 
         save_upload(conn, db_path, "cv", None, "cv.pdf", "not base64 at all!!")
 
 
+def test_save_upload_rejects_non_pdf_cv(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    with pytest.raises(LibraryError, match="fichier PDF"):
+        save_upload(conn, tmp_path / "jw.db", "cv", None, "cv.pdf", _b64(b"not pdf"))
+
+
+def test_save_upload_rejects_oversized_base64_before_decoding(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    with pytest.raises(LibraryError, match="10 Mo maximum"):
+        save_upload(
+            conn,
+            tmp_path / "jw.db",
+            "cover_letter",
+            None,
+            "letter.pdf",
+            "A" * (MAX_UPLOAD_BASE64_CHARS + 1),
+        )
+
+
 def test_list_library_filters_by_type_and_orders_newest_first(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
     db_path = tmp_path / "jw.db"
-    save_upload(conn, db_path, "cv", "CV 1", "a.pdf", _b64(b"1"))
+    save_upload(conn, db_path, "cv", "CV 1", "a.pdf", _b64(b"%PDF-1.4\n1"))
     save_upload(conn, db_path, "cover_letter", "LM 1", "b.pdf", _b64(b"2"))
-    save_upload(conn, db_path, "cv", "CV 2", "c.pdf", _b64(b"3"))
+    save_upload(conn, db_path, "cv", "CV 2", "c.pdf", _b64(b"%PDF-1.4\n3"))
 
     cv_rows = list_library(conn, "cv")
     assert [r["label"] for r in cv_rows] == ["CV 2", "CV 1"]
@@ -114,7 +139,7 @@ def test_resolve_path_returns_none_for_unknown_id(conn: sqlite3.Connection) -> N
 
 def test_resolve_path_returns_file_path(conn: sqlite3.Connection, tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
-    entry = save_upload(conn, db_path, "cv", "CV", "a.pdf", _b64(b"x"))
+    entry = save_upload(conn, db_path, "cv", "CV", "a.pdf", _b64(b"%PDF-1.4\nx"))
     assert resolve_path(conn, entry["id"], "cv") == entry["file_path"]
 
 
@@ -122,7 +147,7 @@ def test_resolve_path_returns_none_for_mismatched_type(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
     db_path = tmp_path / "jw.db"
-    entry = save_upload(conn, db_path, "cv", "CV", "a.pdf", _b64(b"x"))
+    entry = save_upload(conn, db_path, "cv", "CV", "a.pdf", _b64(b"%PDF-1.4\nx"))
     assert resolve_path(conn, entry["id"], "cover_letter") is None
 
 
@@ -183,3 +208,39 @@ def test_migrate_external_documents_reports_missing_without_changing_path(
     assert result.copied == 0
     assert result.missing == ["missing.pdf"]
     assert conn.execute("SELECT file_path FROM document_library").fetchone()[0] == "missing.pdf"
+
+
+def test_migrate_draft_examples_preserves_yaml_and_is_idempotent(tmp_path: Path) -> None:
+    source_root = tmp_path / "legacy"
+    source_root.mkdir()
+    source = source_root / "letter.tex"
+    source.write_text("lettre exemple", encoding="utf-8")
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    config_path = instance / "config.yaml"
+    original = (
+        "# commentaire conservé\n"
+        "draft:\n"
+        "  model: test\n"
+        "  examples:\n"
+        "    engineer:\n"
+        "      - letter.tex  # exemple IA\n"
+    )
+    config_path.write_text(original, encoding="utf-8")
+    db_path = instance / "jobwatch.db"
+
+    first = migrate_draft_examples(config_path, db_path, source_root)
+
+    assert first.copied == 1
+    assert first.missing == []
+    updated = config_path.read_text(encoding="utf-8")
+    assert "# commentaire conservé" in updated
+    assert "# exemple IA" in updated
+    target = next(examples_dir(db_path).iterdir())
+    assert target.read_text(encoding="utf-8") == "lettre exemple"
+    assert str(target.resolve()) in updated
+
+    second = migrate_draft_examples(config_path, db_path, source_root)
+    assert second.copied == 0
+    assert second.already_managed == 1
+    assert config_path.read_text(encoding="utf-8") == updated

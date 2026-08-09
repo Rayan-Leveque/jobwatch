@@ -16,6 +16,7 @@ l'iPhone comme au rechargement de la page.
 from __future__ import annotations
 
 import datetime
+import gzip
 import logging
 import re
 import shutil
@@ -29,7 +30,7 @@ import httpx
 
 from jobwatch.config import DraftConfig
 from jobwatch.db import connect
-from jobwatch.enrich import _extract_text, _fetch_and_convert
+from jobwatch.enrich import _extract_text, _fetch_and_extract
 from jobwatch.library import documents_dir
 
 log = logging.getLogger(__name__)
@@ -112,23 +113,24 @@ def _offer_markdown(conn: sqlite3.Connection, offer_id: int, url: str) -> str | 
     if row is not None and row["status"] == "ok" and row["markdown"]:
         return str(row["markdown"])
     with httpx.Client(timeout=30.0) as client:
-        markdown, fetch_method = _fetch_and_convert(url, client)
-    if markdown is None:
+        extracted, fetch_method, html = _fetch_and_extract(url, client)
+    if extracted is None:
         return None
+    html_gz = gzip.compress(html.encode("utf-8")) if html else None
     if row is None:
         conn.execute(
-            "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
-            "VALUES (?, ?, ?, 'ok')",
-            (offer_id, markdown, fetch_method),
+            "INSERT INTO offer_content (offer_id, markdown, fetch_method, extract_method, "
+            "html_gz, status) VALUES (?, ?, ?, ?, ?, 'ok')",
+            (offer_id, extracted.markdown, fetch_method, extracted.method, html_gz),
         )
     else:
         conn.execute(
-            "UPDATE offer_content SET markdown = ?, fetch_method = ?, status = 'ok', "
-            "fetched_at = datetime('now') WHERE offer_id = ?",
-            (markdown, fetch_method, offer_id),
+            "UPDATE offer_content SET markdown = ?, fetch_method = ?, extract_method = ?, "
+            "html_gz = ?, status = 'ok', fetched_at = datetime('now') WHERE offer_id = ?",
+            (extracted.markdown, fetch_method, extracted.method, html_gz, offer_id),
         )
     conn.commit()
-    return markdown
+    return extracted.markdown
 
 
 def _offer_fallback(conn: sqlite3.Connection, match: sqlite3.Row) -> str:
