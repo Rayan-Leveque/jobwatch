@@ -241,6 +241,38 @@ def test_migrate_storage_command_copies_external_library_file(
     assert managed.read_bytes() == b"cv"
 
 
+def test_account_invite_requires_named_instance(runner: CliRunner, tmp_path: Path) -> None:
+    config = _write_config(tmp_path, tmp_path / "jobwatch.db")
+    result = runner.invoke(
+        cli, ["account", "invite", "alice@example.com", "--config", str(config)]
+    )
+    assert result.exit_code == 1
+    assert "nécessite --instance" in result.output
+
+
+def test_account_invite_enables_auth_and_prints_one_time_path(
+    runner: CliRunner, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    assert runner.invoke(cli, ["--instance", "alice", "init"]).exit_code == 0
+
+    result = runner.invoke(
+        cli, ["--instance", "alice", "account", "invite", "Alice@Example.com"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "alice@example.com" in result.output
+    assert "/invite/" in result.output
+
+    db = tmp_path / "data/jobwatch/instances/alice/jobwatch.db"
+    conn = connect(db)
+    assert conn.execute(
+        "SELECT value FROM instance_setting WHERE key = 'auth_required'"
+    ).fetchone()[0] == "1"
+    assert conn.execute("SELECT count(*) FROM account_invite").fetchone()[0] == 1
+    conn.close()
+
+
 def test_run_with_no_sources_succeeds(runner: CliRunner, tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     config = _write_config(tmp_path, db_path)
