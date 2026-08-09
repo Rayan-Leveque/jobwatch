@@ -26,7 +26,9 @@ def _seed_offer(
     source_name: str = "france_travail",
     url: str = "https://example.com/offer-1",
     title: str = "AI Engineer",
+    match_state: str | None = "new",
 ) -> int:
+    """Sème une offre, avec un match actif par défaut (enrich ignore le reste)."""
     conn.execute("INSERT OR IGNORE INTO source (type, name) VALUES (?, ?)", (source_type, source_name))
     source_id = conn.execute(
         "SELECT id FROM source WHERE name = ?", (source_name,)
@@ -37,7 +39,19 @@ def _seed_offer(
         "INSERT INTO offer (source_id, company_id, title, url) VALUES (?, ?, ?, ?)",
         (source_id, company_id, title, url),
     )
-    return int(cur.lastrowid)
+    offer_id = int(cur.lastrowid)
+    if match_state is not None:
+        conn.execute(
+            "INSERT OR IGNORE INTO search (name, include_json, exclude_json, locations_json) "
+            "VALUES ('test', '[]', '[]', '[]')"
+        )
+        search_id = conn.execute("SELECT id FROM search WHERE name = 'test'").fetchone()["id"]
+        conn.execute(
+            "INSERT INTO match (search_id, offer_id, state) VALUES (?, ?, ?)",
+            (search_id, offer_id, match_state),
+        )
+    conn.commit()
+    return offer_id
 
 
 def _config() -> EnrichConfig:
@@ -63,17 +77,48 @@ def test_enrich_without_config_raises() -> None:
         enrich(conn, None)
 
 
-def test_enrich_ignores_bridge_offers(conn: sqlite3.Connection) -> None:
-    """Les offres du bridge ai-job-search (type 'web'/'import') ne sont jamais enrichies."""
-    _seed_offer(conn, source_type="web", source_name="linkedin", url="https://linkedin.com/x")
+def test_enrich_ignores_offers_without_active_match(conn: sqlite3.Connection) -> None:
+    """Sans match new/seen/later ni candidature, aucune offre n'est enrichie (aucun token)."""
+    _seed_offer(conn, url="https://example.com/no-match", match_state=None)
+    _seed_offer(
+        conn, url="https://example.com/discarded", match_state="discarded"
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("no fetch expected for bridge offers")
+        raise AssertionError("no fetch expected for inactive offers")
 
     result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
     assert result.fetched_ok == 0
     assert result.fetched_failed == 0
     assert conn.execute("SELECT COUNT(*) AS n FROM offer_content").fetchone()["n"] == 0
+
+
+def test_enrich_processes_bridge_offers_with_active_match(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """Les offres importées du bridge sont enrichies dès qu'un match les rend visibles."""
+    offer_id = _seed_offer(
+        conn, source_type="web", source_name="linkedin", url="https://linkedin.com/x"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=LONG_HTML)
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: ({"experience": "junior"}, ["Poste IA"]),
+    )
+    result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+    assert result.fetched_ok == 1
+    assert result.summaries_written == 1
+    assert result.fields_written == 1
+    field = conn.execute(
+        "SELECT sf.value AS value FROM summary_field sf "
+        "JOIN offer_summary os ON os.id = sf.summary_id "
+        "WHERE os.offer_id = ? AND sf.key = 'experience'",
+        (offer_id,),
+    ).fetchone()
+    assert field["value"] == "junior"
 
 
 def test_enrich_stores_content_and_summary(conn: sqlite3.Connection, monkeypatch) -> None:
@@ -82,7 +127,10 @@ def test_enrich_stores_content_and_summary(conn: sqlite3.Connection, monkeypatch
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=LONG_HTML)
 
-    monkeypatch.setattr("jobwatch.enrich._summarize", lambda config, markdown: ["Poste IA", "Paris"])
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: ({"experience": "3 ans"}, ["Poste IA", "Paris"]),
+    )
 
     result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
 
@@ -128,12 +176,8 @@ def test_enrich_does_not_overwrite_manual_summary(conn: sqlite3.Connection, monk
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=LONG_HTML)
 
-    called = False
-
     def fake_summarize(config, markdown):
-        nonlocal called
-        called = True
-        return ["ne doit jamais être écrit"]
+        return {"experience": "5 ans"}, ["ne doit jamais être écrit"]
 
     monkeypatch.setattr("jobwatch.enrich._summarize", fake_summarize)
 
@@ -141,7 +185,7 @@ def test_enrich_does_not_overwrite_manual_summary(conn: sqlite3.Connection, monk
 
     assert result.fetched_ok == 1
     assert result.summaries_written == 0
-    assert called is False
+    assert result.fields_written == 1
 
     row = conn.execute(
         "SELECT source FROM offer_summary WHERE offer_id = ?", (offer_id,)
@@ -288,3 +332,81 @@ def test_enrich_sleeps_between_offers(conn: sqlite3.Connection, monkeypatch) -> 
 
     assert len(sleeps) == 1  # entre les 2 offres, jamais après la dernière
     assert 1.0 <= sleeps[0] <= 2.0
+
+
+def test_parse_summary_extracts_fields_and_bullets() -> None:
+    from jobwatch.enrich import _parse_summary
+
+    text = (
+        "EXPERIENCE: 3-5 ans\n"
+        "SALAIRE: 45-55k\n"
+        "TELETRAVAIL: hybride 2 jours\n"
+        "STACK: Python, RAG, AWS\n"
+        "- Poste d'ingénieur IA\n"
+        "- CDI à Paris\n"
+    )
+    fields, bullets = _parse_summary(text)
+    assert fields == {
+        "experience": "3-5 ans",
+        "salary": "45-55k",
+        "remote": "hybride 2 jours",
+        "stack": "Python, RAG, AWS",
+    }
+    assert bullets == ["Poste d'ingénieur IA", "CDI à Paris"]
+
+
+def test_parse_summary_tolerates_noise_and_missing_fields() -> None:
+    from jobwatch.enrich import _parse_summary
+
+    text = "Voici le résumé :\n**SALAIRE:** \n- Une puce\nTexte libre ignoré\n"
+    fields, bullets = _parse_summary(text)
+    assert fields == {"salary": "non précisé"}
+    assert bullets == ["Une puce"]
+
+
+def test_enrich_adds_fields_to_offer_with_content_without_refetch(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """Backfill : contenu déjà en base -> champs ajoutés sans aucun fetch web."""
+    offer_id = _seed_offer(conn, match_state="later")
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
+        "VALUES (?, 'Annonce IA détaillée.', 'http', 'ok')",
+        (offer_id,),
+    )
+    cur = conn.execute(
+        "INSERT INTO offer_summary (offer_id, source) VALUES (?, 'auto')", (offer_id,)
+    )
+    conn.execute(
+        "INSERT INTO summary_bullet (summary_id, position, text) VALUES (?, 0, 'ancienne puce')",
+        (int(cur.lastrowid),),
+    )
+    conn.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no fetch expected: content already stored")
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: ({"experience": "senior"}, ["nouvelle puce ignorée"]),
+    )
+    sleeps: list[float] = []
+    result = enrich(conn, _config(), client=_http_client(handler), sleep=sleeps.append)
+
+    assert result.fetched_ok == 0
+    assert result.fields_written == 1
+    assert result.summaries_written == 0
+    assert sleeps == []  # pas de fetch web, pas de pause anti-martèlement
+    bullets = [
+        row["text"]
+        for row in conn.execute(
+            "SELECT text FROM summary_bullet sb "
+            "JOIN offer_summary os ON os.id = sb.summary_id WHERE os.offer_id = ?",
+            (offer_id,),
+        )
+    ]
+    assert bullets == ["ancienne puce"]
+
+    # Une fois les champs écrits, l'offre n'est plus jamais retraitée.
+    second = enrich(conn, _config(), client=_http_client(handler), sleep=sleeps.append)
+    assert second.fields_written == 0

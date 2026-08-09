@@ -147,7 +147,8 @@ def enrich_cmd(config_path: Path | None) -> None:
         conn.close()
     click.echo(
         f"{result.fetched_ok} offre(s) récupérée(s), {result.fetched_failed} échec(s), "
-        f"{result.summaries_written} résumé(s) généré(s)"
+        f"{result.summaries_written} résumé(s) généré(s), "
+        f"{result.fields_written} fiche(s) de champs écrite(s)"
     )
 
 

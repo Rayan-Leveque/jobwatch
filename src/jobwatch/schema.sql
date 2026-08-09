@@ -26,6 +26,12 @@ CREATE TABLE IF NOT EXISTS offer_summary (
   id INTEGER PRIMARY KEY,
   offer_id INTEGER NOT NULL UNIQUE REFERENCES offer(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS summary_field (
+  summary_id INTEGER NOT NULL REFERENCES offer_summary(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,                 -- 'experience' | 'salary' | 'remote' | 'stack'
+  value TEXT NOT NULL,               -- texte libre du LLM ; 'non précisé' si l'offre ne dit rien
+  PRIMARY KEY(summary_id, key)
+);
 CREATE TABLE IF NOT EXISTS summary_bullet (
   summary_id INTEGER NOT NULL REFERENCES offer_summary(id) ON DELETE CASCADE,
   position INTEGER NOT NULL,

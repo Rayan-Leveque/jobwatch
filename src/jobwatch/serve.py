@@ -24,6 +24,8 @@ import json
 import re
 import sqlite3
 import threading
+from dataclasses import dataclass
+from dataclasses import field as dataclasses_field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -211,12 +213,31 @@ def _applications(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+FIELD_LABELS = {
+    "experience": "Expérience souhaitée",
+    "salary": "Salaire",
+    "remote": "Télétravail",
+    "stack": "Stack",
+}
+
+
+@dataclass
+class Summary:
+    """Résumé affichable d'une offre : champs structurés + puces mission."""
+
+    bullets: list[str] = dataclasses_field(default_factory=list)
+    fields: list[tuple[str, str]] = dataclasses_field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.bullets or self.fields)
+
+
 def _summary_bullets(
     conn: sqlite3.Connection, offer_ids: list[int]
-) -> dict[int, list[str]]:
+) -> dict[int, Summary]:
     if not offer_ids:
         return {}
-    summaries: dict[int, list[str]] = {}
+    summaries: dict[int, Summary] = {}
     for start in range(0, len(offer_ids), 500):
         chunk = offer_ids[start : start + 500]
         placeholders = ",".join("?" * len(chunk))
@@ -229,7 +250,23 @@ def _summary_bullets(
             chunk,
         ).fetchall()
         for row in rows:
-            summaries.setdefault(int(row["offer_id"]), []).append(str(row["text"]))
+            summaries.setdefault(int(row["offer_id"]), Summary()).bullets.append(
+                str(row["text"])
+            )
+        field_rows = conn.execute(
+            "SELECT os.offer_id AS offer_id, sf.key AS key, sf.value AS value "
+            "FROM offer_summary os "
+            "JOIN summary_field sf ON sf.summary_id = os.id "
+            f"WHERE os.offer_id IN ({placeholders})",
+            chunk,
+        ).fetchall()
+        by_offer: dict[int, dict[str, str]] = {}
+        for row in field_rows:
+            by_offer.setdefault(int(row["offer_id"]), {})[str(row["key"])] = str(row["value"])
+        for offer_id, values in by_offer.items():
+            summaries.setdefault(offer_id, Summary()).fields = [
+                (key, values[key]) for key in FIELD_LABELS if key in values
+            ]
     return summaries
 
 
@@ -383,8 +420,23 @@ def _fit_pill(fit: object) -> str:
     return f'<span class="pill fit {value}">{html.escape(value)}</span>'
 
 
-def _summary_panel(row: sqlite3.Row, bullets: list[str], prefix: str) -> tuple[str, str]:
-    if row["fit"] != "high" or not bullets:
+def _summary_fields_html(fields: list[tuple[str, str]]) -> str:
+    if not fields:
+        return ""
+    rows = []
+    for key, value in fields:
+        label = FIELD_LABELS.get(key, key)
+        empty = " sf-empty" if value.strip().lower() == "non précisé" else ""
+        rows.append(
+            f'<div class="summary-field{empty}">'
+            f'<span class="sf-label">{html.escape(label)}</span>'
+            f'<span class="sf-value">{html.escape(value)}</span></div>'
+        )
+    return f'<div class="summary-fields">{"".join(rows)}</div>'
+
+
+def _summary_panel(row: sqlite3.Row, summary: Summary, prefix: str) -> tuple[str, str]:
+    if not summary:
         return "", ""
     panel_id = f"summary-{prefix}-{int(row['id'])}"
     label = html.escape(f"Afficher le résumé de {row['title'] or 'cette offre'}", quote=True)
@@ -392,10 +444,12 @@ def _summary_panel(row: sqlite3.Row, bullets: list[str], prefix: str) -> tuple[s
         f'<button class="card-toggle" type="button" aria-expanded="false" '
         f'aria-controls="{panel_id}" aria-label="{label}"></button>'
     )
-    items = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in bullets)
+    items = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in summary.bullets)
+    bullets_html = f"<ul>{items}</ul>" if items else ""
     panel = (
         f'<div class="summary-panel" id="{panel_id}" hidden>'
-        f'<div class="summary-title">En bref</div><ul>{items}</ul></div>'
+        f'<div class="summary-title">En bref</div>'
+        f"{_summary_fields_html(summary.fields)}{bullets_html}</div>"
     )
     return button, panel
 
@@ -610,7 +664,7 @@ def _draft_area(match_id: int, job: sqlite3.Row | None) -> str:
 
 def _match_card(
     row: sqlite3.Row,
-    bullets: list[str],
+    summary: Summary,
     content: str | None,
     library: dict[str, list[sqlite3.Row]],
     job: sqlite3.Row | None,
@@ -623,9 +677,9 @@ def _match_card(
     title = html.escape(str(row["title"] or ""))
     pill = _fit_pill(row["fit"])
     meta = _meta(row, "collecté le", row["collected_at"], row["search_name"], row["deadline"])
-    button, summary = _summary_panel(row, bullets, "match")
-    summary_class = " has-summary" if summary else ""
-    chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
+    button, summary_panel = _summary_panel(row, summary, "match")
+    summary_class = " has-summary" if summary_panel else ""
+    chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary_panel else ""
     content_button, content_panel = _content_panel(row, content, "match")
     actions_html = _card_actions(row, library, track, draft_enabled) if actions else ""
     draft_area = _draft_area(int(row["id"]), job) if actions and draft_enabled else ""
@@ -635,14 +689,14 @@ def _match_card(
         f'<div class="card-badges">{pill}{chevron}</div></div>'
         f'<div class="role">{title}</div>'
         f'<div class="meta">{meta}</div></div>{actions_html}{draft_area}'
-        f"{summary}{content_button}{content_panel}"
+        f"{summary_panel}{content_button}{content_panel}"
         "</article>"
     )
 
 
 def _application_card(
     row: sqlite3.Row,
-    bullets: list[str],
+    summary: Summary,
     content: str | None,
     library: dict[str, list[sqlite3.Row]],
     job: sqlite3.Row | None,
@@ -657,9 +711,9 @@ def _application_card(
     pill = f'<span class="pill {cls}">{html.escape(label)}</span>'
     meta = _meta(row, "candidature le", row["created_at"], row["search_name"])
     note = f'<p class="note">{html.escape(str(row["note"]))}</p>' if row["note"] else ""
-    button, summary = _summary_panel(row, bullets, "application")
-    summary_class = " has-summary" if summary else ""
-    chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
+    button, summary_panel = _summary_panel(row, summary, "application")
+    summary_class = " has-summary" if summary_panel else ""
+    chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary_panel else ""
     content_button, content_panel = _content_panel(row, content, "application")
     draft_html = ""
     if draft_enabled and row["match_id"] is not None:
@@ -674,7 +728,7 @@ def _application_card(
         f'<div class="card-topline"><div class="company">{company}</div>'
         f'<div class="card-badges">{pill}{chevron}</div></div>'
         f'<div class="role">{title}</div>'
-        f'<div class="meta">{meta}</div>{note}</div>{draft_html}{summary}{content_button}{content_panel}</article>'
+        f'<div class="meta">{meta}</div>{note}</div>{draft_html}{summary_panel}{content_button}{content_panel}</article>'
     )
 
 
@@ -684,21 +738,21 @@ ACTIONABLE_SECTIONS = {"priority", "new", "seen", "later"}
 def _card(
     row: sqlite3.Row,
     key: str,
-    summaries: dict[int, list[str]],
+    summaries: dict[int, Summary],
     contents: dict[int, str],
     library: dict[str, list[sqlite3.Row]],
     drafts: dict[int, sqlite3.Row],
     track: str,
     draft_enabled: bool,
 ) -> str:
-    bullets = summaries.get(int(row["offer_id"]), [])
+    summary = summaries.get(int(row["offer_id"])) or Summary()
     content = contents.get(int(row["offer_id"]))
     if key == "applied":
         job = drafts.get(int(row["match_id"])) if row["match_id"] is not None else None
-        return _application_card(row, bullets, content, library, job, track, draft_enabled)
+        return _application_card(row, summary, content, library, job, track, draft_enabled)
     job = drafts.get(int(row["id"]))
     return _match_card(
-        row, bullets, content, library, job, track, draft_enabled,
+        row, summary, content, library, job, track, draft_enabled,
         actions=key in ACTIONABLE_SECTIONS,
     )
 
@@ -710,7 +764,7 @@ def _section(
     rows,
     empty_text: str,
     open_default: bool,
-    summaries: dict[int, list[str]],
+    summaries: dict[int, Summary],
     contents: dict[int, str],
     library: dict[str, list[sqlite3.Row]],
     drafts: dict[int, sqlite3.Row],
@@ -843,17 +897,18 @@ def _swipe_invites(track: str, deck_count: int) -> tuple[str, str]:
     return fab, popup
 
 
-def _swipe_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> str:
+def _swipe_card(row: sqlite3.Row, summary: Summary, content: str | None) -> str:
     company = html.escape(str(row["company"] or "Société inconnue"))
     title = html.escape(str(row["title"] or ""))
     pill = _fit_pill(row["fit"])
     meta = _meta(row, "collecté le", row["collected_at"], row["search_name"], row["deadline"])
-    summary = ""
-    if bullets:
-        items = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in bullets)
-        summary = (
+    summary_html = ""
+    if summary:
+        items = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in summary.bullets)
+        bullets_html = f"<ul>{items}</ul>" if items else ""
+        summary_html = (
             '<div class="swipe-summary"><div class="summary-title">En bref</div>'
-            f"<ul>{items}</ul></div>"
+            f"{_summary_fields_html(summary.fields)}{bullets_html}</div>"
         )
     content_html = ""
     if content:
@@ -871,7 +926,7 @@ def _swipe_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> st
         f'<div class="card-badges">{pill}</div></div>'
         f'<div class="role">{title}</div>'
         f'<div class="meta">{meta}</div>'
-        f"{summary}{content_html}"
+        f"{summary_html}{content_html}"
         "</div>"
         '<div class="swipe-stamp stamp-right" aria-hidden="true">À candidater</div>'
         '<div class="swipe-stamp stamp-left" aria-hidden="true">Écartée</div>'
@@ -890,7 +945,7 @@ def render_swipe_page(
     cards = "\n".join(
         _swipe_card(
             row,
-            summaries.get(int(row["offer_id"]), []),
+            summaries.get(int(row["offer_id"])) or Summary(),
             contents.get(int(row["offer_id"])),
         )
         for row in deck
@@ -1622,6 +1677,13 @@ h1 span { color:var(--muted-2); font-weight:620 }
   text-transform:uppercase }
 .summary-panel ul { margin:9px 0 0; padding-left:19px; color:var(--muted); font-size:.76rem }
 .summary-panel li + li { margin-top:6px }
+.summary-fields { display:grid; gap:5px; margin:10px 0 2px }
+.summary-field { display:flex; gap:8px; align-items:baseline; font-size:.76rem }
+.sf-label { flex:none; min-width:132px; color:var(--muted-2); font-size:.63rem;
+  font-weight:800; letter-spacing:.07em; text-transform:uppercase }
+.sf-value { color:var(--fg); overflow-wrap:anywhere }
+.summary-field.sf-empty .sf-value { color:var(--muted-2); font-style:italic }
+@media (max-width:370px) { .sf-label { min-width:104px } }
 .content-toggle { position:relative; z-index:3; margin:12px 13px 0; padding:9px 12px;
   display:inline-flex; align-items:center; gap:7px; border:1px solid var(--line);
   border-radius:11px; color:var(--fg); background:var(--surface); font-size:.71rem;
