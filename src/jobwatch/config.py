@@ -83,6 +83,8 @@ class EnrichConfig:
     model: str
     # Variante de raisonnement OpenCode (--variant : minimal, high, max...), optionnelle.
     variant: str | None = None
+    # Appels LLM de résumé simultanés (les fetchs web restent séquentiels et espacés).
+    concurrency: int = 4
 
 
 DRAFT_TRACKS = ("engineer", "project")
@@ -255,7 +257,12 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
     variant = raw.get("variant")
     if variant is not None and (not isinstance(variant, str) or not variant):
         raise ConfigError("enrich.variant doit être une chaîne non vide")
-    return EnrichConfig(opencode_bin=opencode_bin, model=model, variant=variant)
+    concurrency = raw.get("concurrency", 4)
+    if not isinstance(concurrency, int) or isinstance(concurrency, bool) or concurrency < 1:
+        raise ConfigError("enrich.concurrency doit être un entier >= 1")
+    return EnrichConfig(
+        opencode_bin=opencode_bin, model=model, variant=variant, concurrency=concurrency
+    )
 
 
 def _draft_from_dict(raw: object) -> DraftConfig | None:

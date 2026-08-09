@@ -438,3 +438,37 @@ def test_summarize_passes_variant_to_opencode(monkeypatch) -> None:
     # Sans variant configuré, le drapeau n'apparaît pas.
     _summarize(EnrichConfig(opencode_bin="opencode", model="m"), "texte")
     assert "--variant" not in captured["command"]
+
+
+def test_enrich_summarizes_in_parallel_pool(conn: sqlite3.Connection, monkeypatch) -> None:
+    """Les résumés partent en parallèle : deux appels simultanés observés avec 2 workers."""
+    import threading as th
+    import time as time_mod
+
+    for i in range(3):
+        _seed_offer(conn, url=f"https://example.com/par-{i}")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=LONG_HTML)
+
+    active = 0
+    peak = 0
+    lock = th.Lock()
+
+    def slow_summarize(config, markdown):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time_mod.sleep(0.05)
+        with lock:
+            active -= 1
+        return {"experience": "x"}, ["puce"]
+
+    monkeypatch.setattr("jobwatch.enrich._summarize", slow_summarize)
+    config = EnrichConfig(opencode_bin="opencode", model="m", concurrency=2)
+    result = enrich(conn, config, client=_http_client(handler), sleep=_no_sleep)
+
+    assert result.summaries_written == 3
+    assert result.fields_written == 3
+    assert peak == 2  # borné par concurrency, mais bien parallèle
