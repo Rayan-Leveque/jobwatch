@@ -282,6 +282,105 @@ def test_run_with_no_sources_succeeds(runner: CliRunner, tmp_path: Path) -> None
     assert "0 nouvelles offres collectées, 0 nouveaux matchs" in result.output
 
 
+def test_run_stores_research_offers_and_their_fit(
+    runner: CliRunner, tmp_path: Path, monkeypatch
+) -> None:
+    from jobwatch.collectors.base import RawOffer
+    from jobwatch.research import ResearchResult
+
+    db_path = tmp_path / "jw.db"
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""db: {db_path}
+searches:
+  - name: ai-paris
+    include: [AI]
+    locations: [Paris]
+sources: {{}}
+notify: {{}}
+research:
+  runner: codex
+  model: test-model
+"""
+    )
+    offer = RawOffer(
+        title="AI Engineer",
+        url="https://jobs.example/ai",
+        company="Acme",
+        platform="Carrières Acme",
+        location="Paris",
+    )
+    monkeypatch.setattr(
+        "jobwatch.cli.research_offers",
+        lambda config, searches, candidates: ResearchResult(
+            [offer], {offer.url: "high"}
+        ),
+    )
+
+    result = runner.invoke(cli, ["run", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert "1 nouvelles offres collectées, 1 nouveaux matchs, 1 fit(s) renseigné(s)" in result.output
+    conn = connect(db_path)
+    row = conn.execute(
+        "SELECT o.url, m.fit FROM match m JOIN offer o ON o.id = m.offer_id"
+    ).fetchone()
+    assert dict(row) == {"url": offer.url, "fit": "high"}
+    conn.close()
+
+
+def test_run_research_uses_confirmed_profile_categories(
+    runner: CliRunner, tmp_path: Path, monkeypatch
+) -> None:
+    from jobwatch.research import ResearchResult
+
+    db_path = tmp_path / "jw.db"
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""db: {db_path}
+searches:
+  - name: historique
+    include: [PO]
+sources: {{}}
+notify: {{}}
+research:
+  runner: codex
+  model: test-model
+"""
+    )
+    conn = connect(db_path)
+    init_db(conn)
+    workspace_id = conn.execute(
+        "INSERT INTO workspace (slug, name) VALUES ('alice', 'Alice')"
+    ).lastrowid
+    account_id = conn.execute(
+        "INSERT INTO account (email) VALUES ('alice@example.com')"
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO candidate_profile (account_id, workspace_id, completed_at) "
+        "VALUES (?, ?, datetime('now'))",
+        (account_id, workspace_id),
+    )
+    conn.execute(
+        "INSERT INTO career_intent (account_id, label, keywords_json, exclude_json) "
+        "VALUES (?, 'Data', '[\"Data Engineer\"]', '[]')",
+        (account_id,),
+    )
+    conn.commit()
+    conn.close()
+    received: list[str] = []
+
+    def fake_research(config, searches, candidates):
+        received.extend(search.name for search in searches)
+        return ResearchResult([], {})
+
+    monkeypatch.setattr("jobwatch.cli.research_offers", fake_research)
+
+    result = runner.invoke(cli, ["run", "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    assert received == ["Data"]
+
+
 def test_init_then_run_with_unmodified_example_makes_no_network_calls(
     runner: CliRunner, tmp_path: Path, monkeypatch
 ) -> None:

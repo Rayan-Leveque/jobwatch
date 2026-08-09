@@ -289,7 +289,7 @@ def test_run_job_without_offer_content_falls_back_with_warning(
     job_id = _seed_job(conn, match_id, cv_id)
     conn.close()
 
-    monkeypatch.setattr(draft, "_fetch_and_convert", lambda url, client: (None, None))
+    monkeypatch.setattr(draft, "_fetch_and_extract", lambda url, client: (None, None, None))
     monkeypatch.setattr(draft, "_call_llm", lambda config, prompt, bundle: MINIMAL_TEX)
     run_job(db_path, _config(tmp_path), job_id)
 
@@ -323,11 +323,13 @@ def test_run_job_failure_lands_in_error(db_path: Path, tmp_path: Path, monkeypat
 # ---------------------------------------------------------------- rendu HTML
 
 
-def test_render_page_hides_draft_button_when_disabled(db_path: Path) -> None:
+def test_render_page_hides_letter_reader_when_draft_disabled(db_path: Path) -> None:
     conn = _conn(db_path)
     _seed_match(conn)
-    assert ">Générer LM</button>" not in render_page(conn)
-    assert ">Générer LM</button>" in render_page(conn, draft_enabled=True)
+    assert 'class="reader-tab letter-toggle' not in render_page(conn)
+    enabled = render_page(conn, draft_enabled=True)
+    assert 'class="reader-tab letter-toggle letter-empty"' in enabled
+    assert ">Lettre</span></button>" in enabled
     conn.close()
 
 
@@ -340,6 +342,27 @@ def test_render_page_shows_running_state(db_path: Path, tmp_path: Path) -> None:
     conn.close()
     assert 'data-status="running"' in page
     assert "Génération de la lettre en cours" in page
+
+
+def test_render_page_shows_completed_letter_in_reader(db_path: Path, tmp_path: Path) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    job_id = _seed_job(conn, match_id, cv_id)
+    conn.execute(
+        "UPDATE draft_job SET status = 'ok', tex_path = 'letter.tex', "
+        "pdf_path = 'letter.pdf', png_pages = 1 WHERE id = ?",
+        (job_id,),
+    )
+    conn.commit()
+
+    page = render_page(conn, draft_enabled=True)
+    conn.close()
+
+    assert 'class="reader-tab letter-toggle letter-ok"' in page
+    assert "Lettre · prête" in page
+    assert ">Régénérer la lettre</button>" in page
+    assert f'/match/{match_id}/letter/1.png' in page
 
 
 # ---------------------------------------------------------------- serveur HTTP
@@ -711,10 +734,11 @@ def test_run_job_processes_queued_job(db_path: Path, tmp_path: Path, monkeypatch
     assert job["status"] == "ok"
 
 
-def test_render_page_shows_swipe_invites_only_with_new_offers(db_path: Path) -> None:
+def test_render_page_keeps_swipe_button_and_only_prompts_for_new_offers(db_path: Path) -> None:
     conn = _conn(db_path)
     page = render_page(conn)
-    assert 'href="/swipe"' not in page
+    assert 'class="swipe-fab" href="/swipe"' in page
+    assert 'aria-label="Ouvrir le tri des offres"' in page
     assert 'id="swipe-popup"' not in page
     _seed_match(conn)
     page = render_page(conn)

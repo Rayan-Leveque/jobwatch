@@ -106,7 +106,7 @@ def test_enrich_processes_bridge_offers_with_active_match(
 
     monkeypatch.setattr(
         "jobwatch.enrich._summarize",
-        lambda config, markdown: ({"experience": "junior"}, ["Poste IA"]),
+        lambda config, markdown: ({"experience": "junior"}, {}, ["Poste IA"]),
     )
     result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
     assert result.fetched_ok == 1
@@ -129,7 +129,7 @@ def test_enrich_stores_content_and_summary(conn: sqlite3.Connection, monkeypatch
 
     monkeypatch.setattr(
         "jobwatch.enrich._summarize",
-        lambda config, markdown: ({"experience": "3 ans"}, ["Poste IA", "Paris"]),
+        lambda config, markdown: ({"experience": "3 ans"}, {}, ["Poste IA", "Paris"]),
     )
 
     result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
@@ -177,7 +177,7 @@ def test_enrich_does_not_overwrite_manual_summary(conn: sqlite3.Connection, monk
         return httpx.Response(200, text=LONG_HTML)
 
     def fake_summarize(config, markdown):
-        return {"experience": "5 ans"}, ["ne doit jamais être écrit"]
+        return {"experience": "5 ans"}, {}, ["ne doit jamais être écrit"]
 
     monkeypatch.setattr("jobwatch.enrich._summarize", fake_summarize)
 
@@ -345,13 +345,14 @@ def test_parse_summary_extracts_fields_and_bullets() -> None:
         "- Poste d'ingénieur IA\n"
         "- CDI à Paris\n"
     )
-    fields, bullets = _parse_summary(text)
+    fields, quotes, bullets = _parse_summary(text)
     assert fields == {
         "experience": "3-5 ans",
         "salary": "45-55k",
         "remote": "hybride 2 jours",
         "stack": "Python, RAG, AWS",
     }
+    assert quotes == {}
     assert bullets == ["Poste d'ingénieur IA", "CDI à Paris"]
 
 
@@ -359,9 +360,32 @@ def test_parse_summary_tolerates_noise_and_missing_fields() -> None:
     from jobwatch.enrich import _parse_summary
 
     text = "Voici le résumé :\n**SALAIRE:** \n- Une puce\nTexte libre ignoré\n"
-    fields, bullets = _parse_summary(text)
+    fields, quotes, bullets = _parse_summary(text)
     assert fields == {"salary": "non précisé"}
+    assert quotes == {}
     assert bullets == ["Une puce"]
+
+
+def test_summary_only_keeps_citations_found_in_offer_text() -> None:
+    from jobwatch.enrich import _parse_summary, _verified_quotes
+
+    text = (
+        "EXPERIENCE: 3 ans\n"
+        "EXPERIENCE_CITATION: Vous avez au moins 3 ans d’expérience.\n"
+        "SALAIRE: 60k\n"
+        "SALAIRE_CITATION: Salaire annuel garanti de 60k.\n"
+        "- Mission IA\n"
+    )
+    fields, quotes, bullets = _parse_summary(text)
+
+    verified = _verified_quotes(
+        quotes,
+        "Le profil recherché : vous avez au moins 3 ans d’expérience.",
+    )
+
+    assert fields == {"experience": "3 ans", "salary": "60k"}
+    assert verified == {"experience": "Vous avez au moins 3 ans d’expérience."}
+    assert bullets == ["Mission IA"]
 
 
 def test_enrich_adds_fields_to_offer_with_content_without_refetch(
@@ -388,7 +412,7 @@ def test_enrich_adds_fields_to_offer_with_content_without_refetch(
 
     monkeypatch.setattr(
         "jobwatch.enrich._summarize",
-        lambda config, markdown: ({"experience": "senior"}, ["nouvelle puce ignorée"]),
+        lambda config, markdown: ({"experience": "senior"}, {}, ["nouvelle puce ignorée"]),
     )
     sleeps: list[float] = []
     result = enrich(conn, _config(), client=_http_client(handler), sleep=sleeps.append)
@@ -430,7 +454,7 @@ def test_summarize_passes_variant_to_opencode(monkeypatch) -> None:
         EnrichConfig(opencode_bin="opencode", model="opencode-go/gpt-5.6-luna", variant="max"),
         "texte d'offre",
     )
-    assert result == ({"experience": "2 ans"}, ["Puce"])
+    assert result == ({"experience": "2 ans"}, {}, ["Puce"])
     command = captured["command"]
     assert command[command.index("--variant") + 1] == "max"
     assert command[command.index("--model") + 1] == "opencode-go/gpt-5.6-luna"
@@ -463,7 +487,7 @@ def test_enrich_summarizes_in_parallel_pool(conn: sqlite3.Connection, monkeypatc
         time_mod.sleep(0.05)
         with lock:
             active -= 1
-        return {"experience": "x"}, ["puce"]
+        return {"experience": "x"}, {}, ["puce"]
 
     monkeypatch.setattr("jobwatch.enrich._summarize", slow_summarize)
     config = EnrichConfig(opencode_bin="opencode", model="m", concurrency=2)
@@ -534,7 +558,7 @@ def test_summarize_codex_builds_command_and_reads_output(monkeypatch) -> None:
     config = EnrichConfig(model="gpt-5.6-luna", runner="codex", variant="max")
     result = _summarize(config, "texte de l'offre")
 
-    assert result == ({"experience": "4 ans", "salary": "50k"}, ["Mission IA"])
+    assert result == ({"experience": "4 ans", "salary": "50k"}, {}, ["Mission IA"])
     command = captured["command"]
     assert command[:2] == ["codex", "exec"]
     assert command[command.index("--model") + 1] == "gpt-5.6-luna"

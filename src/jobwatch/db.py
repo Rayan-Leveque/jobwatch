@@ -15,6 +15,9 @@ COLUMN_MIGRATIONS = (
     ("match", "fit", "TEXT"),
     ("offer_summary", "source", "TEXT DEFAULT 'manual'"),
     ("match", "discarded_at", "TEXT"),
+    ("summary_field", "quote", "TEXT"),
+    ("offer_content", "extract_method", "TEXT"),
+    ("offer_content", "html_gz", "BLOB"),
 )
 
 

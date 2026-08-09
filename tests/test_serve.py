@@ -434,12 +434,12 @@ def test_high_summary_renders_escaped_ordered_accessible_collapsible_block(
     page = render_page(conn)
     section = _section_html(page, "priority")
 
-    assert 'class="row row-new has-summary"' in section
-    assert 'class="card-toggle"' in section
+    assert 'class="row row-new"' in section
+    assert 'class="reader-tab summary-toggle"' in section
     assert 'aria-expanded="false"' in section
     assert 'aria-controls="summary-match-' in section
     assert 'aria-label="Afficher le résumé de AI &lt;Engineer&gt; &quot;Senior&quot;"' in section
-    assert 'class="summary-chevron"' in section
+    assert 'class="reader-tabs"' in section
     assert 'class="summary-panel"' in section
     assert "hidden" in section
     assert "En bref" in section
@@ -460,7 +460,7 @@ def test_summary_is_rendered_for_any_fit(
 
     assert "Fait visible" in page
     assert "En bref" in page
-    assert '<button class="card-toggle"' in page
+    assert '<button class="reader-tab summary-toggle"' in page
 
 
 def test_summary_fields_render_labeled_lines(conn: sqlite3.Connection) -> None:
@@ -495,7 +495,7 @@ def test_high_without_summary_has_no_empty_summary_space(conn: sqlite3.Connectio
 
     assert "En bref" not in page
     assert '<div class="summary-panel"' not in page
-    assert 'class="row row-new has-summary"' not in page
+    assert 'class="reader-tab summary-toggle"' not in page
 
 
 def test_high_application_renders_its_summary(conn: sqlite3.Connection) -> None:
@@ -510,7 +510,7 @@ def test_high_application_renders_its_summary(conn: sqlite3.Connection) -> None:
     assert 'aria-controls="summary-application-' in applied
 
 
-def test_summary_toggle_script_preserves_external_link_interaction(
+def test_summary_reader_preserves_external_link_interaction(
     conn: sqlite3.Connection,
 ) -> None:
     _match_id, offer_id = _seed_offer(conn, company="HighCo", fit="high")
@@ -518,9 +518,8 @@ def test_summary_toggle_script_preserves_external_link_interaction(
 
     page = render_page(conn)
 
-    assert "button.addEventListener('click'" in page
-    assert "button.setAttribute('aria-expanded'" in page
-    assert "panel.hidden = expanded" in page
+    assert 'class="reader-tab summary-toggle"' in page
+    assert 'class="card-reader"' in page
     assert 'target="_blank"' in page
     assert ".meta a { position:relative; z-index:3" in page
     assert "pointer-events:auto" in page
@@ -533,10 +532,10 @@ def test_content_panel_renders_escaped_and_collapsible(conn: sqlite3.Connection)
     page = render_page(conn)
     section = _section_html(page, "new")
 
-    assert 'class="content-toggle"' in section
+    assert 'class="reader-tab offer-toggle"' in section
     assert 'aria-expanded="false"' in section
     assert 'aria-controls="content-match-' in section
-    assert "Annonce complète" in section
+    assert ">Annonce</button>" in section
     assert 'class="content-panel"' in section
     assert "hidden" in section
     assert "Poste &lt;script&gt;alert(1)&lt;/script&gt;" in section
@@ -549,7 +548,7 @@ def test_content_panel_absent_without_offer_content(conn: sqlite3.Connection) ->
 
     page = render_page(conn)
 
-    assert '<button class="content-toggle"' not in page
+    assert '<button class="reader-tab offer-toggle"' not in page
     assert '<div class="content-panel"' not in page
 
 
@@ -559,7 +558,7 @@ def test_content_panel_absent_when_fetch_failed(conn: sqlite3.Connection) -> Non
 
     page = render_page(conn)
 
-    assert '<button class="content-toggle"' not in page
+    assert '<button class="reader-tab offer-toggle"' not in page
     assert '<div class="content-panel"' not in page
 
 
@@ -589,7 +588,7 @@ def test_content_panel_rendered_for_low_fit_and_no_summary(conn: sqlite3.Connect
 
     page = render_page(conn)
 
-    assert "content-toggle" in page
+    assert "offer-toggle" in page
     assert "Texte complet peu importe le fit." in page
 
 
@@ -601,7 +600,7 @@ def test_content_panel_renders_for_application(conn: sqlite3.Connection) -> None
     page = render_page(conn)
     applied = _section_html(page, "applied")
 
-    assert "content-toggle" in applied
+    assert "offer-toggle" in applied
     assert 'aria-controls="content-application-' in applied
     assert "Annonce complete pour une candidature." in applied
 
@@ -1215,7 +1214,8 @@ def test_post_documents_uploads_and_returns_library_entry(tmp_path: Path) -> Non
     server, thread = _start_server(db_path)
     try:
         port = server.server_address[1]
-        content = base64.b64encode(b"contenu pdf").decode("ascii")
+        pdf = b"%PDF-1.4\ncontenu pdf"
+        content = base64.b64encode(pdf).decode("ascii")
         status, headers, body = _json_post(
             port,
             "/documents",
@@ -1236,7 +1236,7 @@ def test_post_documents_uploads_and_returns_library_entry(tmp_path: Path) -> Non
         assert row["label"] == "CV principal"
         file_path = Path(row["file_path"])
         assert file_path.parent == db_path.parent / "documents"
-        assert file_path.read_bytes() == b"contenu pdf"
+        assert file_path.read_bytes() == pdf
     finally:
         server.shutdown()
         server.server_close()
@@ -1251,7 +1251,7 @@ def test_post_documents_sanitizes_traversal_filename(tmp_path: Path) -> None:
     server, thread = _start_server(db_path)
     try:
         port = server.server_address[1]
-        content = base64.b64encode(b"malicious").decode("ascii")
+        content = base64.b64encode(b"%PDF-1.4\nmalicious").decode("ascii")
         status, _headers, body = _json_post(
             port,
             "/documents",
@@ -1302,6 +1302,27 @@ def test_post_documents_rejects_invalid_type(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
+def test_post_documents_rejects_non_pdf_cv(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        content = base64.b64encode(b"not a pdf").decode("ascii")
+        status, _headers, body = _json_post(
+            server.server_address[1],
+            "/documents",
+            {"filename": "cv.pdf", "type": "cv", "label": "", "content_base64": content},
+        )
+        assert status == 400
+        assert "fichier PDF" in json.loads(body)["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_post_documents_rejects_missing_fields(tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     connection = connect(db_path)
@@ -1328,7 +1349,7 @@ def test_uploaded_document_appears_in_dropdown_on_next_render(tmp_path: Path) ->
     server, thread = _start_server(db_path)
     try:
         port = server.server_address[1]
-        content = base64.b64encode(b"x").decode("ascii")
+        content = base64.b64encode(b"%PDF-1.4\nx").decode("ascii")
         status, _headers, body = _json_post(
             port,
             "/documents",

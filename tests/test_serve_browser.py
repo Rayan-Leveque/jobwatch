@@ -10,15 +10,17 @@ et la carte restait figée sans toast d'annulation.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from test_serve import _seed_offer
+from test_serve import _add_content, _add_summary, _seed_offer
 
 from jobwatch.auth import create_invite
+from jobwatch.config import DraftConfig
 from jobwatch.db import connect, init_db
 from jobwatch.serve import make_handler
 
@@ -79,6 +81,32 @@ def protected_dashboard(tmp_path: Path):
     thread.join(timeout=5)
 
 
+@pytest.fixture()
+def onboarding_instance(tmp_path: Path):
+    """Instance protégée avec le wizard d'onboarding activé."""
+    db_path = tmp_path / "jw.db"
+    conn = connect(db_path)
+    init_db(conn)
+    invite = create_invite(conn, "alice", "alice@example.com")
+    conn.close()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        make_handler(
+            db_path,
+            workspace_slug="alice",
+            secure_cookie=False,
+            onboarding_config=DraftConfig(model="test-model"),
+            onboarding_enabled=True,
+        ),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", invite
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
 def _open_page(browser, url: str, dismiss_popup: bool = True):
     page = browser.new_page()
     page.goto(url)
@@ -98,6 +126,155 @@ def _assert_not_reloaded(page) -> None:
 
 def _card(page, company: str):
     return page.locator(f'.row:has(.company:text-is("{company}"))')
+
+
+def _sign_in_to_onboarding(page, url: str, invite: str) -> None:
+    page.goto(f"{url}/invite/{invite}")
+    password = "une très longue phrase secrète"
+    page.get_by_label("Mot de passe", exact=True).fill(password)
+    page.get_by_label("Confirmation", exact=True).fill(password)
+    page.get_by_role("button", name="Créer mon compte").click()
+    page.wait_for_load_state("networkidle")
+    if page.url.endswith("/login"):
+        page.get_by_label("Email", exact=True).fill("alice@example.com")
+        page.get_by_label("Mot de passe", exact=True).fill(password)
+        page.get_by_role("button", name="Se connecter").click()
+        page.wait_for_load_state("networkidle")
+    page.goto(f"{url}/onboarding")
+    page.locator("#choice-step").wait_for(state="visible")
+
+
+def _assert_balanced_action_panel(
+    page, panel_selector: str, action_selector: str, reference_selector: str
+) -> None:
+    gaps = page.evaluate(
+        """({panelSelector, actionSelector, referenceSelector}) => {
+          const panel = document.querySelector(panelSelector);
+          const action = document.querySelector(actionSelector);
+          const reference = document.querySelector(referenceSelector);
+          const actionRect = action.getBoundingClientRect();
+          const referenceRect = reference.getBoundingClientRect();
+          const panelRect = panel.getBoundingClientRect();
+          return {
+            top: actionRect.top - referenceRect.bottom,
+            bottom: panelRect.bottom - actionRect.bottom,
+          };
+        }""",
+        {
+            "panelSelector": panel_selector,
+            "actionSelector": action_selector,
+            "referenceSelector": reference_selector,
+        },
+    )
+    assert abs(gaps["top"] - gaps["bottom"]) <= 1.5, gaps
+
+
+def _assert_no_horizontal_overflow(page) -> None:
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= window.innerWidth + 1"
+    )
+
+
+def test_onboarding_actions_are_balanced_on_both_paths(browser, onboarding_instance) -> None:
+    url, invite = onboarding_instance
+    page = browser.new_page()
+    _sign_in_to_onboarding(page, url, invite)
+
+    for width, height in ((390, 844), (1280, 900)):
+        page.set_viewport_size({"width": width, "height": height})
+        page.goto(f"{url}/onboarding")
+        page.get_by_role("button", name=re.compile(r"^Créer mes catégories")).click()
+        page.locator("#intent-step .panel").wait_for(state="visible")
+        _assert_balanced_action_panel(
+            page, "#intent-step .action-panel", "#intent-step .actions", "#intent-list"
+        )
+        _assert_no_horizontal_overflow(page)
+
+        page.locator("#back-to-choice-intents").click()
+        page.locator("#choice-step").wait_for(state="visible")
+        page.get_by_role("button", name=re.compile(r"^Importer mes CV")).click()
+        page.locator("#upload-step .panel").wait_for(state="visible")
+        _assert_balanced_action_panel(
+            page, "#upload-step .action-panel", "#analyze", "#drop-zone"
+        )
+        heights = page.evaluate(
+            """() => ({
+              back: document.querySelector('#back-to-choice-upload').getBoundingClientRect().height,
+              action: document.querySelector('#analyze').getBoundingClientRect().height,
+            })"""
+        )
+        assert abs(heights["back"] - heights["action"]) <= 1.5, heights
+        _assert_no_horizontal_overflow(page)
+
+        page.locator("#back-to-choice-upload").click()
+        page.locator("#choice-step").wait_for(state="visible")
+    page.close()
+
+
+def test_onboarding_keeps_invalid_file_error_visible(browser, onboarding_instance) -> None:
+    url, invite = onboarding_instance
+    page = browser.new_page()
+    _sign_in_to_onboarding(page, url, invite)
+    page.get_by_role("button", name=re.compile(r"^Importer mes CV")).click()
+
+    page.locator("#cv-file").set_input_files(
+        {"name": "notes.txt", "mimeType": "text/plain", "buffer": b"pas un CV"}
+    )
+
+    assert "n’est pas un fichier PDF" in page.locator("#upload-status").inner_text()
+    assert page.locator("#upload-status").get_attribute("class") == "status error"
+    assert page.locator("#analyze").is_disabled()
+    page.close()
+
+
+def test_manual_onboarding_reaches_unified_dashboard(browser, onboarding_instance) -> None:
+    url, invite = onboarding_instance
+    page = browser.new_page()
+    _sign_in_to_onboarding(page, url, invite)
+    page.get_by_role("button", name=re.compile(r"^Créer mes catégories")).click()
+    page.locator(".intent-label").fill("Ingénierie IA")
+    page.locator(".keywords").fill("AI Engineer, LLM Engineer")
+
+    page.locator("#confirm").click()
+
+    page.wait_for_url(f"{url}/")
+    assert page.get_by_role("link", name=re.compile("Modifier mes catégories")).is_visible()
+    assert page.locator(".track-tabs").count() == 0
+    page.close()
+
+
+def test_card_reader_keeps_only_one_panel_open(browser, dashboard) -> None:
+    url, db_path = dashboard
+    conn = connect(db_path)
+    offer_id = int(
+        conn.execute(
+            "SELECT o.id FROM offer o JOIN company c ON c.id = o.company_id "
+            "WHERE c.name = 'NewCo'"
+        ).fetchone()["id"]
+    )
+    _add_summary(conn, offer_id, "Résumé visible")
+    _add_content(conn, offer_id, "Annonce visible")
+    conn.close()
+    page = _open_page(browser, url)
+    card = _card(page, "NewCo")
+    summary = card.locator(".summary-panel")
+    content = card.locator(".content-panel")
+
+    card.locator(".summary-toggle").click()
+    assert summary.is_visible()
+    assert not content.is_visible()
+    card.locator(".offer-toggle").click()
+    assert not summary.is_visible()
+    assert content.is_visible()
+    assert card.locator('.reader-tab[aria-expanded="true"]').all_inner_texts() == ["Annonce"]
+    card.locator(".offer-toggle").click()
+    assert not content.is_visible()
+    tab_tops = card.locator(".reader-tab").evaluate_all(
+        "tabs => tabs.map(tab => Math.round(tab.getBoundingClientRect().top))"
+    )
+    assert len(set(tab_tops)) == 1
+    _assert_no_horizontal_overflow(page)
+    page.close()
 
 
 def test_invite_then_protected_action_in_browser(browser, protected_dashboard) -> None:

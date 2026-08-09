@@ -9,11 +9,10 @@ de suivre vos candidatures depuis la ligne de commande ou via un tableau de bord
 Flux : **collecter -> dédupliquer -> matcher -> notifier -> suivre**.
 
 Pas de cloud, pas de traçage : le tableau de bord, SQLite et les documents gérés restent 100%
-locaux dans le dossier de l'instance sur votre machine. Seules exceptions, optionnelles et explicitement activées,
-deux fonctionnalités LLM appelées localement par OpenCode : `jw enrich` résume les annonces
-collectées — voir [Enrichissement des offres](#enrichissement-des-offres) — et le tableau de
-bord peut rédiger des lettres de motivation — voir
-[Génération de lettre de motivation](#génération-de-lettre-de-motivation).
+locaux dans le dossier de l'instance sur votre machine. Trois fonctions LLM restent optionnelles
+et inertes sans configuration explicite : `research` complète les collecteurs directs par une
+recherche web large, `jw enrich` extrait et résume les annonces collectées, et le tableau de bord
+peut rédiger des lettres de motivation. Les appels passent par un binaire OpenCode ou Codex local.
 
 ## Démarrage rapide
 
@@ -61,6 +60,14 @@ propriétaire valable 48 heures. Ouvrez ce chemin sur le serveur de l'instance p
 de passe. Les pages, documents et actions deviennent alors inaccessibles sans session. Le cookie
 est réservé à HTTPS par défaut. Pour un serveur HTTP strictement local ou privé, lancez
 explicitement `jw --instance alice serve --no-secure-cookie`; ne publiez jamais ce mode sur Internet.
+
+À la première connexion d'une instance nommée, jobwatch ouvre un parcours de démarrage : importez
+un ou plusieurs CV PDF pour obtenir des catégories proposées ensemble, ou créez-les manuellement.
+Avant confirmation, chaque catégorie peut être renommée, ajoutée ou supprimée et ses mots-clés
+modifiés. La confirmation enregistre les catégories comme recherches SQLite actives et relance le
+matching ; le lien « Modifier mes catégories » reste ensuite disponible depuis le tableau de bord.
+Le bloc `draft` doit être configuré pour l'analyse des CV par IA ; le parcours manuel reste toujours
+disponible. Chaque fichier est vérifié côté serveur comme un PDF et limité à 10 Mio.
 
 ### Cron
 
@@ -118,19 +125,21 @@ ne coûtent aucun token. Pour chaque offre active sans texte stocké ou sans cha
 
 1. Récupère la page de l'offre (`url`) en HTTP simple si le texte manque (une offre dont le
    texte est déjà en base est résumée sans aucun accès réseau).
-2. Convertit le HTML en Markdown brut (sans extraction intelligente du contenu principal :
-   le résumé LLM qui suit est censé faire le tri dans le bruit).
+2. Extrait le contenu utile en privilégiant un objet `schema.org/JobPosting`, puis
+   `trafilatura`, avec repli sur le Markdown brut si un marqueur important comme le salaire,
+   l'expérience ou le télétravail disparaît.
 3. Si le fetch HTTP échoue, ou si le Markdown obtenu est vide/trop court pour être une vraie
    annonce, retente via Playwright (Chromium headless) et convertit la page rendue.
-4. Stocke le texte complet dans `offer_content`, avec son statut (`ok` ou `failed`) et sa méthode
-   de récupération (`http` ou `playwright`).
+4. Stocke le texte retenu dans `offer_content`, avec son statut, sa méthode de récupération,
+   sa méthode d'extraction et une copie compressée du HTML brut pour permettre un retraitement.
 5. Génère un résumé structuré via le LLM configuré (runner `opencode` ou `codex`, en
    subprocess, jusqu'à `concurrency` appels simultanés) : quatre
    champs fixes - Expérience souhaitée, Salaire, Télétravail, Stack, valeur « non précisé »
    quand l'annonce ne dit rien (table `summary_field`) - suivis de puces mission
    (`offer_summary`/`summary_bullet`, `source = 'auto'`). Les puces d'un résumé `manual`
    existant (importé via `jw import-summaries`) ne sont jamais écrasées ; les champs fixes,
-   eux, s'ajoutent à tout résumé qui n'en a pas encore.
+   eux, s'ajoutent à tout résumé qui n'en a pas encore. Les citations renvoyées sont conservées
+   uniquement lorsqu'elles existent textuellement dans l'annonce extraite.
 6. Patiente 1 à 2 secondes entre deux fetchs web pour ne pas marteler les sites tiers.
 
 Un échec (réseau ou LLM) est consigné en avertissement et n'interrompt jamais le traitement des
@@ -151,21 +160,22 @@ Playwright nécessite l'installation ponctuelle de son navigateur Chromium :
 ## Tableau de bord local
 
 `jw serve` sert un tableau de bord qui relit la base SQLite à chaque chargement de page.
-Le tableau de bord est découpé en deux onglets étanches par piste métier : `Ingénieur IA`
+Une instance historique sans profil conserve les deux onglets étanches par piste métier : `Ingénieur IA`
 sur `/` et `Chef de projet / PO` sur `/po`. Toute offre ou candidature dont le titre
 contient « chef de projet », « chef de produit », « product owner » ou « product manager »
 n'apparaît que dans l'onglet `Chef de projet / PO` ; l'onglet `Ingénieur IA` montre tout le
-reste. Chaque onglet porte ses propres sections et compteurs.
-La section `Priorité haute` regroupe les matchs high avant `Nouveaux matchs` et `Vus`; toute
-carte disposant d'un résumé affiche un bloc `En bref` (champs structurés étiquetés puis puces),
-repliable en cliquant sur la carte ou au clavier. Indépendamment du fit ou d'un résumé, toute carte dont l'offre a un
-contenu récupéré (`jw enrich`, statut `ok`) affiche un bouton « Annonce complète » qui déplie le
-texte intégral de l'annonce.
+reste. Une instance nommée dont le profil est confirmé affiche à la place un flux unifié de toutes
+ses catégories ; chaque carte indique la recherche correspondante et le tableau de bord propose
+« Modifier mes catégories ». Chaque vue porte ses propres sections et compteurs.
+La section `Priorité haute` regroupe les matchs high avant `Nouveaux matchs` et `Vus`. Sous les
+actions, une carte réunit ses contenus dans un lecteur à trois onglets : « En bref », « Annonce »
+et, lorsque `draft` est configuré, « Lettre ». Une seule vue peut être ouverte à la fois. La
+génération, le suivi et la régénération d'une lettre vivent dans l'onglet « Lettre », tandis que
+« Plus tard », « Candidater » et « Écarter » restent des décisions séparées.
 
 Chaque carte des sections `Priorité haute`, `Nouveaux matchs`, `Vus` et `À candidater` propose
 ses actions dans cet ordre : « Plus tard » (passe le match en `state='later'`, section
-`À candidater`), « Candidater », « Générer LM » (si le bloc `draft` est configuré, voir
-[Génération de lettre de motivation](#génération-de-lettre-de-motivation)) et « Écarter »
+`À candidater`), « Candidater » et « Écarter »
 (passe le match en `state='discarded'` avec
 `discarded_at` horodaté, section `Corbeille`). « Candidater » déplie un petit formulaire avec deux menus
 déroulants optionnels - CV et lettre de motivation - peuplés depuis une bibliothèque de
@@ -177,7 +187,7 @@ sélectionne automatiquement la nouvelle entrée dans le menu. Aucune sélection
 seule action la candidature (même logique que `jw apply` : ligne `application`, événement
 `applied`, match en `state='applied'`) plus une ligne `document` par champ rempli (`cv` ou
 `cover_letter`), en résolvant l'entrée de bibliothèque choisie vers son chemin sur disque. Les
-fichiers uploadés sont stockés sous `<db>/../documents/`, préfixés d'un identifiant aléatoire ;
+fichiers uploadés sont limités à 10 Mio et stockés sous `<db>/../documents/`, préfixés d'un identifiant aléatoire ;
 seul le nom de base du fichier client est utilisé, ce qui empêche toute traversée de chemin.
 Ces actions appellent le serveur
 en JavaScript (`fetch` POST) et retirent la carte de son emplacement sans recharger la page ;
@@ -227,7 +237,7 @@ tout moment.
 ## Génération de lettre de motivation
 
 Quand le bloc `draft` de `config.yaml` est renseigné, chaque carte (hors `Corbeille`) affiche un
-bouton « Générer LM » qui déplie un mini-formulaire : un menu CV (bibliothèque de documents,
+onglet « Lettre ». Il contient le bouton « Générer la lettre » et un mini-formulaire : un menu CV (bibliothèque de documents,
 dernier choix mémorisé par onglet côté client) et un champ consigne optionnel. La soumission
 lance un job en arrière-plan (table `draft_job`) :
 
@@ -252,7 +262,7 @@ RAG »...) transmet la lettre précédente au modèle et remplace la même entr�
 
 ## Référence de configuration
 
-`config.yaml` (une copie de `config.example.yaml`) comporte six sections.
+`config.yaml` (une copie de `config.example.yaml`) comporte sept sections.
 
 | Clé | Description |
 | --- | --- |
@@ -260,6 +270,7 @@ RAG »...) transmet la lettre précédente au modèle et remplace la même entr�
 | `searches` | Liste des recherches enregistrées. Chaque recherche a : `name` (identifiant unique), `include` (mots-clés, au moins un, correspondance insensible à la casse sur le titre), `exclude` (mots-clés, aucun), `locations` (correspondance par sous-chaîne sur la localisation de l'offre ; vide = n'importe où), `contract` (optionnel : `permanent`, `fixed_term`, `internship`, `other`). |
 | `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. `linkedin` prend une liste de couples `keywords`/`location` et une fenêtre `hours`. `wttj` prend ses requêtes, pays, villes internationales, fenêtre `hours` et les identifiants publics de l'index Algolia utilisé par le site. |
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
+| `research` | Recherche web large facultative après les collecteurs directs : runner `codex` ou `opencode`, modèle, fenêtre `recency_days`, plafond `max_results` et instructions de profil. Le processus Codex est en lecture seule sans outils locaux ; OpenCode n'autorise que `websearch` et `webfetch`. Les catégories confirmées dans SQLite sont utilisées en priorité. |
 | `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, ou `codex` pour passer par le CLI `codex exec` couvert par un abonnement ChatGPT), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (ex. `opencode/deepseek-v4-flash-free` ou `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). |
 | `draft` | Génération de lettre de motivation depuis le tableau de bord : `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. |
 
@@ -268,9 +279,9 @@ une offre située à « Puteaux » ou « Levallois-Perret » ne matche PAS une r
 `locations: ["Paris"]`. Listez explicitement les communes voulues dans `locations`, ou laissez
 la liste vide pour accepter n'importe quelle localisation.
 
-Dans `config.example.yaml`, les blocs `sources`, `notify`, `enrich` et `draft` sont vides
+Dans `config.example.yaml`, les blocs `sources`, `notify`, `research`, `enrich` et `draft` sont vides
 (`{}`) : décommentez-les et remplissez-les pour activer la collecte, les notifications,
-l'enrichissement et la génération de lettres. Avec la config d'exemple non modifiée,
+l'enrichissement, la recherche large et la génération de lettres. Avec la config d'exemple non modifiée,
 `jw init && jw run` ne fait aucun appel réseau et ne publie rien ; `jw enrich` refuse de
 s'exécuter tant que `enrich` n'est pas rempli, et le bouton « Générer LM » n'apparaît pas tant
 que `draft` n'est pas rempli.
@@ -301,9 +312,9 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `source` | Sources de job boards configurées et leur dernière exécution |
 | `company` | Sociétés (dédupliquées par nom) |
 | `offer` | Offres d'emploi (dédupliquées par URL et société+titre) |
-| `offer_content` | Texte complet de l'annonce (Markdown), récupéré par `jw enrich` |
+| `offer_content` | Texte utile de l'annonce, méthode d'extraction et HTML brut compressé, récupérés par `jw enrich` |
 | `offer_summary` | Résumé factuel unique associé à une offre existante (`source` : `manual` ou `auto`) |
-| `summary_field` | Champs structurés d'un résumé (expérience, salaire, télétravail, stack) |
+| `summary_field` | Champs structurés d'un résumé (expérience, salaire, télétravail, stack) et citation vérifiée optionnelle |
 | `summary_bullet` | Bullets d'un résumé avec leur position explicite |
 | `search` | Recherches enregistrées (mots-clés, localisations, contrat) |
 | `match` | Paire offre/recherche avec état et statut de notification |
@@ -314,6 +325,7 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `draft_job` | Jobs de génération de lettre de motivation (état, fichiers produits, avertissements) |
 | `workspace`, `account`, `membership` | Instance, comptes et droits préparant le passage au multi-utilisateur |
 | `account_invite`, `web_session` | Invitations à durée limitée et sessions web opaques |
+| `candidate_profile`, `career_intent` | Profil d'onboarding et catégories métier confirmées d'un compte |
 
 ## Feuille de route
 

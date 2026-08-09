@@ -2,20 +2,33 @@
 
 Pour chaque offre active (au moins un match new/seen/later ou une
 candidature, quelle que soit sa source, bridge compris), récupère la page de
-l'offre si elle manque, la convertit en Markdown et l'enregistre, puis génère
-un résumé structuré via un LLM bon marché (deepseek-v4-flash par OpenCode) :
-quatre champs fixes (expérience souhaitée, salaire, télétravail, stack -
-table summary_field) suivis de puces mission. Les puces d'un résumé manuel
-importé ne sont jamais écrasées ; les champs fixes, eux, s'ajoutent à tout
-résumé qui n'en a pas. Un échec (réseau ou LLM) est consigné en avertissement
-et n'interrompt jamais le traitement des offres suivantes.
+l'offre si elle manque, en extrait le bloc utile (voir `extraction.py` : la
+page entière est surtout du décor payé en tokens) et l'enregistre avec son
+HTML brut compressé, puis génère un résumé structuré via LLM : quatre champs
+fixes (expérience souhaitée, salaire, télétravail, stack - table
+summary_field) suivis de puces mission.
+
+Chaque champ est accompagné d'une **citation littérale de l'annonce**, et
+cette citation n'est conservée que si le code la retrouve mot pour mot dans
+le texte stocké. C'est ce qui remplace les étiquettes vagues ('niveau
+mid-senior') par ce que l'annonce dit vraiment, et c'est un ancrage
+anti-hallucination qui ne coûte aucun appel supplémentaire. Un champ dont la
+citation est invérifiable garde sa valeur mais perd sa citation : on
+n'affiche jamais comme cité ce qui ne l'est pas.
+
+Les puces d'un résumé manuel importé ne sont jamais écrasées ; les champs
+fixes, eux, s'ajoutent à tout résumé qui n'en a pas. Un échec (réseau ou LLM)
+est consigné en avertissement et n'interrompt jamais le traitement des offres
+suivantes.
 """
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import random
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -25,10 +38,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-from markdownify import markdownify
 from playwright.sync_api import sync_playwright
 
 from jobwatch.config import EnrichConfig
+from jobwatch.extraction import Extraction, extract
 
 log = logging.getLogger(__name__)
 
@@ -46,27 +59,39 @@ _PROMPT_LABEL_TO_KEY = {
 }
 FIELD_UNKNOWN = "non précisé"
 
+# Chaque champ est doublé d'une ligne _CITATION portant le texte de l'annonce.
+_PROMPT_LABEL_TO_QUOTE_KEY = {f"{label}_CITATION": key for label, key in _PROMPT_LABEL_TO_KEY.items()}
+
 _SUMMARY_FORMAT = (
+    "Pour chacun des quatre champs, donne deux lignes : la valeur courte, puis la "
+    "CITATION, c'est-à-dire le passage de l'annonce copié MOT POUR MOT (30 à 200 "
+    "caractères) sur lequel tu t'appuies. Ne reformule jamais une citation, ne la "
+    "traduis pas, n'y ajoute aucun mot : elle est vérifiée automatiquement contre le "
+    "texte de l'annonce et rejetée à la moindre différence. Si l'annonce ne dit rien "
+    "sur un champ, écris 'non précisé' aux deux lignes plutôt que de déduire quoi que "
+    "ce soit.\n"
     "Réponds exactement au format suivant, sans introduction ni conclusion :\n"
     "EXPERIENCE: <expérience souhaitée (années, séniorité), ou 'non précisé'>\n"
+    "EXPERIENCE_CITATION: <passage exact de l'annonce, ou 'non précisé'>\n"
     "SALAIRE: <salaire ou fourchette, ou 'non précisé'>\n"
+    "SALAIRE_CITATION: <passage exact de l'annonce, ou 'non précisé'>\n"
     "TELETRAVAIL: <politique de télétravail (full remote, hybride N jours, sur site), "
     "ou 'non précisé'>\n"
+    "TELETRAVAIL_CITATION: <passage exact de l'annonce, ou 'non précisé'>\n"
     "STACK: <technos et compétences clés condensées en une ligne, ou 'non précisé'>\n"
+    "STACK_CITATION: <passage exact de l'annonce, ou 'non précisé'>\n"
     "- <puis 3 à 6 puces courtes et factuelles : poste, mission, lieu, contrat>"
 )
 
 SUMMARY_PROMPT = (
-    "Le fichier attaché contient le texte Markdown d'une offre d'emploi (converti "
-    "automatiquement depuis sa page web, peut contenir du bruit de navigation/pied de "
-    f"page). {_SUMMARY_FORMAT}"
+    "Le fichier attaché contient le texte Markdown d'une offre d'emploi, extrait "
+    f"automatiquement de sa page web. {_SUMMARY_FORMAT}"
 )
 
 CODEX_SUMMARY_PROMPT = (
-    "Le bloc <stdin> ci-dessous contient le texte Markdown d'une offre d'emploi "
-    "(converti automatiquement depuis sa page web, peut contenir du bruit de "
-    "navigation/pied de page). N'exécute aucune commande et ne lis aucun fichier : "
-    f"réponds directement. {_SUMMARY_FORMAT}"
+    "Le bloc <stdin> ci-dessous contient le texte Markdown d'une offre d'emploi, "
+    "extrait automatiquement de sa page web. N'exécute aucune commande et ne lis "
+    f"aucun fichier : réponds directement. {_SUMMARY_FORMAT}"
 )
 
 CODEX_TIMEOUT_SECONDS = 300
@@ -136,34 +161,63 @@ def _fetch_playwright(url: str) -> str | None:
         return None
 
 
-def _fetch_and_convert(url: str, client: httpx.Client) -> tuple[str | None, str | None]:
-    """Renvoie (markdown, fetch_method), ou (None, None) si tout échoue."""
-    html = _fetch_http(url, client)
-    markdown = markdownify(html).strip() if html else ""
-    if len(markdown) >= MIN_MARKDOWN_LENGTH:
-        return markdown, "http"
+def _fetch_and_extract(
+    url: str, client: httpx.Client
+) -> tuple[Extraction | None, str | None, str | None]:
+    """Renvoie (extraction, fetch_method, html), ou (None, None, None) si tout échoue.
 
-    html = _fetch_playwright(url)
-    markdown = markdownify(html).strip() if html else ""
-    if len(markdown) >= MIN_MARKDOWN_LENGTH:
-        return markdown, "playwright"
-
-    return None, None
+    Le seuil de repli vers Playwright reste mesuré sur la page entière : une
+    page trop courte est une page morte ou un mur de connexion, indépendamment
+    de la qualité de l'extraction qu'on en tirera.
+    """
+    fetchers = (
+        ("http", lambda: _fetch_http(url, client)),
+        ("playwright", lambda: _fetch_playwright(url)),
+    )
+    for method, fetch in fetchers:
+        html = fetch()
+        if not html:
+            continue
+        result = extract(html)
+        if len(result.markdown) >= MIN_MARKDOWN_LENGTH:
+            return result, method, html
+    return None, None, None
 
 
 def _store_content(
-    conn: sqlite3.Connection, offer_id: int, markdown: str | None, fetch_method: str | None
+    conn: sqlite3.Connection,
+    offer_id: int,
+    result: Extraction | None,
+    fetch_method: str | None,
+    html: str | None,
 ) -> None:
-    status = "ok" if markdown is not None else "failed"
+    """Enregistre le bloc utile, sa provenance et le HTML brut compressé.
+
+    Garder le HTML permet de ré-extraire tout le corpus quand l'extracteur
+    s'améliore, sans refetcher les sites ni redemander la moindre page.
+    """
     conn.execute(
-        "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
-        "VALUES (?, ?, ?, ?)",
-        (offer_id, markdown, fetch_method, status),
+        "INSERT INTO offer_content (offer_id, markdown, fetch_method, extract_method, "
+        "html_gz, status) VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(offer_id) DO UPDATE SET markdown = excluded.markdown, "
+        "fetch_method = excluded.fetch_method, extract_method = excluded.extract_method, "
+        "html_gz = excluded.html_gz, status = excluded.status, fetched_at = datetime('now')",
+        (
+            offer_id,
+            result.markdown if result is not None else None,
+            fetch_method,
+            result.method if result is not None else None,
+            gzip.compress(html.encode("utf-8")) if html else None,
+            "ok" if result is not None else "failed",
+        ),
     )
     conn.commit()
 
 
-def _summarize(config: EnrichConfig, markdown: str) -> tuple[dict[str, str], list[str]] | None:
+SummaryParts = tuple[dict[str, str], dict[str, str], list[str]]
+
+
+def _summarize(config: EnrichConfig, markdown: str) -> SummaryParts | None:
     if config.runner == "codex":
         return _summarize_codex(config, markdown)
     return _summarize_opencode(config, markdown)
@@ -171,7 +225,7 @@ def _summarize(config: EnrichConfig, markdown: str) -> tuple[dict[str, str], lis
 
 def _summarize_codex(
     config: EnrichConfig, markdown: str
-) -> tuple[dict[str, str], list[str]] | None:
+) -> SummaryParts | None:
     # Le texte de l'offre passe par stdin (bloc <stdin> côté codex) : pas de
     # limite d'argument ni de fichier temporaire à faire lire au modèle. La
     # réponse finale est écrite par codex dans un fichier (-o), donc aucun
@@ -211,15 +265,15 @@ def _summarize_codex(
         except OSError:
             log.warning("enrich: codex did not write its final message")
             return None
-    fields, bullets = _parse_summary(text)
+    fields, quotes, bullets = _parse_summary(text)
     if not fields and not bullets:
         return None
-    return fields, bullets
+    return fields, _verified_quotes(quotes, markdown), bullets
 
 
 def _summarize_opencode(
     config: EnrichConfig, markdown: str
-) -> tuple[dict[str, str], list[str]] | None:
+) -> SummaryParts | None:
     # Le Markdown est passé en pièce jointe (--file) et non en argument CLI :
     # le noyau Linux limite chaque argument individuel à ~128 Ko (MAX_ARG_STRLEN).
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -245,10 +299,10 @@ def _summarize_opencode(
         log.warning("enrich: opencode exited with status %s", completed.returncode)
         return None
     text = _extract_text(completed.stdout)
-    fields, bullets = _parse_summary(text)
+    fields, quotes, bullets = _parse_summary(text)
     if not fields and not bullets:
         return None
-    return fields, bullets
+    return fields, _verified_quotes(quotes, markdown), bullets
 
 
 def _extract_text(stdout: str) -> str:
@@ -269,9 +323,10 @@ def _extract_text(stdout: str) -> str:
     return "\n".join(chunks)
 
 
-def _parse_summary(text: str) -> tuple[dict[str, str], list[str]]:
-    """Sépare les lignes 'LABEL: valeur' des champs fixes et les puces '- '."""
+def _parse_summary(text: str) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """Sépare les valeurs de champs, leurs citations, et les puces '- '."""
     fields: dict[str, str] = {}
+    quotes: dict[str, str] = {}
     bullets: list[str] = []
     for line in text.splitlines():
         line = line.strip().lstrip("*").strip()
@@ -281,16 +336,54 @@ def _parse_summary(text: str) -> tuple[dict[str, str], list[str]]:
                 bullets.append(bullet)
             continue
         label, sep, value = line.partition(":")
-        key = _PROMPT_LABEL_TO_KEY.get(label.strip().strip("*").upper())
-        if sep and key and key not in fields:
-            fields[key] = value.strip().strip("*").strip() or FIELD_UNKNOWN
-    return fields, bullets
+        if not sep:
+            continue
+        label = label.strip().strip("*").upper()
+        value = value.strip().strip("*").strip()
+        quote_key = _PROMPT_LABEL_TO_QUOTE_KEY.get(label)
+        if quote_key is not None:
+            if value and value.lower() != FIELD_UNKNOWN and quote_key not in quotes:
+                quotes[quote_key] = value
+            continue
+        key = _PROMPT_LABEL_TO_KEY.get(label)
+        if key and key not in fields:
+            fields[key] = value or FIELD_UNKNOWN
+    return fields, quotes, bullets
+
+
+def _normalize_for_match(text: str) -> str:
+    """Réduit un texte à sa substance pour comparer une citation à l'annonce.
+
+    Le modèle recopie fidèlement les mots mais pas toujours les espaces, la
+    ponctuation typographique ou le balisage Markdown qui les entoure. On
+    compare donc lettres et chiffres uniquement : assez tolérant pour ne pas
+    rejeter une vraie citation, assez strict pour qu'une phrase inventée ne
+    passe pas.
+    """
+    return re.sub(r"[^0-9a-zà-ÿ]+", " ", text.casefold()).strip()
+
+
+def _verified_quotes(quotes: dict[str, str], markdown: str) -> dict[str, str]:
+    """Ne garde que les citations réellement présentes dans le texte de l'annonce."""
+    haystack = _normalize_for_match(markdown)
+    verified: dict[str, str] = {}
+    for key, quote in quotes.items():
+        needle = _normalize_for_match(quote)
+        if len(needle) >= 12 and needle in haystack:
+            verified[key] = quote.strip('"« »')
+        else:
+            log.debug("enrich: citation rejetée pour %s: %r", key, quote[:80])
+    return verified
 
 
 def _write_summary(
-    conn: sqlite3.Connection, offer_id: int, fields: dict[str, str], bullets: list[str]
+    conn: sqlite3.Connection,
+    offer_id: int,
+    fields: dict[str, str],
+    quotes: dict[str, str],
+    bullets: list[str],
 ) -> tuple[bool, bool]:
-    """Écrit champs et puces sans jamais écraser des puces existantes.
+    """Écrit champs, citations et puces sans jamais écraser des puces existantes.
 
     Renvoie (summary_written, fields_written). Un résumé existant (manuel ou
     auto) garde ses puces telles quelles ; les champs fixes sont ajoutés à
@@ -315,8 +408,12 @@ def _write_summary(
     fields_written = False
     if fields:
         conn.executemany(
-            "INSERT OR REPLACE INTO summary_field (summary_id, key, value) VALUES (?, ?, ?)",
-            ((summary_id, key, fields.get(key, FIELD_UNKNOWN)) for key in FIELD_KEYS),
+            "INSERT OR REPLACE INTO summary_field (summary_id, key, value, quote) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                (summary_id, key, fields.get(key, FIELD_UNKNOWN), quotes.get(key))
+                for key in FIELD_KEYS
+            ),
         )
         fields_written = True
     conn.commit()
@@ -355,6 +452,9 @@ def enrich(
     # les écritures SQLite restent dans ce thread.
     pool = ThreadPoolExecutor(max_workers=config.concurrency)
     futures: dict[Future, int] = {}
+    # Champs déjà publiés par la page en JSON-LD : ils complètent ce que le LLM
+    # n'a pas trouvé, sans coûter un seul token.
+    jsonld_fields: dict[int, dict[str, str]] = {}
     try:
         fetch_remaining = sum(1 for offer in offers if offer["content_status"] is None)
         for offer in offers:
@@ -362,12 +462,15 @@ def enrich(
             url = str(offer["url"])
             if offer["content_status"] is None:
                 fetch_remaining -= 1
-                markdown, fetch_method = _fetch_and_convert(url, http_client)
-                _store_content(conn, offer_id, markdown, fetch_method)
-                if markdown is None:
+                extracted, fetch_method, html = _fetch_and_extract(url, http_client)
+                _store_content(conn, offer_id, extracted, fetch_method, html)
+                if extracted is None:
                     result.fetched_failed += 1
                     continue
                 result.fetched_ok += 1
+                if extracted.fields:
+                    jsonld_fields[offer_id] = extracted.fields
+                markdown = extracted.markdown
                 futures[pool.submit(_summarize, config, markdown)] = offer_id
                 # Le sommeil ne s'applique qu'entre deux fetchs réels : résumer
                 # un texte déjà en base ne martèle personne.
@@ -389,8 +492,15 @@ def enrich(
                 continue
             if summarized is None:
                 continue
-            fields, bullets = summarized
-            summary_written, fields_written = _write_summary(conn, offer_id, fields, bullets)
+            fields, quotes, bullets = summarized
+            # Le JSON-LD ne sert qu'à combler : ce que le modèle a lu dans
+            # l'annonce prime sur une donnée structurée souvent générique.
+            for key, value in jsonld_fields.get(offer_id, {}).items():
+                if fields.get(key, FIELD_UNKNOWN) == FIELD_UNKNOWN:
+                    fields[key] = value
+            summary_written, fields_written = _write_summary(
+                conn, offer_id, fields, quotes, bullets
+            )
             if summary_written:
                 result.summaries_written += 1
             if fields_written:
