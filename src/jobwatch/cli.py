@@ -465,7 +465,7 @@ def serve(config_path: Path | None, host: str, port: int) -> None:
     conn = _open_db(config)
     conn.close()
     try:
-        serve_http(config.db, host, port)
+        serve_http(config.db, host, port, draft_config=config.draft)
     except ServeError as exc:
         _fatal(str(exc))
 

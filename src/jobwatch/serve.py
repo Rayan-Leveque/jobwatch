@@ -9,8 +9,12 @@ bibliothèque standard. Les actions HTTP (POST /match/<id>/later,
 /match/<id>/apply pour enregistrer une candidature avec des documents
 choisis dans la bibliothèque) mutent l'état d'un match ; POST /documents
 uploade un nouveau document (JSON base64, voir jobwatch.library) sans
-mutation de match. Aucune authentification n'est ajoutée, le périmètre
-Tailscale est la frontière de confiance.
+mutation de match. POST /match/<id>/draft lance une génération de lettre de
+motivation en arrière-plan (voir jobwatch.draft) quand le bloc 'draft' de la
+config est renseigné ; GET /match/<id>/draft/status la sonde, et
+GET /match/<id>/letter.pdf|.tex|/letter/<n>.png servent les fichiers produits.
+Aucune authentification n'est ajoutée, le périmètre Tailscale est la
+frontière de confiance.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import html
 import json
 import re
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,12 +31,18 @@ from urllib.parse import urlsplit
 
 import click
 
+from jobwatch import draft
 from jobwatch.applications import ApplicationError, record_application
+from jobwatch.config import DraftConfig
 from jobwatch.db import connect
 from jobwatch.library import LibraryError, list_library, resolve_path, save_upload
 
 RESTORE_STATES = ("new", "seen", "later")
 _MATCH_ACTION_RE = re.compile(r"^/match/(\d+)/(later|discard|restore|apply)$")
+_DRAFT_POST_RE = re.compile(r"^/match/(\d+)/draft$")
+_DRAFT_STATUS_RE = re.compile(r"^/match/(\d+)/draft/status$")
+_LETTER_FILE_RE = re.compile(r"^/match/(\d+)/letter\.(pdf|tex)$")
+_LETTER_PAGE_RE = re.compile(r"^/match/(\d+)/letter/(\d+)\.png$")
 _UPLOAD_PATH = "/documents"
 
 STATUS_LABELS = {
@@ -171,7 +182,8 @@ def _discarded_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row
 
 def _applications(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT a.id AS id, o.id AS offer_id, m.fit AS fit, c.name AS company, o.title AS title, "
+        "SELECT a.id AS id, o.id AS offer_id, m.id AS match_id, m.fit AS fit, "
+        "       c.name AS company, o.title AS title, "
         "       o.location AS location, o.contract AS contract, "
         "       o.platform AS platform, o.url AS url, a.note AS note, "
         "       s.name AS search_name, "
@@ -228,6 +240,24 @@ def _offer_contents(conn: sqlite3.Connection, offer_ids: list[int]) -> dict[int,
         for row in rows:
             contents[int(row["offer_id"])] = str(row["markdown"])
     return contents
+
+
+def _draft_rows(conn: sqlite3.Connection, match_ids: list[int]) -> dict[int, sqlite3.Row]:
+    """Dernier job de génération de lettre par match (le plus grand id gagne)."""
+    if not match_ids:
+        return {}
+    drafts: dict[int, sqlite3.Row] = {}
+    for start in range(0, len(match_ids), 500):
+        chunk = match_ids[start : start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            "SELECT * FROM draft_job "
+            f"WHERE match_id IN ({placeholders}) ORDER BY match_id, id",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            drafts[int(row["match_id"])] = row
+    return drafts
 
 
 def _link(url: object) -> str:
@@ -366,16 +396,24 @@ def _document_field(match_id: int, doc_type: str, name: str, label: str, rows: l
     )
 
 
-def _card_actions(row: sqlite3.Row, library: dict[str, list[sqlite3.Row]]) -> str:
+def _card_actions(
+    row: sqlite3.Row,
+    library: dict[str, list[sqlite3.Row]],
+    track: str,
+    draft_enabled: bool,
+) -> str:
     match_id = int(row["id"])
     prev_state = html.escape(str(row["state"]), quote=True)
     form_id = f"apply-form-{match_id}"
+    draft_button = _draft_button(match_id) if draft_enabled else ""
+    draft_form = _draft_form(match_id, track, library["cv"]) if draft_enabled else ""
     return (
         '<div class="card-actions">'
         f'<button class="card-action action-later" type="button" data-match-id="{match_id}" '
         f'data-prev-state="{prev_state}" data-action="later">Plus tard</button>'
         f'<button class="card-action action-apply" type="button" aria-expanded="false" '
         f'aria-controls="{form_id}">Candidater</button>'
+        f"{draft_button}"
         f'<button class="card-action action-discard" type="button" data-match-id="{match_id}" '
         f'data-prev-state="{prev_state}" data-action="discard">Écarter</button>'
         "</div>"
@@ -384,6 +422,90 @@ def _card_actions(row: sqlite3.Row, library: dict[str, list[sqlite3.Row]]) -> st
         f'{_document_field(match_id, "cover_letter", "cover_letter_library_id", "Lettre de motivation", library["cover_letter"])}'
         '<button class="card-action apply-submit" type="submit">Enregistrer la candidature</button>'
         "</form>"
+        f"{draft_form}"
+    )
+
+
+def _draft_button(match_id: int) -> str:
+    return (
+        f'<button class="card-action action-draft" type="button" aria-expanded="false" '
+        f'aria-controls="draft-form-{match_id}">Générer LM</button>'
+    )
+
+
+def _draft_form(match_id: int, track: str, cv_rows: list[sqlite3.Row]) -> str:
+    form_id = f"draft-form-{match_id}"
+    if not cv_rows:
+        inner = (
+            '<p class="empty-note">Uploadez d\'abord un CV dans la bibliothèque '
+            "(formulaire Candidater).</p>"
+        )
+    else:
+        select_id = f"draft-cv-{match_id}"
+        options = "".join(
+            f'<option value="{int(r["id"])}">{html.escape(str(r["label"]))}</option>'
+            for r in cv_rows
+        )
+        inner = (
+            f'<label class="doc-label" for="{select_id}">CV</label>'
+            f'<select class="apply-input draft-cv-select" id="{select_id}" '
+            f'name="cv_library_id">{options}</select>'
+            '<input class="apply-input" type="text" name="instruction" autocomplete="off" '
+            'placeholder="Consigne (optionnel)" aria-label="Consigne pour le modèle">'
+            '<button class="card-action draft-submit" type="submit">Générer la lettre</button>'
+        )
+    return (
+        f'<form class="draft-form" id="{form_id}" data-match-id="{match_id}" '
+        f'data-track="{html.escape(track, quote=True)}" hidden>{inner}</form>'
+    )
+
+
+def _draft_status_html(match_id: int, job: sqlite3.Row | None) -> str:
+    """Fragment d'état de la génération : réutilisé au rendu et par /draft/status."""
+    if job is None:
+        return ""
+    status = str(job["status"])
+    if status == "running":
+        return (
+            '<span class="draft-spinner" aria-hidden="true"></span>'
+            "<span>Génération de la lettre en cours…</span>"
+        )
+    if status == "failed":
+        error = html.escape(str(job["error"] or "échec inconnu"))
+        tex_link = (
+            f' · <a href="/match/{match_id}/letter.tex">source .tex</a>'
+            if job["tex_path"]
+            else ""
+        )
+        return f'<p class="draft-error">Échec de la génération : {error}{tex_link}</p>'
+    pages = int(job["png_pages"] or 1)
+    version = int(job["id"])
+    images = "".join(
+        f'<img class="letter-page" src="/match/{match_id}/letter/{page}.png?v={version}" '
+        f'alt="Lettre de motivation, page {page}" loading="lazy">'
+        for page in range(1, pages + 1)
+    )
+    warning = (
+        f'<p class="draft-warning">{html.escape(str(job["warning"]))}</p>'
+        if job["warning"]
+        else ""
+    )
+    panel_id = f"letter-panel-{match_id}"
+    return (
+        f'<button class="content-toggle letter-toggle" type="button" aria-expanded="false" '
+        f'aria-controls="{panel_id}">Lettre générée'
+        '<span class="summary-chevron" aria-hidden="true"></span></button>'
+        f'<div class="letter-panel" id="{panel_id}" hidden>{warning}{images}'
+        f'<p class="letter-links"><a href="/match/{match_id}/letter.pdf">Télécharger le PDF</a>'
+        f' · <a href="/match/{match_id}/letter.tex">Source .tex</a></p></div>'
+    )
+
+
+def _draft_area(match_id: int, job: sqlite3.Row | None) -> str:
+    status = str(job["status"]) if job is not None else ""
+    return (
+        f'<div class="draft-area" id="draft-area-{match_id}" data-match-id="{match_id}" '
+        f'data-status="{status}">{_draft_status_html(match_id, job)}</div>'
     )
 
 
@@ -392,6 +514,9 @@ def _match_card(
     bullets: list[str],
     content: str | None,
     library: dict[str, list[sqlite3.Row]],
+    job: sqlite3.Row | None,
+    track: str,
+    draft_enabled: bool,
     actions: bool = False,
 ) -> str:
     cls = _row_class(row["state"])
@@ -403,18 +528,28 @@ def _match_card(
     summary_class = " has-summary" if summary else ""
     chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
     content_button, content_panel = _content_panel(row, content, "match")
-    actions_html = _card_actions(row, library) if actions else ""
+    actions_html = _card_actions(row, library, track, draft_enabled) if actions else ""
+    draft_area = _draft_area(int(row["id"]), job) if actions and draft_enabled else ""
     return (
         f'<article class="row row-{cls}{summary_class}">{button}<div class="body">'
         f'<div class="card-topline"><div class="company">{company}</div>'
         f'<div class="card-badges">{pill}{chevron}</div></div>'
         f'<div class="role">{title}</div>'
-        f'<div class="meta">{meta}</div></div>{actions_html}{summary}{content_button}{content_panel}'
+        f'<div class="meta">{meta}</div></div>{actions_html}{draft_area}'
+        f"{summary}{content_button}{content_panel}"
         "</article>"
     )
 
 
-def _application_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> str:
+def _application_card(
+    row: sqlite3.Row,
+    bullets: list[str],
+    content: str | None,
+    library: dict[str, list[sqlite3.Row]],
+    job: sqlite3.Row | None,
+    track: str,
+    draft_enabled: bool,
+) -> str:
     status = str(row["status"] or "")
     cls = status if status in STATUS_LABELS else "unknown"
     label = STATUS_LABELS.get(status, STATUS_UNKNOWN)
@@ -427,12 +562,20 @@ def _application_card(row: sqlite3.Row, bullets: list[str], content: str | None)
     summary_class = " has-summary" if summary else ""
     chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
     content_button, content_panel = _content_panel(row, content, "application")
+    draft_html = ""
+    if draft_enabled and row["match_id"] is not None:
+        match_id = int(row["match_id"])
+        draft_html = (
+            f'<div class="card-actions">{_draft_button(match_id)}</div>'
+            f"{_draft_form(match_id, track, library['cv'])}"
+            f"{_draft_area(match_id, job)}"
+        )
     return (
         f'<article class="row row-applied{summary_class}">{button}<div class="body">'
         f'<div class="card-topline"><div class="company">{company}</div>'
         f'<div class="card-badges">{pill}{chevron}</div></div>'
         f'<div class="role">{title}</div>'
-        f'<div class="meta">{meta}</div>{note}</div>{summary}{content_button}{content_panel}</article>'
+        f'<div class="meta">{meta}</div>{note}</div>{draft_html}{summary}{content_button}{content_panel}</article>'
     )
 
 
@@ -445,12 +588,20 @@ def _card(
     summaries: dict[int, list[str]],
     contents: dict[int, str],
     library: dict[str, list[sqlite3.Row]],
+    drafts: dict[int, sqlite3.Row],
+    track: str,
+    draft_enabled: bool,
 ) -> str:
     bullets = summaries.get(int(row["offer_id"]), [])
     content = contents.get(int(row["offer_id"]))
     if key == "applied":
-        return _application_card(row, bullets, content)
-    return _match_card(row, bullets, content, library, actions=key in ACTIONABLE_SECTIONS)
+        job = drafts.get(int(row["match_id"])) if row["match_id"] is not None else None
+        return _application_card(row, bullets, content, library, job, track, draft_enabled)
+    job = drafts.get(int(row["id"]))
+    return _match_card(
+        row, bullets, content, library, job, track, draft_enabled,
+        actions=key in ACTIONABLE_SECTIONS,
+    )
 
 
 def _section(
@@ -463,9 +614,15 @@ def _section(
     summaries: dict[int, list[str]],
     contents: dict[int, str],
     library: dict[str, list[sqlite3.Row]],
+    drafts: dict[int, sqlite3.Row],
+    track: str,
+    draft_enabled: bool,
 ) -> str:
     if rows:
-        cards = "\n".join(_card(row, key, summaries, contents, library) for row in rows)
+        cards = "\n".join(
+            _card(row, key, summaries, contents, library, drafts, track, draft_enabled)
+            for row in rows
+        )
     else:
         cards = f'<p class="empty-note">{empty_text}</p>'
     open_attr = " open" if open_default else ""
@@ -482,7 +639,9 @@ def _section(
     )
 
 
-def render_page(conn: sqlite3.Connection, track: str = "engineer") -> str:
+def render_page(
+    conn: sqlite3.Connection, track: str = "engineer", draft_enabled: bool = False
+) -> str:
     """Rend la page HTML complète d'un onglet depuis l'état actuel de la base."""
     priority = _priority_matches(conn, track)
     new = _matches(conn, "new", track)
@@ -496,31 +655,37 @@ def render_page(conn: sqlite3.Connection, track: str = "engineer") -> str:
     summaries = _summary_bullets(conn, offer_ids)
     contents = _offer_contents(conn, offer_ids)
     library = {"cv": list_library(conn, "cv"), "cover_letter": list_library(conn, "cover_letter")}
+    match_ids = sorted(
+        {int(row["id"]) for row in (*priority, *new, *seen, *later)}
+        | {int(row["match_id"]) for row in applied if row["match_id"] is not None}
+    )
+    drafts = _draft_rows(conn, match_ids) if draft_enabled else {}
+    extra = (drafts, track, draft_enabled)
     body = "\n".join(
         (
             _section(
                 "priority", "Priorité haute", "À regarder en premier", priority,
-                "Aucune offre prioritaire pour l'instant.", True, summaries, contents, library,
+                "Aucune offre prioritaire pour l'instant.", True, summaries, contents, library, *extra,
             ),
             _section(
                 "new", "Nouveaux matchs", "À découvrir", new,
-                "Aucun nouveau match pour l'instant.", True, summaries, contents, library,
+                "Aucun nouveau match pour l'instant.", True, summaries, contents, library, *extra,
             ),
             _section(
                 "seen", "Vus", "Déjà parcourus", seen,
-                "Aucun match parcouru pour l'instant.", False, summaries, contents, library,
+                "Aucun match parcouru pour l'instant.", False, summaries, contents, library, *extra,
             ),
             _section(
                 "later", "À candidater", "Mis de côté pour plus tard", later,
-                "Aucune offre à candidater plus tard pour l'instant.", False, summaries, contents, library,
+                "Aucune offre à candidater plus tard pour l'instant.", False, summaries, contents, library, *extra,
             ),
             _section(
                 "discarded", "Corbeille", "Écartées dans les 30 derniers jours", discarded,
-                "Aucune offre écartée récemment.", False, summaries, contents, library,
+                "Aucune offre écartée récemment.", False, summaries, contents, library, *extra,
             ),
             _section(
                 "applied", "Candidatures", "Dernier statut connu", applied,
-                "Aucune candidature pour l'instant.", False, summaries, contents, library,
+                "Aucune candidature pour l'instant.", False, summaries, contents, library, *extra,
             ),
         )
     )
@@ -538,7 +703,16 @@ def render_page(conn: sqlite3.Connection, track: str = "engineer") -> str:
     )
 
 
-def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
+def _spawn_draft_job(db_path: Path, config: DraftConfig, job_id: int) -> None:
+    """Lance le job de génération dans un thread ; point d'accroche des tests."""
+    threading.Thread(
+        target=draft.run_job, args=(db_path, config, job_id), daemon=True
+    ).start()
+
+
+def make_handler(
+    db_path: Path, draft_config: DraftConfig | None = None
+) -> type[BaseHTTPRequestHandler]:
     """Fabrique une classe de gestionnaire HTTP branchée sur render_page.
 
     Chaque requête ouvre sa propre connexion : ThreadingHTTPServer sert chaque
@@ -550,6 +724,20 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:
             path = urlsplit(self.path).path
+            status = _DRAFT_STATUS_RE.match(path)
+            if status:
+                self._handle_draft_status(int(status.group(1)))
+                return
+            letter_file = _LETTER_FILE_RE.match(path)
+            if letter_file:
+                self._handle_letter_file(int(letter_file.group(1)), letter_file.group(2))
+                return
+            letter_page = _LETTER_PAGE_RE.match(path)
+            if letter_page:
+                self._handle_letter_page(
+                    int(letter_page.group(1)), int(letter_page.group(2))
+                )
+                return
             if path == "/":
                 track = "engineer"
             elif path == "/po":
@@ -560,7 +748,7 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
             try:
                 conn = connect(db_path)
                 try:
-                    page = render_page(conn, track)
+                    page = render_page(conn, track, draft_enabled=draft_config is not None)
                 finally:
                     conn.close()
             except sqlite3.Error as exc:
@@ -568,10 +756,152 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
                 return
             self._send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
+        def _latest_draft(self, conn: sqlite3.Connection, match_id: int) -> sqlite3.Row | None:
+            return conn.execute(
+                "SELECT * FROM draft_job WHERE match_id = ? ORDER BY id DESC LIMIT 1",
+                (match_id,),
+            ).fetchone()
+
+        def _handle_draft_status(self, match_id: int) -> None:
+            try:
+                conn = connect(db_path)
+                try:
+                    job = self._latest_draft(conn, match_id)
+                    entry = None
+                    if job is not None and job["library_id"] is not None:
+                        entry = conn.execute(
+                            "SELECT id, label FROM document_library WHERE id = ?",
+                            (job["library_id"],),
+                        ).fetchone()
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            if job is None:
+                self._send_json(404, {"error": "aucune génération pour ce match"})
+                return
+            payload = {"status": str(job["status"]), "html": _draft_status_html(match_id, job)}
+            if entry is not None:
+                # Permet au client d'ajouter la lettre aux menus Candidater sans recharger.
+                payload["library_id"] = int(entry["id"])
+                payload["library_label"] = str(entry["label"])
+            self._send_json(200, payload)
+
+        def _handle_letter_file(self, match_id: int, extension: str) -> None:
+            column = "pdf_path" if extension == "pdf" else "tex_path"
+            try:
+                conn = connect(db_path)
+                try:
+                    row = conn.execute(
+                        f"SELECT {column} AS path FROM draft_job "
+                        f"WHERE match_id = ? AND {column} IS NOT NULL "
+                        "ORDER BY id DESC LIMIT 1",
+                        (match_id,),
+                    ).fetchone()
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            content_type = (
+                "application/pdf" if extension == "pdf" else "text/plain; charset=utf-8"
+            )
+            self._send_draft_file(row["path"] if row else None, content_type)
+
+        def _handle_letter_page(self, match_id: int, page: int) -> None:
+            try:
+                conn = connect(db_path)
+                try:
+                    row = conn.execute(
+                        "SELECT pdf_path, png_pages FROM draft_job "
+                        "WHERE match_id = ? AND status = 'ok' ORDER BY id DESC LIMIT 1",
+                        (match_id,),
+                    ).fetchone()
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            if row is None or not (1 <= page <= int(row["png_pages"] or 0)):
+                self._send_text(404, "404 Not Found\n")
+                return
+            pdf_path = Path(str(row["pdf_path"]))
+            png_path = pdf_path.parent / f"{pdf_path.stem}-{page}.png"
+            self._send_draft_file(str(png_path), "image/png")
+
+        def _send_draft_file(self, path: str | None, content_type: str) -> None:
+            """Sert un fichier produit par un job de génération (chemin écrit par le serveur)."""
+            if path is None:
+                self._send_text(404, "404 Not Found\n")
+                return
+            try:
+                data = Path(path).read_bytes()
+            except OSError:
+                self._send_text(404, "404 Not Found\n")
+                return
+            self._send_bytes(200, data, content_type)
+
+        def _handle_draft_post(self, match_id: int) -> None:
+            if draft_config is None:
+                self._send_json(
+                    503,
+                    {"error": "génération non configurée : renseignez le bloc 'draft' de config.yaml"},
+                )
+                return
+            body = self._read_json_body()
+            fields = body if isinstance(body, dict) else {}
+            cv_library_id = fields.get("cv_library_id")
+            instruction = fields.get("instruction")
+            track = fields.get("track")
+            if not isinstance(cv_library_id, int) or isinstance(cv_library_id, bool):
+                self._send_json(400, {"error": "champ cv_library_id invalide"})
+                return
+            if instruction is not None and not isinstance(instruction, str):
+                self._send_json(400, {"error": "champ instruction invalide"})
+                return
+            if track not in TRACKS:
+                self._send_json(400, {"error": "champ track invalide"})
+                return
+            try:
+                conn = connect(db_path)
+                try:
+                    match_row = conn.execute(
+                        "SELECT id FROM match WHERE id = ?", (match_id,)
+                    ).fetchone()
+                    if match_row is None:
+                        self._send_text(404, "404 Not Found\n")
+                        return
+                    running = conn.execute(
+                        "SELECT id FROM draft_job WHERE match_id = ? AND status = 'running'",
+                        (match_id,),
+                    ).fetchone()
+                    if running is not None:
+                        self._send_json(409, {"error": "une génération est déjà en cours"})
+                        return
+                    cur = conn.execute(
+                        "INSERT INTO draft_job (match_id, track, cv_library_id, instruction) "
+                        "VALUES (?, ?, ?, ?)",
+                        (match_id, track, cv_library_id, (instruction or "").strip() or None),
+                    )
+                    job_id = int(cur.lastrowid)
+                    conn.commit()
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            _spawn_draft_job(db_path, draft_config, job_id)
+            self._send_json(202, {"ok": True, "job_id": job_id})
+
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
             if path == _UPLOAD_PATH:
                 self._handle_upload()
+                return
+            draft_post = _DRAFT_POST_RE.match(path)
+            if draft_post:
+                self._handle_draft_post(int(draft_post.group(1)))
                 return
             match = _MATCH_ACTION_RE.match(path)
             if not match:
@@ -730,10 +1060,12 @@ def url_of(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
-def serve_http(db_path: Path, host: str, port: int) -> None:
+def serve_http(
+    db_path: Path, host: str, port: int, draft_config: DraftConfig | None = None
+) -> None:
     """Crée le serveur HTTP et le sert jusqu'à Ctrl-C."""
     try:
-        server = ThreadingHTTPServer((host, port), make_handler(db_path))
+        server = ThreadingHTTPServer((host, port), make_handler(db_path, draft_config))
     except (OSError, OverflowError) as exc:
         raise ServeError(f"impossible d'écouter sur {host}:{port} : {exc}") from exc
     bound_port = int(server.server_address[1])
@@ -967,8 +1299,8 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .content-panel[hidden] { display:none }
 .content-panel p { margin:0 0 10px }
 .content-panel p:last-child { margin-bottom:0 }
-.card-actions { position:relative; z-index:3; display:flex; gap:8px; margin:12px 13px 0;
-  pointer-events:auto }
+.card-actions { position:relative; z-index:3; display:flex; flex-wrap:wrap; gap:8px;
+  margin:12px 13px 0; pointer-events:auto }
 .card-action { min-height:38px; padding:0 14px; display:inline-flex; align-items:center;
   border:1px solid var(--line); border-radius:11px; background:var(--surface); color:var(--fg);
   font-size:.71rem; font-weight:700; letter-spacing:.02em; cursor:pointer;
@@ -1001,6 +1333,26 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .doc-upload-btn:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
 .doc-label-prompt { display:flex; gap:8px }
 .doc-label-prompt[hidden] { display:none }
+.action-draft { color:var(--violet) }
+.draft-form { position:relative; z-index:3; display:grid; gap:8px; margin:12px 13px 0;
+  pointer-events:auto }
+.draft-form[hidden] { display:none }
+.draft-submit { justify-self:start }
+.draft-area { position:relative; z-index:3; display:flex; align-items:center; flex-wrap:wrap;
+  gap:9px; margin:0 13px; pointer-events:auto; color:var(--muted); font-size:.75rem }
+.draft-area:not(:empty) { margin-top:12px }
+.draft-spinner { width:14px; height:14px; flex:none; border:2px solid var(--line-strong);
+  border-top-color:var(--violet); border-radius:50%; animation:draft-spin .8s linear infinite }
+@keyframes draft-spin { to { transform:rotate(360deg) } }
+.draft-error { margin:0; color:var(--danger); overflow-wrap:anywhere }
+.draft-error a, .letter-links a { position:relative; z-index:3; pointer-events:auto }
+.draft-warning { margin:0 0 8px; color:var(--amber); overflow-wrap:anywhere }
+.draft-area .letter-toggle { margin:0 }
+.letter-panel { width:100%; margin:4px 0 1px; padding:12px 0 0; border-top:1px solid var(--line) }
+.letter-panel[hidden] { display:none }
+.letter-page { display:block; width:100%; max-width:560px; margin:0 auto 10px;
+  border:1px solid var(--line-strong); border-radius:10px; background:#fff }
+.letter-links { margin:4px 0 8px; text-align:center; font-size:.72rem }
 .undo-toast { display:flex; align-items:center; justify-content:space-between; gap:12px;
   color:var(--muted); font-size:.78rem }
 .undo-toast .undo-btn { flex:none; min-height:38px; padding:0 14px; border:1px solid var(--line);
@@ -1068,7 +1420,9 @@ _JS = """\
   const searchDock = document.getElementById('search-dock');
   const details = [...document.querySelectorAll('.section')];
   const rows = [...document.querySelectorAll('.row')];
-  const cardToggles = [...document.querySelectorAll('.card-toggle, .content-toggle')];
+  // .letter-toggle est géré par délégation : le fragment de statut est réinjecté
+  // après chaque génération et perdrait des écouteurs attachés directement.
+  const cardToggles = [...document.querySelectorAll('.card-toggle, .content-toggle:not(.letter-toggle)')];
   cardToggles.forEach(button => {
     button.addEventListener('click', () => {
       const expanded = button.getAttribute('aria-expanded') === 'true';
@@ -1234,6 +1588,114 @@ _JS = """\
         if (!resp.ok) return;
         removeRow(row, () => showToast(row, 'Candidature enregistrée.'));
       });
+    });
+  });
+
+  document.addEventListener('click', e => {
+    const btn = e.target.closest('.letter-toggle');
+    if (!btn) return;
+    const expanded = btn.getAttribute('aria-expanded') === 'true';
+    const panel = document.getElementById(btn.getAttribute('aria-controls'));
+    btn.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+    if (panel) panel.hidden = expanded;
+  });
+  [...document.querySelectorAll('.action-draft')].forEach(button => {
+    button.addEventListener('click', () => {
+      const expanded = button.getAttribute('aria-expanded') === 'true';
+      const form = document.getElementById(button.getAttribute('aria-controls'));
+      button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+      if (form) form.hidden = expanded;
+    });
+  });
+  const RUNNING_HTML = '<span class="draft-spinner" aria-hidden="true"></span>'
+    + '<span>Génération de la lettre en cours…</span>';
+  const DRAFT_POLL_MS = 3000;
+  const draftPolls = new Map();
+  const setDraftArea = (matchId, html, status) => {
+    const area = document.getElementById(`draft-area-${matchId}`);
+    if (!area) return;
+    area.innerHTML = html;
+    area.dataset.status = status;
+  };
+  const registerCoverLetter = (matchId, libraryId, label) => {
+    const value = String(libraryId);
+    [...document.querySelectorAll('select[data-doc-type="cover_letter"]')].forEach(select => {
+      let option = [...select.options].find(o => o.value === value);
+      if (!option) {
+        option = document.createElement('option');
+        option.value = value;
+        select.append(option);
+      }
+      option.textContent = label;
+    });
+    const own = document.querySelector(`#apply-form-${matchId} select[data-doc-type="cover_letter"]`);
+    if (own) own.value = value;
+  };
+  const pollDraft = matchId => {
+    if (draftPolls.has(matchId)) return;
+    const timer = setInterval(() => {
+      fetch(`/match/${matchId}/draft/status`)
+        .then(resp => resp.ok ? resp.json() : null)
+        .then(payload => {
+          if (!payload) return;
+          if (payload.status !== 'running') {
+            clearInterval(timer);
+            draftPolls.delete(matchId);
+          }
+          setDraftArea(matchId, payload.html, payload.status);
+          if (payload.status === 'ok' && payload.library_id) {
+            registerCoverLetter(matchId, payload.library_id, payload.library_label);
+          }
+        })
+        .catch(() => {});
+    }, DRAFT_POLL_MS);
+    draftPolls.set(matchId, timer);
+  };
+  [...document.querySelectorAll('.draft-area[data-status="running"]')]
+    .forEach(area => pollDraft(area.dataset.matchId));
+  [...document.querySelectorAll('.draft-form')].forEach(form => {
+    const select = form.elements.cv_library_id;
+    const track = form.dataset.track;
+    if (select) {
+      let savedCv = null;
+      try { savedCv = localStorage.getItem(`jw-cv-${track}`); } catch (_) {}
+      if (savedCv && [...select.options].some(o => o.value === savedCv)) select.value = savedCv;
+    }
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      if (!select) return;
+      const matchId = form.dataset.matchId;
+      try { localStorage.setItem(`jw-cv-${track}`, select.value); } catch (_) {}
+      fetch(`/match/${matchId}/draft`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          cv_library_id: Number(select.value),
+          instruction: form.elements.instruction.value.trim(),
+          track,
+        }),
+      }).then(resp => {
+        if (resp.ok) {
+          form.hidden = true;
+          const btn = document.querySelector(`[aria-controls="draft-form-${matchId}"]`);
+          if (btn) btn.setAttribute('aria-expanded', 'false');
+          setDraftArea(matchId, RUNNING_HTML, 'running');
+          pollDraft(matchId);
+          return null;
+        }
+        return resp.json().catch(() => null);
+      }).then(payload => {
+        if (payload && payload.error) {
+          const area = document.getElementById(`draft-area-${matchId}`);
+          if (!area) return;
+          area.dataset.status = 'failed';
+          area.textContent = '';
+          const p = document.createElement('p');
+          p.className = 'draft-error';
+          p.textContent = payload.error;
+          area.append(p);
+        }
+      }).catch(() => {});
     });
   });
 

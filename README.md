@@ -123,8 +123,10 @@ contenu récupéré (`jw enrich`, statut `ok`) affiche un bouton « Annonce comp
 texte intégral de l'annonce.
 
 Chaque carte des sections `Priorité haute`, `Nouveaux matchs`, `Vus` et `À candidater` propose
-trois actions, dans cet ordre : « Plus tard » (passe le match en `state='later'`, section
-`À candidater`), « Candidater » et « Écarter » (passe le match en `state='discarded'` avec
+ses actions dans cet ordre : « Plus tard » (passe le match en `state='later'`, section
+`À candidater`), « Candidater », « Générer LM » (si le bloc `draft` est configuré, voir
+[Génération de lettre de motivation](#génération-de-lettre-de-motivation)) et « Écarter »
+(passe le match en `state='discarded'` avec
 `discarded_at` horodaté, section `Corbeille`). « Candidater » déplie un petit formulaire avec deux menus
 déroulants optionnels - CV et lettre de motivation - peuplés depuis une bibliothèque de
 documents réutilisables (table `document_library`) ; un bouton « Uploader » à côté de chaque
@@ -158,9 +160,35 @@ de confiance. Le tableau de bord expose et modifie vos offres et candidatures : 
 qui y a accès. Préférez l'accès local (`127.0.0.1`, le défaut) ou une adresse privée, et ne le
 publiez pas tel quel sur Internet.
 
+## Génération de lettre de motivation
+
+Quand le bloc `draft` de `config.yaml` est renseigné, chaque carte (hors `Corbeille`) affiche un
+bouton « Générer LM » qui déplie un mini-formulaire : un menu CV (bibliothèque de documents,
+dernier choix mémorisé par onglet côté client) et un champ consigne optionnel. La soumission
+lance un job en arrière-plan (table `draft_job`) :
+
+1. Le texte de l'offre est lu depuis `offer_content`, ou récupéré à la demande avec la mécanique
+   de `jw enrich` (HTTP puis Playwright). Si la page est irrécupérable, la lettre est générée à
+   partir du titre, de la société et du résumé, avec un avertissement affiché sur la carte.
+2. Le LLM (OpenCode, modèle du bloc `draft`) reçoit l'offre, le texte du CV choisi (extrait via
+   `pdftotext` pour un PDF) et les lettres exemples `.tex` de la piste métier de l'onglet, puis
+   rédige le document LaTeX complet, sans image, daté du jour.
+3. Le `.tex` est compilé avec `lualatex` ; en cas d'erreur, le log est renvoyé au LLM pour
+   réparation (deux tentatives), sinon l'erreur est affichée avec un lien vers le `.tex`.
+4. Le PDF est rendu page par page en PNG (`pdftoppm`) pour l'aperçu intégré au tableau de bord
+   (fiable sur iOS, contrairement à l'iframe PDF), avec liens vers le PDF et le `.tex`.
+5. Le PDF rejoint la bibliothèque de documents comme lettre de motivation « LM Société - Poste » :
+   le formulaire Candidater la propose immédiatement, sans recharger la page.
+
+Pendant la génération (une à trois minutes), la carte affiche un indicateur animé ; l'état est
+persistant en base et sondé par le client, il survit donc au rechargement de la page comme au
+verrouillage du téléphone. Régénérer avec une consigne (« plus court », « insiste sur le
+RAG »...) transmet la lettre précédente au modèle et remplace la même entrée de bibliothèque.
+`lualatex` (TeX Live), `pdftotext` et `pdftoppm` (poppler-utils) doivent être installés.
+
 ## Référence de configuration
 
-`config.yaml` (une copie de `config.example.yaml`) comporte cinq sections.
+`config.yaml` (une copie de `config.example.yaml`) comporte six sections.
 
 | Clé | Description |
 | --- | --- |
@@ -169,16 +197,19 @@ publiez pas tel quel sur Internet.
 | `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` (requête côté serveur) et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. |
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
 | `enrich` | Configuration de `jw enrich` : `opencode_bin` (binaire ou commande OpenCode) et `model` (identifiant de modèle OpenCode, ex. `opencode/deepseek-v4-flash-free`). Les deux clés sont requises dès que `enrich` n'est pas vide. |
+| `draft` | Génération de lettre de motivation depuis le tableau de bord : `opencode_bin` et `model` (modèle de rédaction, ex. `opencode-go/gpt-5.6-luna`), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. Requis dès que `draft` n'est pas vide. |
 
 Le filtre `locations` est une correspondance par sous-chaîne sur la localisation de l'offre :
 une offre située à « Puteaux » ou « Levallois-Perret » ne matche PAS une recherche avec
 `locations: ["Paris"]`. Listez explicitement les communes voulues dans `locations`, ou laissez
 la liste vide pour accepter n'importe quelle localisation.
 
-Dans `config.example.yaml`, les blocs `sources`, `notify` et `enrich` sont vides (`{}`) :
-décommentez-les et remplissez-les pour activer la collecte, les notifications et
-l'enrichissement. Avec la config d'exemple non modifiée, `jw init && jw run` ne fait aucun appel
-réseau et ne publie rien ; `jw enrich` refuse de s'exécuter tant que `enrich` n'est pas rempli.
+Dans `config.example.yaml`, les blocs `sources`, `notify`, `enrich` et `draft` sont vides
+(`{}`) : décommentez-les et remplissez-les pour activer la collecte, les notifications,
+l'enrichissement et la génération de lettres. Avec la config d'exemple non modifiée,
+`jw init && jw run` ne fait aucun appel réseau et ne publie rien ; `jw enrich` refuse de
+s'exécuter tant que `enrich` n'est pas rempli, et le bouton « Générer LM » n'apparaît pas tant
+que `draft` n'est pas rempli.
 
 Les recherches sont synchronisées dans la base à chaque `jw run` : les nouvelles sont insérées,
 les modifiées mises à jour, les supprimées désactivées (les matchs existants sont conservés).
@@ -214,6 +245,8 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `application` | Votre candidature pour une offre |
 | `event` | Historique d'une candidature (applied, interview, rejected, offer, ...) |
 | `document` | Fichiers CV et lettre de motivation attachés à une candidature |
+| `document_library` | Bibliothèque de documents réutilisables (CV, lettres) du tableau de bord |
+| `draft_job` | Jobs de génération de lettre de motivation (état, fichiers produits, avertissements) |
 
 ## Feuille de route
 
