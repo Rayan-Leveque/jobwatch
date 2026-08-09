@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import shutil
 import sqlite3
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 DOCUMENT_TYPES = ("cv", "cover_letter")
@@ -19,6 +22,15 @@ DOCUMENT_TYPES = ("cv", "cover_letter")
 
 class LibraryError(Exception):
     """Échec attendu : upload invalide. Le serveur renvoie un 400 avec ce message."""
+
+
+@dataclass
+class StorageMigrationResult:
+    """Bilan d'une migration de chemins externes vers le stockage jobwatch."""
+
+    copied: int = 0
+    already_managed: int = 0
+    missing: list[str] = field(default_factory=list)
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -29,6 +41,86 @@ def _sanitize_filename(filename: str) -> str:
 
 def documents_dir(db_path: Path) -> Path:
     return db_path.parent / "documents"
+
+
+def _is_managed(path: Path, db_path: Path) -> bool:
+    try:
+        path.resolve().relative_to(documents_dir(db_path).resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _source_path(raw_path: str, source_root: Path | None) -> Path:
+    path = Path(raw_path).expanduser()
+    if path.is_absolute() or source_root is None:
+        return path
+    return source_root / path
+
+
+def _managed_copy_path(db_path: Path, source: Path) -> Path:
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()[:12]
+    safe_name = _sanitize_filename(source.name)
+    return documents_dir(db_path) / f"import_{digest}_{safe_name}"
+
+
+def migrate_external_documents(
+    conn: sqlite3.Connection,
+    db_path: Path,
+    source_root: Path | None = None,
+) -> StorageMigrationResult:
+    """Copie dans jobwatch les documents encore référencés hors de son stockage.
+
+    Les chemins relatifs issus de l'ancien tracker sont résolus depuis ``source_root``.
+    L'opération est idempotente : le nom cible dépend du contenu du fichier et les
+    références déjà gérées sont laissées intactes.
+    """
+    result = StorageMigrationResult()
+    updates: list[tuple[str, str, int]] = []
+    created: list[Path] = []
+    tables = (
+        ("document_library", "file_path"),
+        ("document", "path"),
+    )
+
+    try:
+        for table, column in tables:
+            rows = conn.execute(
+                f"SELECT id, {column} AS file_path FROM {table} ORDER BY id"
+            ).fetchall()
+            for row in rows:
+                raw_path = str(row["file_path"])
+                stored_path = Path(raw_path).expanduser()
+                if stored_path.is_absolute() and _is_managed(stored_path, db_path):
+                    result.already_managed += 1
+                    continue
+                source = _source_path(raw_path, source_root)
+                if not source.is_file():
+                    result.missing.append(raw_path)
+                    continue
+                target = _managed_copy_path(db_path, source)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if not target.exists():
+                    shutil.copy2(source, target)
+                    created.append(target)
+                updates.append((table, str(target.resolve()), int(row["id"])))
+
+        if not updates:
+            return result
+
+        conn.execute("BEGIN IMMEDIATE")
+        for table, target, row_id in updates:
+            column = "file_path" if table == "document_library" else "path"
+            conn.execute(f"UPDATE {table} SET {column} = ? WHERE id = ?", (target, row_id))
+        conn.commit()
+    except (OSError, sqlite3.Error):
+        if conn.in_transaction:
+            conn.rollback()
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
+    result.copied = len(updates)
+    return result
 
 
 def list_library(conn: sqlite3.Connection, doc_type: str) -> list[sqlite3.Row]:

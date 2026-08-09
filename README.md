@@ -36,6 +36,25 @@ dans la ligne `db:` de la config générée au lieu du défaut `~/.local/share/j
 (utile pour un environnement de test isolé). Toutes les commandes acceptent
 `--config PATH` (par défaut `./config.yaml`, avec repli sur `~/.config/jobwatch/config.yaml`).
 
+### Instances isolées
+
+Pour héberger plusieurs personnes avec des données complètement séparées, utilisez une instance
+nommée. Chaque instance possède sa configuration, sa base SQLite et son dossier de documents :
+
+```bash
+.venv/bin/jw --instance rayan init
+.venv/bin/jw --instance rayan run
+.venv/bin/jw --instance rayan serve --port 8765
+
+.venv/bin/jw --instance alice init
+.venv/bin/jw --instance alice serve --port 8766
+```
+
+Les configurations vivent sous `~/.config/jobwatch/instances/<nom>/config.yaml` et toutes les
+données sous `~/.local/share/jobwatch/instances/<nom>/`. Les variables XDG sont respectées.
+`JOBWATCH_INSTANCE=alice` est équivalent à `--instance alice`, notamment pour cron ou un service.
+Un `--config PATH` explicite reste prioritaire.
+
 ### Cron
 
 Exécutez `jw run` chaque jour via cron ; enchaînez `jw enrich` si le bloc `enrich` est configuré :
@@ -54,6 +73,7 @@ candidatures, échéances, documents et résumés factuels.
 .venv/bin/jw ingest-daily --digest digest.md --config config.yaml                # offres web + fit LLM
 .venv/bin/jw import-md /chemin/vers/suivi_candidatures.md --config config.yaml
 .venv/bin/jw import-summaries /chemin/vers/resumes.md --config config.yaml
+.venv/bin/jw migrate-storage --source-root /ancien/workspace --config config.yaml
 ```
 
 `jw ingest-daily` exige au moins l'un de `--api-json` ou `--digest`. Le JSON API est le plancher
@@ -63,6 +83,11 @@ Les offres sont dédupliquées par URL et associées à une recherche (`--search
 échéances, documents) depuis un tracker Markdown (défaut `--search-name suivi-importe`). Les deux
 imports sont atomiques et idempotents : relancer les mêmes artefacts ne crée aucun doublon et ne
 rétrograde jamais un état existant.
+
+`jw migrate-storage` copie dans le dossier `documents/` de l'instance les CV et lettres encore
+référencés par un chemin externe. `--source-root` sert à résoudre les chemins relatifs provenant
+d'un ancien tracker. Les références SQLite sont réécrites vers les copies gérées par jobwatch ;
+la commande est idempotente et signale chaque fichier source introuvable sans modifier sa ligne.
 
 `jw import-summaries` attend des sections `## URL` suivies d'au moins un bullet `- ...`. Chaque URL
 doit correspondre exactement à une offre déjà présente : si l'une manque, tout l'import est annulé
