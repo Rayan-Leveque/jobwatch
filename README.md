@@ -129,10 +129,11 @@ ses actions dans cet ordre : « Plus tard » (passe le match en `state='later'`,
 (passe le match en `state='discarded'` avec
 `discarded_at` horodaté, section `Corbeille`). « Candidater » déplie un petit formulaire avec deux menus
 déroulants optionnels - CV et lettre de motivation - peuplés depuis une bibliothèque de
-documents réutilisables (table `document_library`) ; un bouton « Uploader » à côté de chaque
-menu ouvre le sélecteur de fichiers natif (le glisser-déposer fonctionne aussi), envoie le
-fichier en base64 vers `POST /documents`, et sélectionne automatiquement la nouvelle entrée
-dans le menu. Aucune sélection n'est obligatoire, comme avant. La soumission enregistre en une
+documents réutilisables (table `document_library`) ; à côté de chaque menu, un bouton œil
+ouvre le document sélectionné dans un nouvel onglet (`GET /documents/<id>`, désactivé quand
+« Aucun » est choisi) et un bouton flèche vers le bas ouvre le sélecteur de fichiers natif
+(le glisser-déposer fonctionne aussi), envoie le fichier en base64 vers `POST /documents`, et
+sélectionne automatiquement la nouvelle entrée dans le menu. Aucune sélection n'est obligatoire, comme avant. La soumission enregistre en une
 seule action la candidature (même logique que `jw apply` : ligne `application`, événement
 `applied`, match en `state='applied'`) plus une ligne `document` par champ rempli (`cv` ou
 `cover_letter`), en résolvant l'entrée de bibliothèque choisie vers son chemin sur disque. Les

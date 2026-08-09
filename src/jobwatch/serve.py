@@ -43,7 +43,15 @@ _DRAFT_POST_RE = re.compile(r"^/match/(\d+)/draft$")
 _DRAFT_STATUS_RE = re.compile(r"^/match/(\d+)/draft/status$")
 _LETTER_FILE_RE = re.compile(r"^/match/(\d+)/letter\.(pdf|tex)$")
 _LETTER_PAGE_RE = re.compile(r"^/match/(\d+)/letter/(\d+)\.png$")
+_DOCUMENT_FILE_RE = re.compile(r"^/documents/(\d+)$")
 _UPLOAD_PATH = "/documents"
+
+_PREVIEW_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
 
 STATUS_LABELS = {
     "applied": "Candidature envoyée",
@@ -375,16 +383,40 @@ def _document_options(rows: list[sqlite3.Row]) -> str:
     return "".join(options)
 
 
+_EYE_SVG = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12Z"/>'
+    '<circle cx="12" cy="12" r="2.8"/></svg>'
+)
+_UPLOAD_SVG = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M12 4v11M7.5 11l4.5 4.5L16.5 11"/><path d="M5 20h14"/></svg>'
+)
+
+
+def _preview_button(label: str) -> str:
+    escaped = html.escape(f"Prévisualiser : {label}", quote=True)
+    return (
+        f'<button class="doc-icon-btn doc-preview-btn" type="button" '
+        f'aria-label="{escaped}" title="Prévisualiser">{_EYE_SVG}</button>'
+    )
+
+
 def _document_field(match_id: int, doc_type: str, name: str, label: str, rows: list[sqlite3.Row]) -> str:
     select_id = f"{doc_type}-select-{match_id}"
     options = _document_options(rows)
+    upload_label = html.escape(f"Uploader : {label}", quote=True)
     return (
         f'<div class="doc-field" data-doc-type="{doc_type}">'
         f'<label class="doc-label" for="{select_id}">{html.escape(label)}</label>'
         '<div class="doc-row">'
         f'<select class="apply-input doc-select" id="{select_id}" name="{name}" '
         f'data-doc-type="{doc_type}">{options}</select>'
-        f'<button class="doc-upload-btn" type="button" data-doc-type="{doc_type}">Uploader</button>'
+        f"{_preview_button(label)}"
+        f'<button class="doc-icon-btn doc-upload-btn" type="button" data-doc-type="{doc_type}" '
+        f'aria-label="{upload_label}" title="Uploader">{_UPLOAD_SVG}</button>'
         "</div>"
         f'<input class="doc-file-input" type="file" data-doc-type="{doc_type}" hidden>'
         '<div class="doc-label-prompt" hidden>'
@@ -448,8 +480,11 @@ def _draft_form(match_id: int, track: str, cv_rows: list[sqlite3.Row]) -> str:
         )
         inner = (
             f'<label class="doc-label" for="{select_id}">CV</label>'
+            '<div class="doc-row">'
             f'<select class="apply-input draft-cv-select" id="{select_id}" '
             f'name="cv_library_id">{options}</select>'
+            f'{_preview_button("CV")}'
+            "</div>"
             '<input class="apply-input" type="text" name="instruction" autocomplete="off" '
             'placeholder="Consigne (optionnel)" aria-label="Consigne pour le modèle">'
             '<button class="card-action draft-submit" type="submit">Générer la lettre</button>'
@@ -738,6 +773,10 @@ def make_handler(
                     int(letter_page.group(1)), int(letter_page.group(2))
                 )
                 return
+            document = _DOCUMENT_FILE_RE.match(path)
+            if document:
+                self._handle_document_file(int(document.group(1)))
+                return
             if path == "/":
                 track = "engineer"
             elif path == "/po":
@@ -829,6 +868,27 @@ def make_handler(
             pdf_path = Path(str(row["pdf_path"]))
             png_path = pdf_path.parent / f"{pdf_path.stem}-{page}.png"
             self._send_draft_file(str(png_path), "image/png")
+
+        def _handle_document_file(self, library_id: int) -> None:
+            """Sert un document de la bibliothèque pour prévisualisation (œil des menus)."""
+            try:
+                conn = connect(db_path)
+                try:
+                    row = conn.execute(
+                        "SELECT file_path FROM document_library WHERE id = ?",
+                        (library_id,),
+                    ).fetchone()
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            if row is None:
+                self._send_text(404, "404 Not Found\n")
+                return
+            suffix = Path(str(row["file_path"])).suffix.lower()
+            content_type = _PREVIEW_CONTENT_TYPES.get(suffix, "text/plain; charset=utf-8")
+            self._send_draft_file(str(row["file_path"]), content_type)
 
         def _send_draft_file(self, path: str | None, content_type: str) -> None:
             """Sert un fichier produit par un job de génération (chemin écrit par le serveur)."""
@@ -1312,30 +1372,37 @@ h1 span { color:var(--muted-2); font-weight:620 }
 @media (hover:hover) {
   .card-action:hover { border-color:var(--line-strong); background:var(--surface-hover) }
 }
-.apply-form { position:relative; z-index:3; display:grid; gap:8px; margin:12px 13px 0;
-  pointer-events:auto }
+.apply-form { position:relative; z-index:3; display:grid; grid-template-columns:minmax(0, 1fr);
+  gap:8px; margin:12px 13px 0; pointer-events:auto }
 .apply-form[hidden] { display:none }
 .apply-input { min-height:44px; padding:0 12px; border:1px solid var(--line-strong);
   border-radius:11px; color:var(--fg); background:var(--surface); font-size:16px }
 .apply-input::placeholder { color:var(--muted-2); opacity:1 }
 .apply-input:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
 .apply-submit { justify-self:start }
-.doc-field { display:grid; gap:6px; padding:8px; border:1px dashed var(--line-strong);
+.doc-field { display:grid; grid-template-columns:minmax(0, 1fr); gap:6px; min-width:0;
+  padding:8px; border:1px dashed var(--line-strong);
   border-radius:11px; transition:border-color .15s ease, background .15s ease }
 .doc-field.doc-dragover { border-color:var(--accent); background:var(--accent-soft) }
 .doc-label { color:var(--muted); font-size:.68rem; font-weight:700; letter-spacing:.03em;
   text-transform:uppercase }
-.doc-row { display:flex; gap:8px }
+.doc-row { display:flex; gap:8px; min-width:0 }
 .doc-select { flex:1; min-width:0 }
-.doc-upload-btn { flex:none; min-height:44px; padding:0 14px; border:1px solid var(--line);
-  border-radius:11px; color:var(--fg); background:var(--surface); font-size:.71rem; font-weight:700;
-  letter-spacing:.02em; cursor:pointer; transition:border-color .15s ease, background .15s ease }
-.doc-upload-btn:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
+.doc-icon-btn { flex:0 0 44px; width:44px; min-height:44px; display:grid; place-items:center;
+  padding:0; border:1px solid var(--line); border-radius:11px; color:var(--fg);
+  background:var(--surface); cursor:pointer;
+  transition:border-color .15s ease, background .15s ease, opacity .15s ease }
+.doc-icon-btn svg { width:19px; height:19px }
+.doc-icon-btn:disabled { opacity:.4; cursor:default }
+.doc-icon-btn:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
+@media (hover:hover) {
+  .doc-icon-btn:not(:disabled):hover { border-color:var(--line-strong); background:var(--surface-hover) }
+}
 .doc-label-prompt { display:flex; gap:8px }
 .doc-label-prompt[hidden] { display:none }
 .action-draft { color:var(--violet) }
-.draft-form { position:relative; z-index:3; display:grid; gap:8px; margin:12px 13px 0;
-  pointer-events:auto }
+.draft-form { position:relative; z-index:3; display:grid; grid-template-columns:minmax(0, 1fr);
+  gap:8px; margin:12px 13px 0; pointer-events:auto }
 .draft-form[hidden] { display:none }
 .draft-submit { justify-self:start }
 .draft-area { position:relative; z-index:3; display:flex; align-items:center; flex-wrap:wrap;
@@ -1629,7 +1696,10 @@ _JS = """\
       option.textContent = label;
     });
     const own = document.querySelector(`#apply-form-${matchId} select[data-doc-type="cover_letter"]`);
-    if (own) own.value = value;
+    if (own) {
+      own.value = value;
+      own.dispatchEvent(new Event('change'));
+    }
   };
   const pollDraft = matchId => {
     if (draftPolls.has(matchId)) return;
@@ -1699,6 +1769,16 @@ _JS = """\
     });
   });
 
+  [...document.querySelectorAll('.doc-preview-btn')].forEach(btn => {
+    const select = btn.closest('.doc-row').querySelector('select');
+    const sync = () => { btn.disabled = !select.value; };
+    select.addEventListener('change', sync);
+    sync();
+    btn.addEventListener('click', () => {
+      if (select.value) window.open(`/documents/${select.value}`, '_blank', 'noopener');
+    });
+  });
+
   const readAsBase64 = file => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(',', 2)[1] || '');
@@ -1738,6 +1818,7 @@ _JS = """\
     option.textContent = entry.label;
     select.append(option);
     select.value = String(entry.id);
+    select.dispatchEvent(new Event('change'));
     pendingUploads.delete(field);
     field.querySelector('.doc-label-prompt').hidden = true;
   };
