@@ -31,11 +31,16 @@ class OnboardingError(Exception):
     """Échec attendu de l'analyse ou de la validation de l'onboarding."""
 
 
+MAX_INTENTS = 4
+
+
 @dataclass(frozen=True)
 class CareerIntent:
     label: str
     keywords: list[str]
     exclude: list[str]
+    intent_id: int | None = None
+    search_id: int | None = None
 
 
 def profile_complete(conn: sqlite3.Connection, account_id: int) -> bool:
@@ -47,7 +52,7 @@ def profile_complete(conn: sqlite3.Connection, account_id: int) -> bool:
 
 def profile_intents(conn: sqlite3.Connection, account_id: int) -> list[CareerIntent]:
     rows = conn.execute(
-        "SELECT label, keywords_json, exclude_json FROM career_intent "
+        "SELECT id, label, keywords_json, exclude_json, search_id FROM career_intent "
         "WHERE account_id = ? AND active = 1 ORDER BY position, id",
         (account_id,),
     ).fetchall()
@@ -56,6 +61,8 @@ def profile_intents(conn: sqlite3.Connection, account_id: int) -> list[CareerInt
             label=str(row["label"]),
             keywords=list(json.loads(str(row["keywords_json"]))),
             exclude=list(json.loads(str(row["exclude_json"]))),
+            intent_id=int(row["id"]),
+            search_id=None if row["search_id"] is None else int(row["search_id"]),
         )
         for row in rows
     ]
@@ -98,7 +105,7 @@ def analyze_cv(
     return analyze_cvs(conn, config, [cv_library_id])
 
 
-def parse_intents(response: str) -> list[CareerIntent]:
+def parse_intents(response: str, *, truncate: bool = True) -> list[CareerIntent]:
     match = _JSON_FENCE_RE.search(response)
     text = match.group(1).strip() if match else response.strip()
     try:
@@ -108,13 +115,18 @@ def parse_intents(response: str) -> list[CareerIntent]:
     rows = payload.get("intents") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         raise OnboardingError("l'IA n'a pas renvoyé de pistes valides")
+    if not truncate and len(rows) > MAX_INTENTS:
+        raise OnboardingError(f"{MAX_INTENTS} catégories maximum")
     intents: list[CareerIntent] = []
-    for row in rows[:4]:
+    for row in rows[:MAX_INTENTS]:
         if not isinstance(row, dict):
             continue
         label = row.get("label")
         keywords = row.get("keywords")
         exclude = row.get("exclude", [])
+        intent_id = row.get("id")
+        if not isinstance(intent_id, int) or isinstance(intent_id, bool):
+            intent_id = None
         if not isinstance(label, str) or not label.strip():
             continue
         if not isinstance(keywords, list) or not all(
@@ -128,6 +140,7 @@ def parse_intents(response: str) -> list[CareerIntent]:
                 label=label.strip(),
                 keywords=list(dict.fromkeys(keyword.strip() for keyword in keywords))[:8],
                 exclude=list(dict.fromkeys(term.strip() for term in exclude if term.strip()))[:8],
+                intent_id=intent_id,
             )
         )
     if not intents:
@@ -143,19 +156,27 @@ def parse_intents(response: str) -> list[CareerIntent]:
     return intents
 
 
-def _sync_intent_searches(conn: sqlite3.Connection, intents: list[CareerIntent]) -> None:
-    searches = [
-        SearchConfig(name=intent.label, include=intent.keywords, exclude=intent.exclude)
-        for intent in intents
-    ]
-    names = {search.name for search in searches}
-    for search in searches:
+def _sync_intent_searches(conn: sqlite3.Connection, intents: list[CareerIntent]) -> list[int]:
+    """Aligne les recherches sur les catégories et renvoie leur id, dans l'ordre.
+
+    La recherche déjà rattachée à une catégorie est renommée sur place : les
+    matchs conservent leur recherche, donc le tri déjà fait par l'utilisateur.
+    """
+    search_ids: list[int] = []
+    for intent in intents:
+        search = SearchConfig(name=intent.label, include=intent.keywords, exclude=intent.exclude)
         include_json = json.dumps(search.include, ensure_ascii=True, separators=(",", ":"))
         exclude_json = json.dumps(search.exclude, ensure_ascii=True, separators=(",", ":"))
         locations_json = json.dumps(search.locations, ensure_ascii=True, separators=(",", ":"))
-        row = conn.execute("SELECT id FROM search WHERE name = ?", (search.name,)).fetchone()
+        row = None
+        if intent.search_id is not None:
+            row = conn.execute(
+                "SELECT id FROM search WHERE id = ?", (intent.search_id,)
+            ).fetchone()
         if row is None:
-            conn.execute(
+            row = conn.execute("SELECT id FROM search WHERE name = ?", (search.name,)).fetchone()
+        if row is None:
+            search_id = conn.execute(
                 "INSERT INTO search "
                 "(name, include_json, exclude_json, locations_json, contract, active) "
                 "VALUES (?, ?, ?, ?, ?, 1)",
@@ -166,23 +187,32 @@ def _sync_intent_searches(conn: sqlite3.Connection, intents: list[CareerIntent])
                     locations_json,
                     search.contract,
                 ),
-            )
+            ).lastrowid
         else:
+            search_id = int(row["id"])
+            clash = conn.execute(
+                "SELECT 1 FROM search WHERE name = ? AND id <> ?", (search.name, search_id)
+            ).fetchone()
+            if clash is not None:
+                raise OnboardingError(f"une recherche nommée « {search.name} » existe déjà")
             conn.execute(
-                "UPDATE search SET include_json = ?, exclude_json = ?, locations_json = ?, "
-                "contract = ?, active = 1 WHERE id = ?",
+                "UPDATE search SET name = ?, include_json = ?, exclude_json = ?, "
+                "locations_json = ?, contract = ?, active = 1 WHERE id = ?",
                 (
+                    search.name,
                     include_json,
                     exclude_json,
                     locations_json,
                     search.contract,
-                    int(row["id"]),
+                    search_id,
                 ),
             )
-    placeholders = ",".join("?" for _ in names)
+        search_ids.append(int(search_id))
+    placeholders = ",".join("?" for _ in search_ids)
     conn.execute(
-        f"UPDATE search SET active = 0 WHERE name NOT IN ({placeholders})", tuple(names)
+        f"UPDATE search SET active = 0 WHERE id NOT IN ({placeholders})", tuple(search_ids)
     )
+    return search_ids
 
 
 def sync_profile_searches(conn: sqlite3.Connection) -> bool:
@@ -193,12 +223,27 @@ def sync_profile_searches(conn: sqlite3.Connection) -> bool:
     ).fetchone()
     if account is None:
         return False
-    intents = profile_intents(conn, int(account["account_id"]))
+    account_id = int(account["account_id"])
+    intents = profile_intents(conn, account_id)
     if not intents:
         return False
-    _sync_intent_searches(conn, intents)
+    search_ids = _sync_intent_searches(conn, intents)
+    _store_intent_search_ids(conn, intents, search_ids)
     conn.commit()
     return True
+
+
+def _store_intent_search_ids(
+    conn: sqlite3.Connection, intents: list[CareerIntent], search_ids: list[int]
+) -> None:
+    conn.executemany(
+        "UPDATE career_intent SET search_id = ? WHERE id = ?",
+        [
+            (search_id, intent.intent_id)
+            for intent, search_id in zip(intents, search_ids)
+            if intent.intent_id is not None and intent.search_id != search_id
+        ],
+    )
 
 
 def complete_profile(
@@ -216,9 +261,25 @@ def complete_profile(
         raise OnboardingError("CV invalide")
     if len(cv_library_ids) != len(set(cv_library_ids)):
         raise OnboardingError("un même CV ne peut être sélectionné qu'une fois")
-    intents = parse_intents(json.dumps({"intents": rows}, ensure_ascii=False))
+    intents = parse_intents(json.dumps({"intents": rows}, ensure_ascii=False), truncate=False)
     conn.execute("BEGIN IMMEDIATE")
     try:
+        owned = {
+            int(row["id"]): (None if row["search_id"] is None else int(row["search_id"]))
+            for row in conn.execute(
+                "SELECT id, search_id FROM career_intent WHERE account_id = ?", (account_id,)
+            )
+        }
+        intents = [
+            CareerIntent(
+                label=intent.label,
+                keywords=intent.keywords,
+                exclude=intent.exclude,
+                intent_id=intent.intent_id,
+                search_id=owned.get(intent.intent_id) if intent.intent_id is not None else None,
+            )
+            for intent in intents
+        ]
         for cv_library_id in cv_library_ids:
             cv = conn.execute(
                 "SELECT id FROM document_library WHERE id = ? AND type = 'cv'", (cv_library_id,)
@@ -244,10 +305,11 @@ def complete_profile(
                 for position, cv_library_id in enumerate(cv_library_ids)
             ],
         )
+        search_ids = _sync_intent_searches(conn, intents)
         conn.execute("DELETE FROM career_intent WHERE account_id = ?", (account_id,))
         conn.executemany(
-            "INSERT INTO career_intent "
-            "(account_id, label, keywords_json, exclude_json, position) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO career_intent (account_id, label, keywords_json, exclude_json, "
+            "position, search_id) VALUES (?, ?, ?, ?, ?, ?)",
             [
                 (
                     account_id,
@@ -255,11 +317,11 @@ def complete_profile(
                     json.dumps(intent.keywords, ensure_ascii=False),
                     json.dumps(intent.exclude, ensure_ascii=False),
                     position,
+                    search_ids[position],
                 )
                 for position, intent in enumerate(intents)
             ],
         )
-        _sync_intent_searches(conn, intents)
         conn.commit()
     except (OnboardingError, sqlite3.Error):
         conn.rollback()

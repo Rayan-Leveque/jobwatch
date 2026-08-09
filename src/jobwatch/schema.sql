@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS career_intent (
   exclude_json TEXT NOT NULL DEFAULT '[]',
   position INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1,
+  search_id INTEGER REFERENCES search(id),
   UNIQUE(account_id, label)
 );
 CREATE INDEX IF NOT EXISTS idx_career_intent_account ON career_intent(account_id, position);

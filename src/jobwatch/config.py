@@ -141,7 +141,7 @@ class ResearchConfig:
     max_results: int = 50
 
 
-DRAFT_TRACKS = ("engineer", "project")
+DRAFT_TRACKS = ("engineer", "project", "all")
 
 
 @dataclass
@@ -154,8 +154,10 @@ class DraftConfig:
     codex_bin: str = "codex"
     # Effort de raisonnement : --variant OpenCode ou model_reasoning_effort codex.
     variant: str | None = None
-    # Lettres exemples .tex par piste métier ('engineer' | 'project') : elles
-    # donnent au LLM le format LaTeX et le ton des vraies lettres du candidat.
+    # Lettres exemples .tex par piste métier ('engineer' | 'project' | 'all') : elles
+    # donnent au LLM le format LaTeX et le ton des vraies lettres du candidat. Une
+    # instance personnalisée utilise la piste unifiée 'all', qui retombe sur la
+    # réunion des autres pistes quand elle n'est pas renseignée.
     examples: dict[str, list[Path]] = field(default_factory=dict)
 
 

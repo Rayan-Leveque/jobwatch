@@ -229,14 +229,19 @@ def _summarize_codex(
     # Le texte de l'offre passe par stdin (bloc <stdin> côté codex) : pas de
     # limite d'argument ni de fichier temporaire à faire lire au modèle. La
     # réponse finale est écrite par codex dans un fichier (-o), donc aucun
-    # parsing de log. Sandbox danger-full-access : le bwrap de codex exec est
-    # cassé dans ce conteneur, c'est le seul mode fonctionnel.
+    # parsing de log. Le texte vient d'une page tierce, donc non fiable :
+    # lecture seule, config utilisateur ignorée et outils désactivés.
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_path = Path(tmp_dir) / "reponse.txt"
         command = [
             config.codex_bin, "exec",
+            "--ignore-user-config",
+            "--disable", "shell_tool",
+            "--disable", "code_mode_host",
+            "--disable", "apps",
+            "--disable", "plugins",
             "--model", config.model,
-            "-s", "danger-full-access",
+            "-s", "read-only",
             "--skip-git-repo-check",
             "--ephemeral",
             "-o", str(out_path),

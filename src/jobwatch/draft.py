@@ -28,7 +28,7 @@ from pathlib import Path
 
 import httpx
 
-from jobwatch.config import DraftConfig
+from jobwatch.config import DRAFT_TRACKS, DraftConfig
 from jobwatch.db import connect
 from jobwatch.enrich import _extract_text, _fetch_and_extract
 from jobwatch.library import documents_dir
@@ -185,8 +185,15 @@ def _cv_text(conn: sqlite3.Connection, cv_library_id: int) -> str:
 
 
 def _example_texts(config: DraftConfig, track: str) -> list[str]:
+    paths = config.examples.get(track)
+    if not paths and track == "all":
+        paths = list(
+            dict.fromkeys(
+                path for key in DRAFT_TRACKS for path in config.examples.get(key, [])
+            )
+        )
     texts = []
-    for path in config.examples.get(track, []):
+    for path in paths or []:
         try:
             texts.append(path.read_text(encoding="utf-8"))
         except OSError as exc:
@@ -227,14 +234,19 @@ def _call_llm(config: DraftConfig, prompt: str, attachment: str) -> str:
 def _call_codex(config: DraftConfig, prompt: str, attachment: str) -> str:
     # Le bundle passe par stdin (bloc <stdin> côté codex) et la réponse finale
     # est écrite par codex dans un fichier (-o) : pas de limite d'argument ni
-    # de parsing de log. Sandbox danger-full-access : le bwrap de codex exec
-    # est cassé sur la machine cible, c'est le seul mode fonctionnel.
+    # de parsing de log. Le bundle contient du texte d'annonce scrapé, donc non
+    # fiable : lecture seule, config utilisateur ignorée et outils désactivés.
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_path = Path(tmp_dir) / "reponse.txt"
         command = [
             config.codex_bin, "exec",
+            "--ignore-user-config",
+            "--disable", "shell_tool",
+            "--disable", "code_mode_host",
+            "--disable", "apps",
+            "--disable", "plugins",
             "--model", config.model,
-            "-s", "danger-full-access",
+            "-s", "read-only",
             "--skip-git-repo-check",
             "--ephemeral",
             "-o", str(out_path),

@@ -1117,8 +1117,6 @@ def make_handler(
     requête dans un thread dédié, et la page relit ainsi l'état le plus récent.
     """
 
-    onboarding_enabled = onboarding_enabled or onboarding_config is not None
-
     class Handler(BaseHTTPRequestHandler):
         server_version = "jobwatch"
 
@@ -1216,6 +1214,7 @@ def make_handler(
                 initial_intents = (
                     [
                         {
+                            "id": intent.intent_id,
                             "label": intent.label,
                             "keywords": intent.keywords,
                             "exclude": intent.exclude,
@@ -1256,12 +1255,15 @@ def make_handler(
             if path == "/draft/batch/status":
                 self._handle_batch_status()
                 return
+            if path in ("/", "/swipe"):
+                track = "engineer"
+            elif path in ("/po", "/po/swipe"):
+                track = "project"
+            else:
+                self._send_text(404, "404 Not Found\n")
+                return
             swipe = path in ("/swipe", "/po/swipe")
-            if (
-                path in ("/", "/po", "/swipe", "/po/swipe")
-                and session is not None
-                and onboarding_enabled
-            ):
+            if session is not None and onboarding_enabled:
                 conn = connect(db_path)
                 try:
                     needs_onboarding = not profile_complete(conn, session.account_id)
@@ -1270,15 +1272,7 @@ def make_handler(
                 if needs_onboarding:
                     self._redirect("/onboarding")
                     return
-            if session is not None and onboarding_enabled:
                 track = "all"
-            elif path in ("/", "/swipe"):
-                track = "engineer"
-            elif path in ("/po", "/po/swipe"):
-                track = "project"
-            else:
-                self._send_text(404, "404 Not Found\n")
-                return
             try:
                 conn = connect(db_path)
                 try:

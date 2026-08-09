@@ -563,5 +563,8 @@ def test_summarize_codex_builds_command_and_reads_output(monkeypatch) -> None:
     assert command[:2] == ["codex", "exec"]
     assert command[command.index("--model") + 1] == "gpt-5.6-luna"
     assert "model_reasoning_effort=max" in command
-    assert "-s" in command and command[command.index("-s") + 1] == "danger-full-access"
+    assert "-s" in command and command[command.index("-s") + 1] == "read-only"
+    assert "--ignore-user-config" in command
+    disabled = {command[index + 1] for index, item in enumerate(command) if item == "--disable"}
+    assert disabled == {"shell_tool", "code_mode_host", "apps", "plugins"}
     assert captured["input"] == "texte de l'offre"

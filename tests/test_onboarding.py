@@ -135,3 +135,60 @@ def test_onboarding_can_return_to_mode_choice() -> None:
         "csrf", initial_intents=[{"label": "Data", "keywords": ["ML"], "exclude": []}]
     )
     assert 'id="back-to-choice-upload"' in edit_page and 'type="button" hidden' in edit_page
+
+
+def test_renaming_a_category_keeps_existing_triage(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [{"label": "Data", "keywords": ["AI Engineer"], "exclude": []}],
+    )
+    match_id, search_id = conn.execute(
+        "SELECT m.id, m.search_id FROM match m JOIN search s ON s.id = m.search_id "
+        "WHERE s.name = 'Data'"
+    ).fetchone()
+    conn.execute("UPDATE match SET state = 'later' WHERE id = ?", (match_id,))
+    conn.commit()
+    intent_id = conn.execute(
+        "SELECT id FROM career_intent WHERE account_id = ?", (account_id,)
+    ).fetchone()[0]
+
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [{"id": intent_id, "label": "Data Science", "keywords": ["AI Engineer"], "exclude": []}],
+    )
+
+    rows = conn.execute(
+        "SELECT m.id, m.state, m.search_id FROM match m "
+        "JOIN search s ON s.id = m.search_id AND s.active = 1"
+    ).fetchall()
+    assert [(row["id"], row["state"], row["search_id"]) for row in rows] == [
+        (match_id, "later", search_id)
+    ]
+    assert conn.execute("SELECT name FROM search WHERE id = ?", (search_id,)).fetchone()[0] == (
+        "Data Science"
+    )
+    conn.close()
+
+
+def test_more_than_four_categories_are_rejected(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    with pytest.raises(OnboardingError, match="4 catégories maximum"):
+        complete_profile(
+            conn,
+            account_id,
+            workspace_id,
+            [cv_id],
+            [
+                {"label": f"Piste {index}", "keywords": ["AI"], "exclude": []}
+                for index in range(5)
+            ],
+        )
+    assert conn.execute("SELECT count(*) FROM career_intent").fetchone()[0] == 0
+    conn.close()
