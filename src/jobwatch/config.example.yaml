@@ -39,6 +39,7 @@ notify: {}
 #   opencode_bin: opencode              # binaire ou commande OpenCode
 #   model: opencode/deepseek-v4-flash-free
 #   variant: max                        # optionnel : effort de raisonnement (--variant OpenCode)
+#   concurrency: 4                      # optionnel : appels LLM de résumé simultanés (défaut 4)
 enrich: {}
 
 # draft : génération de lettre de motivation depuis le dashboard (bouton « Générer LM »).

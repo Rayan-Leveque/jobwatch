@@ -20,6 +20,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -279,29 +280,44 @@ def enrich(
 
     owned_client = client is None
     http_client = client if client is not None else httpx.Client(timeout=30.0)
+    # Les fetchs web restent séquentiels et espacés (politesse envers les sites) ;
+    # les appels LLM - qui dominent le temps total - partent en parallèle dans un
+    # pool, chaque résumé étant soumis dès que son texte est disponible. Toutes
+    # les écritures SQLite restent dans ce thread.
+    pool = ThreadPoolExecutor(max_workers=config.concurrency)
+    futures: dict[Future, int] = {}
     try:
-        for index, offer in enumerate(offers):
+        fetch_remaining = sum(1 for offer in offers if offer["content_status"] is None)
+        for offer in offers:
             offer_id = int(offer["id"])
             url = str(offer["url"])
             if offer["content_status"] is None:
+                fetch_remaining -= 1
                 markdown, fetch_method = _fetch_and_convert(url, http_client)
                 _store_content(conn, offer_id, markdown, fetch_method)
                 if markdown is None:
                     result.fetched_failed += 1
                     continue
                 result.fetched_ok += 1
-                # Le sommeil ne s'applique qu'aux offres réellement récupérées
-                # sur le web ; résumer un texte déjà en base ne martèle personne.
-                if index < len(offers) - 1:
+                futures[pool.submit(_summarize, config, markdown)] = offer_id
+                # Le sommeil ne s'applique qu'entre deux fetchs réels : résumer
+                # un texte déjà en base ne martèle personne.
+                if fetch_remaining > 0:
                     sleep(random.uniform(SLEEP_MIN_SECONDS, SLEEP_MAX_SECONDS))
             else:
                 row = conn.execute(
                     "SELECT markdown FROM offer_content WHERE offer_id = ?", (offer_id,)
                 ).fetchone()
                 markdown = str(row["markdown"]) if row and row["markdown"] else None
-                if markdown is None:
-                    continue
-            summarized = _summarize(config, markdown)
+                if markdown is not None:
+                    futures[pool.submit(_summarize, config, markdown)] = offer_id
+        for future in as_completed(futures):
+            offer_id = futures[future]
+            try:
+                summarized = future.result()
+            except Exception:  # un résumé qui plante ne doit pas emporter le run
+                log.exception("enrich: summary worker failed for offer %d", offer_id)
+                continue
             if summarized is None:
                 continue
             fields, bullets = summarized
@@ -311,6 +327,7 @@ def enrich(
             if fields_written:
                 result.fields_written += 1
     finally:
+        pool.shutdown(wait=False, cancel_futures=True)
         if owned_client:
             http_client.close()
 
