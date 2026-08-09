@@ -2102,6 +2102,10 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .batch-ring { width:19px; height:19px; flex:none; border-radius:50%;
   background:conic-gradient(var(--violet) calc(var(--batch-progress, 0) * 1%),
     var(--line-strong) 0) }
+/* l'anneau reste gris tant qu'aucune lettre n'est finie : la pulsation dit
+   que le lot tourne, là où un pourcentage à 0 paraîtrait figé */
+.batch-ring:not(.batch-ring-done) { animation:batch-pulse 1.7s ease-in-out infinite }
+@keyframes batch-pulse { 50% { opacity:.45 } }
 .batch-ring::after { content:""; display:block; width:11px; height:11px; margin:4px;
   border-radius:50%; background:var(--surface) }
 .batch-badge:hover .batch-ring::after { background:var(--surface-hover) }

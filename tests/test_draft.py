@@ -581,20 +581,20 @@ def test_swipe_done_offers_a_way_out(db_path: Path, tmp_path: Path) -> None:
     page = render_swipe_page(conn, draft_enabled=True)
     conn.close()
     assert 'class="card-action done-back" href="/"' in page
-    assert 'id="batch-pill"' in page
+    assert 'id="batch-badge"' in page
     assert 'id="batch-progress"' not in page
 
 
-def test_batch_pill_follows_to_the_dashboard(db_path: Path, tmp_path: Path) -> None:
-    """Le tableau de bord affiche la même pastille d'avancement, piste comprise."""
+def test_batch_badge_follows_to_the_dashboard(db_path: Path, tmp_path: Path) -> None:
+    """Le tableau de bord affiche le même badge d'avancement, piste comprise."""
     conn = _conn(db_path)
     _seed_match(conn)
     page = render_page(conn, track="project", draft_enabled=True)
     plain = render_page(conn)
     conn.close()
-    assert 'id="batch-pill"' in page
+    assert 'id="batch-badge"' in page
     assert 'data-track="project"' in page
-    assert 'id="batch-pill"' not in plain
+    assert 'id="batch-badge"' not in plain
 
 
 def test_http_swipe_routes(db_path: Path, tmp_path: Path) -> None:
