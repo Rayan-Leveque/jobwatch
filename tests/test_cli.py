@@ -174,6 +174,73 @@ def test_init_without_db_keeps_default_line(runner: CliRunner, tmp_path: Path, m
     assert opened == [Path("~/.local/share/jobwatch/jobwatch.db").expanduser()]
 
 
+def test_named_instance_init_and_run_use_isolated_xdg_paths(
+    runner: CliRunner, tmp_path: Path, monkeypatch
+) -> None:
+    config_home = tmp_path / "config"
+    data_home = tmp_path / "data"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+
+    init_result = runner.invoke(cli, ["--instance", "alice", "init"])
+    assert init_result.exit_code == 0, init_result.output
+    config = config_home / "jobwatch/instances/alice/config.yaml"
+    db = data_home / "jobwatch/instances/alice/jobwatch.db"
+    assert config.exists()
+    assert db.exists()
+    assert f"db: {db}" in config.read_text()
+
+    run_result = runner.invoke(cli, ["--instance", "alice", "run"])
+    assert run_result.exit_code == 0, run_result.output
+
+
+def test_named_instance_can_come_from_environment(
+    runner: CliRunner, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("JOBWATCH_INSTANCE", "bob")
+
+    result = runner.invoke(cli, ["init"])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "config/jobwatch/instances/bob/config.yaml").exists()
+    assert (tmp_path / "data/jobwatch/instances/bob/jobwatch.db").exists()
+
+
+def test_named_instance_rejects_path_traversal(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["--instance", "../alice", "init"])
+    assert result.exit_code == 2
+    assert "Invalid value for '--instance'" in result.output
+
+
+def test_migrate_storage_command_copies_external_library_file(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "instance" / "jobwatch.db"
+    config = _write_config(tmp_path, db_path)
+    db_path.parent.mkdir()
+    external = tmp_path / "legacy" / "cv.pdf"
+    external.parent.mkdir()
+    external.write_bytes(b"cv")
+    conn = connect(db_path)
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO document_library (type, label, file_path) VALUES ('cv', 'CV', ?)",
+        (str(external),),
+    )
+    conn.commit()
+    conn.close()
+
+    result = runner.invoke(cli, ["migrate-storage", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert "1 document(s) copié(s)" in result.output
+    conn = connect(db_path)
+    managed = Path(conn.execute("SELECT file_path FROM document_library").fetchone()[0])
+    conn.close()
+    assert managed.parent == db_path.parent / "documents"
+    assert managed.read_bytes() == b"cv"
+
+
 def test_run_with_no_sources_succeeds(runner: CliRunner, tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     config = _write_config(tmp_path, db_path)

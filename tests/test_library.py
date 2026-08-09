@@ -9,7 +9,14 @@ from pathlib import Path
 import pytest
 
 from jobwatch.db import connect, init_db
-from jobwatch.library import LibraryError, documents_dir, list_library, resolve_path, save_upload
+from jobwatch.library import (
+    LibraryError,
+    documents_dir,
+    list_library,
+    migrate_external_documents,
+    resolve_path,
+    save_upload,
+)
 
 
 @pytest.fixture()
@@ -117,3 +124,62 @@ def test_resolve_path_returns_none_for_mismatched_type(
     db_path = tmp_path / "jw.db"
     entry = save_upload(conn, db_path, "cv", "CV", "a.pdf", _b64(b"x"))
     assert resolve_path(conn, entry["id"], "cover_letter") is None
+
+
+def test_migrate_external_documents_copies_absolute_and_relative_paths(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "instance" / "jobwatch.db"
+    legacy_root = tmp_path / "legacy"
+    cv = legacy_root / "cv.pdf"
+    letter = legacy_root / "documents" / "letter.tex"
+    letter.parent.mkdir(parents=True)
+    cv.write_bytes(b"cv")
+    letter.write_bytes(b"letter")
+    conn.execute(
+        "INSERT INTO document_library (type, label, file_path) VALUES ('cv', 'CV', ?)",
+        (str(cv),),
+    )
+    conn.execute("INSERT INTO source (type, name) VALUES ('test', 'test')")
+    conn.execute("INSERT INTO company (name) VALUES ('Acme')")
+    conn.execute(
+        "INSERT INTO offer (source_id, company_id, title, url) VALUES (1, 1, 'IA', 'https://x')"
+    )
+    conn.execute("INSERT INTO application (offer_id) VALUES (1)")
+    conn.execute(
+        "INSERT INTO document (application_id, type, path) "
+        "VALUES (1, 'cover_letter', 'documents/letter.tex')"
+    )
+    conn.commit()
+
+    first = migrate_external_documents(conn, db_path, legacy_root)
+    assert first.copied == 2
+    assert first.missing == []
+    paths = [
+        Path(row[0])
+        for row in conn.execute(
+            "SELECT file_path FROM document_library UNION ALL SELECT path FROM document"
+        )
+    ]
+    assert all(path.parent == documents_dir(db_path) for path in paths)
+    assert {path.read_bytes() for path in paths} == {b"cv", b"letter"}
+
+    second = migrate_external_documents(conn, db_path, legacy_root)
+    assert second.copied == 0
+    assert second.already_managed == 2
+
+
+def test_migrate_external_documents_reports_missing_without_changing_path(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "instance" / "jobwatch.db"
+    conn.execute(
+        "INSERT INTO document_library (type, label, file_path) "
+        "VALUES ('cv', 'Absent', 'missing.pdf')"
+    )
+    conn.commit()
+
+    result = migrate_external_documents(conn, db_path, tmp_path / "legacy")
+    assert result.copied == 0
+    assert result.missing == ["missing.pdf"]
+    assert conn.execute("SELECT file_path FROM document_library").fetchone()[0] == "missing.pdf"

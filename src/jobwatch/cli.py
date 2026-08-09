@@ -16,7 +16,9 @@ from jobwatch.config import Config, ConfigError, example_config_text, load_confi
 from jobwatch.db import connect, init_db
 from jobwatch.digest import send_digest
 from jobwatch.enrich import EnrichError, enrich
+from jobwatch.library import migrate_external_documents
 from jobwatch.matching import run_matching, sync_searches
+from jobwatch.paths import INSTANCE_ENV, instance_paths, validate_instance_name
 from jobwatch.serve import ServeError, serve_http
 
 logger = logging.getLogger(__name__)
@@ -37,9 +39,31 @@ def _fatal(message: str) -> None:
     raise SystemExit(1)
 
 
+def _instance_option(
+    _ctx: click.Context, _param: click.Parameter, value: str | None
+) -> str | None:
+    if value is None:
+        return None
+    try:
+        return validate_instance_name(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
+
+
+def _current_instance() -> str | None:
+    context = click.get_current_context(silent=True)
+    if context is None:
+        return None
+    value = context.find_root().params.get("instance")
+    return str(value) if value else None
+
+
 def _resolve_config_path(explicit: str | None) -> Path:
     if explicit is not None:
         return Path(explicit)
+    instance = _current_instance()
+    if instance is not None:
+        return instance_paths(instance).config
     local = Path(DEFAULT_CONFIG)
     if local.exists():
         return local
@@ -66,8 +90,14 @@ def _open_db(config: Config) -> sqlite3.Connection:
 
 
 @click.group()
+@click.option(
+    "--instance",
+    envvar=INSTANCE_ENV,
+    callback=_instance_option,
+    help="instance isolée à utiliser (équivalent : JOBWATCH_INSTANCE)",
+)
 @click.version_option(version=__version__, message="jw, version %(version)s")
-def cli() -> None:
+def cli(instance: str | None) -> None:
     """jobwatch : observateur d'offres d'emploi auto-hébergé."""
 
 
@@ -82,16 +112,19 @@ def cli() -> None:
 )
 def init(config_path: Path | None, db_path: Path | None) -> None:
     """Crée un fichier config.yaml et une base de données vide, puis affiche les prochaines étapes."""
-    target = config_path or Path(DEFAULT_CONFIG)
+    instance = _current_instance()
+    paths = instance_paths(instance) if instance is not None else None
+    target = config_path or (paths.config if paths is not None else Path(DEFAULT_CONFIG))
     if target.exists():
         _fatal(f"refus d'écraser la config existante {target}")
 
     text = example_config_text()
-    if db_path is not None:
+    target_db = db_path or (paths.db if paths is not None else None)
+    if target_db is not None:
         default_db_line = "db: ~/.local/share/jobwatch/jobwatch.db"
         if default_db_line not in text:
             _fatal("ligne db par défaut introuvable dans la config d'exemple")
-        text = text.replace(default_db_line, f"db: {db_path}", 1)
+        text = text.replace(default_db_line, f"db: {target_db}", 1)
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -239,6 +272,30 @@ def import_summaries(config_path: Path | None, path: Path) -> None:
         f"{result.summaries_unchanged} inchangé(s), "
         f"{result.bullets_written} puce(s) écrite(s)"
     )
+
+
+@cli.command("migrate-storage")
+@click.option(
+    "--source-root",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="racine des anciens chemins relatifs, par exemple l'ancien workspace Postuler",
+)
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def migrate_storage(config_path: Path | None, source_root: Path | None) -> None:
+    """Copie les documents externes dans le stockage géré par jobwatch."""
+    config = _require_config(config_path)
+    conn = _open_db(config)
+    try:
+        result = migrate_external_documents(conn, config.db, source_root)
+    finally:
+        conn.close()
+    click.echo(
+        f"{result.copied} document(s) copié(s), "
+        f"{result.already_managed} déjà géré(s), {len(result.missing)} introuvable(s)"
+    )
+    for path in result.missing:
+        click.echo(f"avertissement : document introuvable : {path}", err=True)
 
 
 @cli.command("list")
