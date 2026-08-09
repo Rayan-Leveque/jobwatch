@@ -140,3 +140,31 @@ def test_login_throttle_resets_old_window(conn: sqlite3.Connection) -> None:
         "SELECT failures, blocked_until FROM login_throttle WHERE key_hash = ?", (key,)
     ).fetchone()
     assert (row["failures"], row["blocked_until"]) == (1, None)
+
+
+def test_invite_refuses_a_second_owner_email(tmp_path) -> None:
+    conn = connect(":memory:")
+    init_db(conn)
+    token = create_invite(conn, "alice", "alice@example.com")
+    accept_invite(conn, token, "une très longue phrase secrète", workspace_slug="alice")
+
+    with pytest.raises(AuthError, match="alice@example.com"):
+        create_invite(conn, "alice", "bob@example.com")
+
+    assert conn.execute("SELECT count(*) FROM account").fetchone()[0] == 1
+    assert create_invite(conn, "alice", "ALICE@example.com")
+    conn.close()
+
+
+def test_invite_refuses_a_second_pending_email(tmp_path) -> None:
+    conn = connect(":memory:")
+    init_db(conn)
+    create_invite(conn, "alice", "alice@example.com")
+
+    with pytest.raises(AuthError, match="alice@example.com"):
+        create_invite(conn, "alice", "bob@example.com")
+
+    assert conn.execute(
+        "SELECT count(*) FROM account_invite WHERE email = 'bob@example.com'"
+    ).fetchone()[0] == 0
+    conn.close()

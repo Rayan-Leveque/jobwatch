@@ -280,7 +280,7 @@ def test_category_name_taken_by_a_foreign_search_is_rejected(tmp_path) -> None:
     )
     intent_id = conn.execute("SELECT id FROM career_intent").fetchone()[0]
 
-    with pytest.raises(OnboardingError, match="existe déjà"):
+    with pytest.raises(OnboardingError, match="déjà le nom"):
         complete_profile(
             conn,
             account_id,
@@ -477,7 +477,7 @@ def test_category_name_owned_by_another_account_is_rejected(tmp_path) -> None:
         "SELECT search_id FROM career_intent WHERE account_id = ?", (other_id,)
     ).fetchone()[0]
 
-    with pytest.raises(OnboardingError, match="existe déjà"):
+    with pytest.raises(OnboardingError, match="déjà le nom"):
         complete_profile(
             conn,
             account_id,
@@ -495,4 +495,27 @@ def test_category_name_owned_by_another_account_is_rejected(tmp_path) -> None:
     assert conn.execute(
         "SELECT count(*) FROM career_intent WHERE account_id = ?", (account_id,)
     ).fetchone()[0] == 0
+    conn.close()
+
+
+def test_config_search_is_not_adopted_by_a_category_of_the_same_name(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    before = conn.execute("SELECT id, include_json FROM search WHERE name = 'historique'").fetchone()
+
+    with pytest.raises(OnboardingError, match="déjà le nom"):
+        complete_profile(
+            conn,
+            account_id,
+            workspace_id,
+            [cv_id],
+            [{"label": "historique", "keywords": ["AI Engineer"], "exclude": []}],
+        )
+
+    after = conn.execute(
+        "SELECT name, include_json, active FROM search WHERE id = ?", (before["id"],)
+    ).fetchone()
+    assert after["name"] == "historique"
+    assert json.loads(after["include_json"]) == ["PO"]
+    assert after["active"] == 1
+    assert conn.execute("SELECT count(*) FROM career_intent").fetchone()[0] == 0
     conn.close()

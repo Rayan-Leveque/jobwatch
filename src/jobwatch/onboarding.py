@@ -200,14 +200,6 @@ def _sync_intent_searches(
             (account_id,),
         )
     }
-    foreign = {
-        int(row["search_id"])
-        for row in conn.execute(
-            "SELECT DISTINCT search_id FROM career_intent "
-            "WHERE account_id <> ? AND search_id IS NOT NULL",
-            (account_id,),
-        )
-    }
     searches = [
         SearchConfig(name=intent.label, include=intent.keywords, exclude=intent.exclude)
         for intent in intents
@@ -221,12 +213,13 @@ def _sync_intent_searches(
                 "SELECT id FROM search WHERE id = ?", (intent.search_id,)
             ).fetchone()
         if row is None:
-            # Une recherche portée par la catégorie d'un autre compte n'est
-            # jamais reprise par son nom : elle est refusée plus bas.
+            # Seule une recherche déjà rattachée à une catégorie de ce compte est
+            # reprise par son nom : celles de config.yaml et du pont Markdown
+            # gardent leurs critères, et le nom est refusé plus bas.
             row = conn.execute(
                 "SELECT id FROM search WHERE name = ?", (search.name,)
             ).fetchone()
-            if row is not None and (int(row["id"]) in taken or int(row["id"]) in foreign):
+            if row is not None and (int(row["id"]) in taken or int(row["id"]) not in owned):
                 row = None
         search_id = None if row is None else int(row["id"])
         if search_id is not None:
@@ -245,7 +238,10 @@ def _sync_intent_searches(
             and int(clash["id"]) not in taken
             and int(clash["id"]) not in stale
         ):
-            raise OnboardingError(f"une recherche nommée « {search.name} » existe déjà")
+            raise OnboardingError(
+                f"« {search.name} » est déjà le nom d'une autre recherche de l'instance, "
+                "choisissez-en un autre"
+            )
 
     # Renommage en deux temps : sans nom provisoire, échanger deux noms de
     # catégories heurterait la contrainte d'unicité de search.name.
