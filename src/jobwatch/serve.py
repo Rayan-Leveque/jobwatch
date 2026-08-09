@@ -1,6 +1,8 @@
 """Tableau de bord web local servi par `jw serve`.
 
-La page est regénérée à chaque requête GET / depuis l'état actuel de la base.
+La page est regénérée à chaque requête GET depuis l'état actuel de la base,
+en deux onglets étanches par piste métier : GET / (Ingénieur IA) et GET /po
+(Chef de projet / PO, titres matchant PROJECT_TITLE_PATTERNS).
 Le rendu est pur (`render_page`) et le serveur HTTP n'utilise que la
 bibliothèque standard. Les actions HTTP (POST /match/<id>/later,
 /match/<id>/discard, /match/<id>/restore pour l'annulation et
@@ -66,7 +68,28 @@ def _short_date(value: str) -> str:
     return value
 
 
-def _matches(conn: sqlite3.Connection, state: str) -> list[sqlite3.Row]:
+# Deux onglets étanches : la piste « Chef de projet / PO » (track « project »)
+# regroupe offres et candidatures dont le titre contient un des motifs LIKE
+# ci-dessous (insensibles à la casse ASCII) ; l'onglet « Ingénieur IA »
+# (track « engineer », racine /) montre tout le reste.
+PROJECT_TITLE_PATTERNS = (
+    "%chef%de projet%",
+    "%chef%de produit%",
+    "%product owner%",
+    "%product manager%",
+)
+_PROJECT_TITLE_SQL = "(" + " OR ".join("o.title LIKE ?" for _ in PROJECT_TITLE_PATTERNS) + ")"
+TRACKS = ("engineer", "project")
+
+
+def _track_filter(track: str) -> str:
+    """Clause SQL restreignant une requête (alias offre `o`) à la piste demandée."""
+    if track == "project":
+        return f"AND {_PROJECT_TITLE_SQL} "
+    return f"AND NOT {_PROJECT_TITLE_SQL} "
+
+
+def _matches(conn: sqlite3.Connection, state: str, track: str) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
         "       s.name AS search_name, "
@@ -79,14 +102,15 @@ def _matches(conn: sqlite3.Connection, state: str) -> list[sqlite3.Row]:
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = ? AND (m.fit IS NULL OR m.fit != 'high') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+        f"{_track_filter(track)}"
         "ORDER BY CASE m.fit WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
         "         WHEN 'low' THEN 2 ELSE 3 END, "
         "         o.collected_at DESC, m.id DESC",
-        (state,),
+        (state, *PROJECT_TITLE_PATTERNS),
     ).fetchall()
 
 
-def _priority_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _priority_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
         "       s.name AS search_name, "
@@ -99,11 +123,13 @@ def _priority_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.fit = 'high' AND m.state IN ('new', 'seen') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
-        "ORDER BY o.collected_at DESC, m.id DESC"
+        f"{_track_filter(track)}"
+        "ORDER BY o.collected_at DESC, m.id DESC",
+        PROJECT_TITLE_PATTERNS,
     ).fetchall()
 
 
-def _later_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _later_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
         "       s.name AS search_name, "
@@ -116,13 +142,15 @@ def _later_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = 'later' AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+        f"{_track_filter(track)}"
         "ORDER BY CASE m.fit WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
         "         WHEN 'low' THEN 2 ELSE 3 END, "
-        "         o.collected_at DESC, m.id DESC"
+        "         o.collected_at DESC, m.id DESC",
+        PROJECT_TITLE_PATTERNS,
     ).fetchall()
 
 
-def _discarded_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _discarded_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
     """Matchs écartés depuis moins de 30 jours ; filtre d'affichage pur, jamais de suppression."""
     return conn.execute(
         "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
@@ -135,11 +163,13 @@ def _discarded_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = 'discarded' AND m.discarded_at > datetime('now', '-30 days') "
-        "ORDER BY m.discarded_at DESC, m.id DESC"
+        f"{_track_filter(track)}"
+        "ORDER BY m.discarded_at DESC, m.id DESC",
+        PROJECT_TITLE_PATTERNS,
     ).fetchall()
 
 
-def _applications(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _applications(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT a.id AS id, o.id AS offer_id, m.fit AS fit, c.name AS company, o.title AS title, "
         "       o.location AS location, o.contract AS contract, "
@@ -155,7 +185,9 @@ def _applications(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         "LEFT JOIN company c ON c.id = o.company_id "
         "LEFT JOIN match m ON m.id = a.match_id "
         "LEFT JOIN search s ON s.id = m.search_id "
-        "ORDER BY a.created_at DESC, a.id DESC"
+        f"WHERE 1=1 {_track_filter(track)}"
+        "ORDER BY a.created_at DESC, a.id DESC",
+        PROJECT_TITLE_PATTERNS,
     ).fetchall()
 
 
@@ -450,14 +482,14 @@ def _section(
     )
 
 
-def render_page(conn: sqlite3.Connection) -> str:
-    """Rend la page HTML complète depuis l'état actuel de la base."""
-    priority = _priority_matches(conn)
-    new = _matches(conn, "new")
-    seen = _matches(conn, "seen")
-    later = _later_matches(conn)
-    discarded = _discarded_matches(conn)
-    applied = _applications(conn)
+def render_page(conn: sqlite3.Connection, track: str = "engineer") -> str:
+    """Rend la page HTML complète d'un onglet depuis l'état actuel de la base."""
+    priority = _priority_matches(conn, track)
+    new = _matches(conn, "new", track)
+    seen = _matches(conn, "seen", track)
+    later = _later_matches(conn, track)
+    discarded = _discarded_matches(conn, track)
+    applied = _applications(conn, track)
     offer_ids = sorted(
         {int(row["offer_id"]) for row in (*priority, *new, *seen, *later, *discarded, *applied)}
     )
@@ -502,6 +534,7 @@ def render_page(conn: sqlite3.Connection) -> str:
         seen_count=len(seen) + priority_seen,
         applied_count=len(applied),
         stamp=stamp,
+        track=track,
     )
 
 
@@ -516,13 +549,18 @@ def make_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
         server_version = "jobwatch"
 
         def do_GET(self) -> None:
-            if urlsplit(self.path).path != "/":
+            path = urlsplit(self.path).path
+            if path == "/":
+                track = "engineer"
+            elif path == "/po":
+                track = "project"
+            else:
                 self._send_text(404, "404 Not Found\n")
                 return
             try:
                 conn = connect(db_path)
                 try:
-                    page = render_page(conn)
+                    page = render_page(conn, track)
                 finally:
                     conn.close()
             except sqlite3.Error as exc:
@@ -789,6 +827,15 @@ h1 span { color:var(--muted-2); font-weight:620 }
   color:var(--muted); font-size:.78rem }
 .live-dot { width:7px; height:7px; border-radius:50%; background:var(--accent);
   box-shadow:0 0 0 5px var(--accent-soft) }
+.track-tabs { display:grid; grid-template-columns:repeat(2, 1fr); gap:6px; margin:20px 0 0;
+  padding:5px; border:1px solid var(--line); border-radius:var(--radius-md);
+  background:var(--surface) }
+.track-tab { display:grid; place-items:center; min-height:40px; padding:0 10px;
+  border-radius:calc(var(--radius-md) - 5px); color:var(--muted); font-size:.73rem;
+  font-weight:790; letter-spacing:.05em; text-transform:uppercase; text-decoration:none;
+  transition:color .18s ease, background .18s ease }
+.track-tab.active { color:var(--accent-ink); background:var(--accent);
+  box-shadow:0 0 0 4px var(--accent-soft) }
 .stats { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin:24px 0 22px }
 .stat { min-width:0; padding:14px 13px 13px; border:1px solid var(--line); border-radius:var(--radius-md);
   background:linear-gradient(145deg, var(--surface-2), var(--surface)); box-shadow:var(--card-shadow) }
@@ -1256,7 +1303,24 @@ _JS = """\
 """
 
 
-def _page_template(*, body, total, new_count, seen_count, applied_count, stamp) -> str:
+_TRACK_TABS = (
+    ("engineer", "/", "Ingénieur IA"),
+    ("project", "/po", "Chef de projet / PO"),
+)
+
+
+def _track_nav(track: str) -> str:
+    links = []
+    for key, href, label in _TRACK_TABS:
+        current = ' aria-current="page"' if key == track else ""
+        links.append(
+            f'<a class="track-tab{" active" if key == track else ""}" '
+            f'href="{href}"{current}>{html.escape(label)}</a>'
+        )
+    return f'<nav class="track-tabs" aria-label="Piste métier">{"".join(links)}</nav>'
+
+
+def _page_template(*, body, total, new_count, seen_count, applied_count, stamp, track) -> str:
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="dark"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -1300,6 +1364,7 @@ def _page_template(*, body, total, new_count, seen_count, applied_count, stamp) 
       <p class="hero-meta"><span class="live-dot" aria-hidden="true"></span>
         Mis à jour le {stamp}</p>
     </div>
+    {_track_nav(track)}
     <div class="stats" aria-label="Vue d'ensemble">
       <div class="stat stat-new"><span class="stat-value">{new_count}</span><span class="stat-label">Nouveaux matchs</span></div>
       <div class="stat stat-seen"><span class="stat-value">{seen_count}</span><span class="stat-label">Vus</span></div>

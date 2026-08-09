@@ -111,6 +111,11 @@ Playwright nécessite l'installation ponctuelle de son navigateur Chromium :
 ## Tableau de bord local
 
 `jw serve` sert un tableau de bord qui relit la base SQLite à chaque chargement de page.
+Le tableau de bord est découpé en deux onglets étanches par piste métier : `Ingénieur IA`
+sur `/` et `Chef de projet / PO` sur `/po`. Toute offre ou candidature dont le titre
+contient « chef de projet », « chef de produit », « product owner » ou « product manager »
+n'apparaît que dans l'onglet `Chef de projet / PO` ; l'onglet `Ingénieur IA` montre tout le
+reste. Chaque onglet porte ses propres sections et compteurs.
 La section `Priorité haute` regroupe les matchs high avant `Nouveaux matchs` et `Vus`; les
 cartes high disposant d'un résumé affichent un bloc `En bref`, repliable en cliquant sur la
 carte ou au clavier. Indépendamment du fit ou d'un résumé, toute carte dont l'offre a un
