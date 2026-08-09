@@ -1728,6 +1728,9 @@ def make_handler(
                 except OnboardingError as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
+                except sqlite3.Error as exc:
+                    self._send_json(500, {"error": f"erreur base de données : {exc}"})
+                    return
             finally:
                 conn.close()
             self._send_json(200, {"ok": True, "count": len(intents)})

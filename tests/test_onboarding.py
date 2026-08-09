@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import sqlite3
+
 import pytest
 
 from jobwatch.db import connect, init_db
@@ -64,7 +67,7 @@ def test_complete_profile_persists_active_searches_and_matches(tmp_path) -> None
         row["name"]: row["active"]
         for row in conn.execute("SELECT name, active FROM search ORDER BY id")
     }
-    assert searches == {"historique": 0, "Ingénierie IA": 1}
+    assert searches == {"historique": 1, "Ingénierie IA": 1}
     assert conn.execute(
         "SELECT count(*) FROM match m JOIN search s ON s.id = m.search_id "
         "WHERE s.name = 'Ingénierie IA'"
@@ -85,12 +88,12 @@ def test_profile_search_sync_restores_category_after_config_sync(tmp_path) -> No
         [cv_id],
         [{"label": "Data", "keywords": ["AI Engineer"], "exclude": []}],
     )
-    conn.execute("UPDATE search SET active = 1 WHERE name = 'historique'")
+    conn.execute("UPDATE search SET active = 0 WHERE name = 'Data'")
     conn.commit()
 
     assert sync_profile_searches(conn) is True
-    assert conn.execute("SELECT active FROM search WHERE name = 'historique'").fetchone()[0] == 0
     assert conn.execute("SELECT active FROM search WHERE name = 'Data'").fetchone()[0] == 1
+    assert conn.execute("SELECT active FROM search WHERE name = 'historique'").fetchone()[0] == 1
     conn.close()
 
 
@@ -166,7 +169,8 @@ def test_renaming_a_category_keeps_existing_triage(tmp_path) -> None:
 
     rows = conn.execute(
         "SELECT m.id, m.state, m.search_id FROM match m "
-        "JOIN search s ON s.id = m.search_id AND s.active = 1"
+        "JOIN search s ON s.id = m.search_id AND s.active = 1 WHERE m.search_id = ?",
+        (search_id,),
     ).fetchall()
     assert [(row["id"], row["state"], row["search_id"]) for row in rows] == [
         (match_id, "later", search_id)
@@ -191,4 +195,137 @@ def test_more_than_four_categories_are_rejected(tmp_path) -> None:
             ],
         )
     assert conn.execute("SELECT count(*) FROM career_intent").fetchone()[0] == 0
+    conn.close()
+
+
+def test_removed_category_search_is_deactivated_but_others_are_kept(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [
+            {"label": "Data", "keywords": ["AI Engineer"], "exclude": []},
+            {"label": "Ops", "keywords": ["SRE"], "exclude": []},
+        ],
+    )
+    kept_id = conn.execute(
+        "SELECT id FROM career_intent WHERE label = 'Data'"
+    ).fetchone()[0]
+
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [{"id": kept_id, "label": "Data", "keywords": ["AI Engineer"], "exclude": []}],
+    )
+
+    searches = {
+        row["name"]: row["active"]
+        for row in conn.execute("SELECT name, active FROM search")
+    }
+    assert searches == {"historique": 1, "Data": 1, "Ops": 0}
+    conn.close()
+
+
+def test_swapping_two_category_names_is_accepted(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [
+            {"label": "Data", "keywords": ["AI Engineer"], "exclude": []},
+            {"label": "Ops", "keywords": ["SRE"], "exclude": []},
+        ],
+    )
+    intents = {
+        row["label"]: row["id"]
+        for row in conn.execute("SELECT id, label FROM career_intent")
+    }
+
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [
+            {"id": intents["Data"], "label": "Ops", "keywords": ["AI Engineer"], "exclude": []},
+            {"id": intents["Ops"], "label": "Data", "keywords": ["SRE"], "exclude": []},
+        ],
+    )
+
+    rows = {
+        row["name"]: json.loads(row["include_json"])
+        for row in conn.execute("SELECT name, include_json FROM search WHERE active = 1")
+    }
+    assert rows["Ops"] == ["AI Engineer"]
+    assert rows["Data"] == ["SRE"]
+    conn.close()
+
+
+def test_category_name_taken_by_a_foreign_search_is_rejected(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [{"label": "Data", "keywords": ["AI"], "exclude": []}],
+    )
+    intent_id = conn.execute("SELECT id FROM career_intent").fetchone()[0]
+
+    with pytest.raises(OnboardingError, match="existe déjà"):
+        complete_profile(
+            conn,
+            account_id,
+            workspace_id,
+            [cv_id],
+            [{"id": intent_id, "label": "historique", "keywords": ["AI"], "exclude": []}],
+        )
+    assert conn.execute("SELECT name FROM search WHERE id = (SELECT search_id FROM career_intent)")\
+        .fetchone()[0] == "Data"
+    conn.close()
+
+
+def test_unnamed_category_is_rejected_instead_of_dropped(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    with pytest.raises(OnboardingError, match="nom"):
+        complete_profile(
+            conn,
+            account_id,
+            workspace_id,
+            [cv_id],
+            [
+                {"label": "Data", "keywords": ["AI"], "exclude": []},
+                {"label": "  ", "keywords": ["ML"], "exclude": []},
+            ],
+        )
+    assert conn.execute("SELECT count(*) FROM career_intent").fetchone()[0] == 0
+    conn.close()
+
+
+def test_matching_failure_after_save_keeps_the_profile(tmp_path, monkeypatch) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+
+    def boom(_conn):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("jobwatch.onboarding.run_matching", boom)
+    intents = complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [{"label": "Data", "keywords": ["AI Engineer"], "exclude": []}],
+    )
+
+    assert [intent.label for intent in intents] == ["Data"]
+    assert conn.execute(
+        "SELECT completed_at IS NOT NULL FROM candidate_profile WHERE account_id = ?",
+        (account_id,),
+    ).fetchone()[0] == 1
     conn.close()
