@@ -161,6 +161,25 @@ de confiance. Le tableau de bord expose et modifie vos offres et candidatures : 
 qui y a accès. Préférez l'accès local (`127.0.0.1`, le défaut) ou une adresse privée, et ne le
 publiez pas tel quel sur Internet.
 
+## Tri des offres (swipe)
+
+Quand un onglet contient de nouvelles offres, un bouton « Trier N nouvelles offres » mène à
+une interface de tri une-par-une (`/swipe` pour Ingénieur IA, `/po/swipe` pour Chef de
+projet / PO) : une carte plein écran par offre (titre, société, métadonnées, résumé, annonce
+complète dépliable, lien), les offres `fit high` d'abord. Flèche droite, bouton ✓ ou glisser
+vers la droite : l'offre part dans `À candidater` ; flèche gauche, bouton ✕ ou glisser vers la
+gauche : elle part dans la `Corbeille`. Flèche haut ou bouton ↩ annule le dernier geste et
+remet la carte sur le paquet.
+
+À la fin du paquet, un écran bilan récapitule la session et, si le bloc `draft` est configuré,
+propose de générer d'un coup les lettres de motivation de **toutes** les offres « À candidater »
+de la piste qui n'en ont pas encore (les échecs précédents sont réessayés, les lettres
+existantes ne sont pas régénérées) avec un CV choisi pour tout le lot. Les jobs partent en file
+(`status='queued'`, deux générations simultanées au plus) ; l'écran affiche l'avancement en
+direct et la génération continue côté serveur même si la page est fermée. Ouvrir `/swipe` avec
+un paquet vide mène directement à ce bilan, ce qui permet de lancer la génération groupée à
+tout moment.
+
 ## Génération de lettre de motivation
 
 Quand le bloc `draft` de `config.yaml` est renseigné, chaque carte (hors `Corbeille`) affiche un

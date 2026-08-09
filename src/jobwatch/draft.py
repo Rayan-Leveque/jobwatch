@@ -22,6 +22,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 import httpx
@@ -34,6 +35,10 @@ from jobwatch.library import documents_dir
 log = logging.getLogger(__name__)
 
 LLM_TIMEOUT_SECONDS = 300
+# Deux générations simultanées au plus : un batch post-tri de 15 lettres ne doit
+# pas lancer 15 sous-processus opencode + lualatex d'un coup sur le VPS.
+MAX_CONCURRENT_JOBS = 2
+_job_slots = threading.Semaphore(MAX_CONCURRENT_JOBS)
 COMPILE_TIMEOUT_SECONDS = 120
 REPAIR_ATTEMPTS = 2
 LOG_TAIL_CHARS = 3000
@@ -391,16 +396,24 @@ def run_job(db_path: Path, config: DraftConfig, job_id: int) -> None:
         log.exception("draft: connexion SQLite impossible pour le job %d", job_id)
         return
     try:
-        try:
-            job = conn.execute("SELECT * FROM draft_job WHERE id = ?", (job_id,)).fetchone()
-            if job is None:
-                raise DraftError(f"job {job_id} introuvable")
-            _run_job_inner(conn, db_path, config, job)
-        except DraftError as exc:
-            _finish_job(conn, job_id, status="failed", error=str(exc))
-        except Exception as exc:  # un bug ne doit jamais laisser un job bloqué en 'running'
-            log.exception("draft: échec inattendu du job %d", job_id)
-            _finish_job(conn, job_id, status="failed", error=f"erreur interne : {exc}")
+        with _job_slots:
+            try:
+                conn.execute(
+                    "UPDATE draft_job SET status = 'running' WHERE id = ? AND status = 'queued'",
+                    (job_id,),
+                )
+                conn.commit()
+                job = conn.execute(
+                    "SELECT * FROM draft_job WHERE id = ?", (job_id,)
+                ).fetchone()
+                if job is None:
+                    raise DraftError(f"job {job_id} introuvable")
+                _run_job_inner(conn, db_path, config, job)
+            except DraftError as exc:
+                _finish_job(conn, job_id, status="failed", error=str(exc))
+            except Exception as exc:  # un bug ne doit jamais laisser un job bloqué en 'running'
+                log.exception("draft: échec inattendu du job %d", job_id)
+                _finish_job(conn, job_id, status="failed", error=f"erreur interne : {exc}")
     finally:
         conn.close()
 

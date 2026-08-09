@@ -24,7 +24,7 @@ from jobwatch.draft import (
     render_pngs,
     run_job,
 )
-from jobwatch.serve import make_handler, render_page
+from jobwatch.serve import make_handler, render_page, render_swipe_page
 
 HAS_TEX = shutil.which("lualatex") is not None and shutil.which("pdftoppm") is not None
 
@@ -55,6 +55,8 @@ def _seed_match(
     company: str = "Acme",
     url: str = "https://example.com/offer",
     with_content: bool = True,
+    state: str = "new",
+    fit: str | None = None,
 ) -> int:
     conn.execute("INSERT OR IGNORE INTO source (type, name) VALUES ('test', 'test')")
     source_id = conn.execute("SELECT id FROM source WHERE name = 'test'").fetchone()["id"]
@@ -79,7 +81,8 @@ def _seed_match(
     )
     search_id = conn.execute("SELECT id FROM search WHERE name = 'test'").fetchone()["id"]
     cur = conn.execute(
-        "INSERT INTO match (search_id, offer_id) VALUES (?, ?)", (search_id, offer_id)
+        "INSERT INTO match (search_id, offer_id, state, fit) VALUES (?, ?, ?, ?)",
+        (search_id, offer_id, state, fit),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -491,3 +494,151 @@ def test_http_letter_files_served_after_job(db_path: Path, tmp_path: Path, monke
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+# ---------------------------------------------------------------- swipe & batch
+
+
+def test_render_swipe_page_orders_high_fit_first(db_path: Path, tmp_path: Path) -> None:
+    conn = _conn(db_path)
+    _seed_match(conn, title="Offre banale", url="https://example.com/a")
+    _seed_match(conn, title="Offre top", url="https://example.com/b", fit="high")
+    _seed_match(conn, title="Offre triée", url="https://example.com/c", state="later")
+    _seed_cv(conn, tmp_path)
+    page = render_swipe_page(conn, draft_enabled=True)
+    conn.close()
+    assert page.count("swipe-card") >= 2
+    assert page.index("Offre top") < page.index("Offre banale")
+    assert "Offre triée" not in page
+    assert 'id="batch-count">1<' in page  # la 'later' sans lettre est éligible
+
+
+def test_render_swipe_page_without_draft_config(db_path: Path) -> None:
+    conn = _conn(db_path)
+    _seed_match(conn)
+    page = render_swipe_page(conn)
+    conn.close()
+    assert "non configurée" in page
+    assert 'id="batch-btn"' not in page
+
+
+def test_http_swipe_routes(db_path: Path, tmp_path: Path) -> None:
+    server, thread = _start_server(db_path, _config(tmp_path))
+    try:
+        port = server.server_address[1]
+        for path in ("/swipe", "/po/swipe"):
+            status, body = _request(port, path)
+            assert status == 200
+            assert "swipe-stage" in body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_http_batch_creates_queued_jobs_for_eligible_only(
+    db_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+    conn = _conn(db_path)
+    eligible = _seed_match(conn, url="https://example.com/a", state="later")
+    failed_retry = _seed_match(conn, url="https://example.com/b", state="later")
+    already_ok = _seed_match(conn, url="https://example.com/c", state="later")
+    _seed_match(conn, url="https://example.com/d", state="new")
+    cv_id = _seed_cv(conn, tmp_path)
+    conn.execute(
+        "INSERT INTO draft_job (match_id, track, cv_library_id, status) "
+        "VALUES (?, 'engineer', ?, 'failed')",
+        (failed_retry, cv_id),
+    )
+    conn.execute(
+        "INSERT INTO draft_job (match_id, track, cv_library_id, status) "
+        "VALUES (?, 'engineer', ?, 'ok')",
+        (already_ok, cv_id),
+    )
+    conn.commit()
+    conn.close()
+
+    spawned: list[int] = []
+    monkeypatch.setattr(serve, "_spawn_draft_job", lambda db, cfg, job_id: spawned.append(job_id))
+    server, thread = _start_server(db_path, _config(tmp_path))
+    try:
+        port = server.server_address[1]
+        status, body = _request(
+            port, "/draft/batch", {"track": "engineer", "cv_library_id": cv_id}
+        )
+        assert status == 202
+        assert json.loads(body)["count"] == 2
+        assert len(spawned) == 2
+
+        conn = _conn(db_path)
+        queued = {
+            int(row["match_id"])
+            for row in conn.execute("SELECT match_id FROM draft_job WHERE status = 'queued'")
+        }
+        conn.close()
+        assert queued == {eligible, failed_retry}
+
+        # Relancer ne double pas les jobs : tout est déjà en file
+        status, body = _request(
+            port, "/draft/batch", {"track": "engineer", "cv_library_id": cv_id}
+        )
+        assert status == 202
+        assert json.loads(body)["count"] == 0
+
+        status, body = _request(port, "/draft/batch/status?track=engineer")
+        assert status == 200
+        counts = json.loads(body)
+        assert counts["queued"] == 2
+        assert counts["ok"] == 1
+
+        status, _ = _request(port, "/draft/batch/status?track=nope")
+        assert status == 400
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_http_batch_requires_config(db_path: Path) -> None:
+    server, thread = _start_server(db_path, None)
+    try:
+        status, _ = _request(
+            server.server_address[1], "/draft/batch",
+            {"track": "engineer", "cv_library_id": 1},
+        )
+        assert status == 503
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.skipif(not HAS_TEX, reason="lualatex/pdftoppm absents")
+def test_run_job_processes_queued_job(db_path: Path, tmp_path: Path, monkeypatch) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    cur = conn.execute(
+        "INSERT INTO draft_job (match_id, track, cv_library_id, status) "
+        "VALUES (?, 'engineer', ?, 'queued')",
+        (match_id, cv_id),
+    )
+    job_id = int(cur.lastrowid)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(draft, "_call_llm", lambda config, prompt, bundle: MINIMAL_TEX)
+    run_job(db_path, _config(tmp_path), job_id)
+
+    conn = _conn(db_path)
+    job = conn.execute("SELECT status FROM draft_job WHERE id = ?", (job_id,)).fetchone()
+    conn.close()
+    assert job["status"] == "ok"
+
+
+def test_render_page_shows_sort_link_only_with_new_offers(db_path: Path) -> None:
+    conn = _conn(db_path)
+    assert 'href="/swipe"' not in render_page(conn)
+    _seed_match(conn)
+    assert 'href="/swipe"' in render_page(conn)
+    conn.close()

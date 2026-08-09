@@ -268,6 +268,65 @@ def _draft_rows(conn: sqlite3.Connection, match_ids: list[int]) -> dict[int, sql
     return drafts
 
 
+def _swipe_deck(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
+    """Offres 'new' de la piste à trier : fit high d'abord, puis par date de collecte."""
+    return conn.execute(
+        "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
+        "       s.name AS search_name, c.name AS company, o.title AS title, "
+        "       o.location AS location, o.contract AS contract, o.platform AS platform, "
+        "       o.url AS url, o.collected_at AS collected_at, o.deadline AS deadline "
+        "FROM match m "
+        "JOIN search s ON s.id = m.search_id "
+        "JOIN offer o ON o.id = m.offer_id "
+        "LEFT JOIN company c ON c.id = o.company_id "
+        "WHERE m.state = 'new' AND NOT EXISTS "
+        "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+        f"{_track_filter(track)}"
+        "ORDER BY CASE WHEN m.fit = 'high' THEN 0 ELSE 1 END, "
+        "         o.collected_at DESC, m.id DESC",
+        PROJECT_TITLE_PATTERNS,
+    ).fetchall()
+
+
+# Cibles de la génération groupée : offres « À candidater » sans lettre générée
+# ni génération en cours (les échecs précédents sont réessayés).
+_BATCH_ELIGIBLE_SQL = (
+    "FROM match m "
+    "JOIN offer o ON o.id = m.offer_id "
+    "WHERE m.state = 'later' AND NOT EXISTS "
+    "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+    "AND NOT EXISTS (SELECT 1 FROM draft_job dj WHERE dj.match_id = m.id "
+    "                AND dj.status IN ('ok', 'running', 'queued')) "
+)
+
+
+def _batch_eligible_ids(conn: sqlite3.Connection, track: str) -> list[int]:
+    rows = conn.execute(
+        f"SELECT m.id AS id {_BATCH_ELIGIBLE_SQL}{_track_filter(track)}ORDER BY m.id",
+        PROJECT_TITLE_PATTERNS,
+    ).fetchall()
+    return [int(row["id"]) for row in rows]
+
+
+def _batch_status(conn: sqlite3.Connection, track: str) -> dict[str, int]:
+    """État du dernier job de chaque offre « À candidater » de la piste."""
+    rows = conn.execute(
+        "SELECT (SELECT dj.status FROM draft_job dj WHERE dj.match_id = m.id "
+        "        ORDER BY dj.id DESC LIMIT 1) AS status "
+        "FROM match m "
+        "JOIN offer o ON o.id = m.offer_id "
+        "WHERE m.state = 'later' AND NOT EXISTS "
+        "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+        f"{_track_filter(track)}",
+        PROJECT_TITLE_PATTERNS,
+    ).fetchall()
+    counts = {"queued": 0, "running": 0, "ok": 0, "failed": 0, "none": 0}
+    for row in rows:
+        status = str(row["status"]) if row["status"] in counts else "none"
+        counts[status] += 1
+    return counts
+
+
 def _link(url: object) -> str:
     """Renvoie le lien de l'offre si son schéma est http/https, sinon rien."""
     value = str(url or "")
@@ -500,6 +559,11 @@ def _draft_status_html(match_id: int, job: sqlite3.Row | None) -> str:
     if job is None:
         return ""
     status = str(job["status"])
+    if status == "queued":
+        return (
+            '<span class="draft-spinner" aria-hidden="true"></span>'
+            "<span>Lettre en file d'attente…</span>"
+        )
     if status == "running":
         return (
             '<span class="draft-spinner" aria-hidden="true"></span>'
@@ -726,6 +790,14 @@ def render_page(
     )
     priority_new = sum(row["state"] == "new" for row in priority)
     priority_seen = len(priority) - priority_new
+    deck_count = priority_new + len(new)
+    if deck_count:
+        swipe_href = "/swipe" if track == "engineer" else "/po/swipe"
+        offres = "offres" if deck_count > 1 else "offre"
+        body = (
+            f'<a class="sort-link" href="{swipe_href}">Trier {deck_count} '
+            f"nouvelle{'s' if deck_count > 1 else ''} {offres} →</a>\n" + body
+        )
     total = len(priority) + len(new) + len(seen) + len(later) + len(discarded) + len(applied)
     stamp = datetime.now(UTC).astimezone().strftime("%d/%m/%Y %H:%M")
     return _page_template(
@@ -735,6 +807,92 @@ def render_page(
         applied_count=len(applied),
         stamp=stamp,
         track=track,
+    )
+
+
+def _swipe_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> str:
+    company = html.escape(str(row["company"] or "Société inconnue"))
+    title = html.escape(str(row["title"] or ""))
+    pill = _fit_pill(row["fit"])
+    meta = _meta(row, "collecté le", row["collected_at"], row["search_name"], row["deadline"])
+    summary = ""
+    if bullets:
+        items = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in bullets)
+        summary = (
+            '<div class="swipe-summary"><div class="summary-title">En bref</div>'
+            f"<ul>{items}</ul></div>"
+        )
+    content_html = ""
+    if content:
+        panel_id = f"swipe-content-{int(row['id'])}"
+        content_html = (
+            f'<button class="content-toggle swipe-content-toggle" type="button" '
+            f'aria-expanded="false" aria-controls="{panel_id}">Annonce complète'
+            '<span class="summary-chevron" aria-hidden="true"></span></button>'
+            f'<div class="content-panel" id="{panel_id}" hidden>{_markdown_to_html(content)}</div>'
+        )
+    return (
+        f'<article class="swipe-card" data-match-id="{int(row["id"])}">'
+        '<div class="swipe-card-scroll">'
+        f'<div class="card-topline"><div class="company">{company}</div>'
+        f'<div class="card-badges">{pill}</div></div>'
+        f'<div class="role">{title}</div>'
+        f'<div class="meta">{meta}</div>'
+        f"{summary}{content_html}"
+        "</div>"
+        '<div class="swipe-stamp stamp-right" aria-hidden="true">À candidater</div>'
+        '<div class="swipe-stamp stamp-left" aria-hidden="true">Écartée</div>'
+        "</article>"
+    )
+
+
+def render_swipe_page(
+    conn: sqlite3.Connection, track: str = "engineer", draft_enabled: bool = False
+) -> str:
+    """Rend la page de tri type swipe : une carte 'new' à la fois, bilan à la fin."""
+    deck = _swipe_deck(conn, track)
+    offer_ids = sorted({int(row["offer_id"]) for row in deck})
+    summaries = _summary_bullets(conn, offer_ids)
+    contents = _offer_contents(conn, offer_ids)
+    cards = "\n".join(
+        _swipe_card(
+            row,
+            summaries.get(int(row["offer_id"]), []),
+            contents.get(int(row["offer_id"])),
+        )
+        for row in deck
+    )
+    pending = len(_batch_eligible_ids(conn, track)) if draft_enabled else 0
+    cv_rows = list_library(conn, "cv") if draft_enabled else []
+    if draft_enabled and cv_rows:
+        options = "".join(
+            f'<option value="{int(r["id"])}">{html.escape(str(r["label"]))}</option>'
+            for r in cv_rows
+        )
+        batch = (
+            '<div class="batch-form">'
+            '<label class="doc-label" for="batch-cv">CV pour toutes les lettres</label>'
+            f'<select class="apply-input" id="batch-cv">{options}</select>'
+            '<button class="card-action batch-btn" id="batch-btn" type="button">'
+            f'Générer <span id="batch-count">{pending}</span> lettre(s)</button>'
+            "</div>"
+            '<div class="batch-progress" id="batch-progress" hidden>'
+            '<span class="draft-spinner" aria-hidden="true"></span><span></span></div>'
+        )
+    elif draft_enabled:
+        batch = (
+            '<p class="empty-note">Uploadez d\'abord un CV dans la bibliothèque '
+            "(formulaire Candidater du tableau de bord) pour générer les lettres.</p>"
+        )
+    else:
+        batch = (
+            '<p class="empty-note">Génération de lettres non configurée '
+            "(bloc 'draft' de config.yaml).</p>"
+        )
+    back_href = "/" if track == "engineer" else "/po"
+    return _swipe_page_template(
+        track=track, cards=cards, total=len(deck), pending=pending,
+        batch=batch, back_href=back_href,
     )
 
 
@@ -777,9 +935,13 @@ def make_handler(
             if document:
                 self._handle_document_file(int(document.group(1)))
                 return
-            if path == "/":
+            if path == "/draft/batch/status":
+                self._handle_batch_status()
+                return
+            swipe = path in ("/swipe", "/po/swipe")
+            if path in ("/", "/swipe"):
                 track = "engineer"
-            elif path == "/po":
+            elif path in ("/po", "/po/swipe"):
                 track = "project"
             else:
                 self._send_text(404, "404 Not Found\n")
@@ -787,13 +949,73 @@ def make_handler(
             try:
                 conn = connect(db_path)
                 try:
-                    page = render_page(conn, track, draft_enabled=draft_config is not None)
+                    render = render_swipe_page if swipe else render_page
+                    page = render(conn, track, draft_enabled=draft_config is not None)
                 finally:
                     conn.close()
             except sqlite3.Error as exc:
                 self._send_text(500, f"erreur base de données : {exc}\n")
                 return
             self._send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
+
+        def _handle_batch_status(self) -> None:
+            query = urlsplit(self.path).query
+            track = "engineer"
+            for part in query.split("&"):
+                if part.startswith("track="):
+                    track = part.removeprefix("track=")
+            if track not in TRACKS:
+                self._send_json(400, {"error": "champ track invalide"})
+                return
+            try:
+                conn = connect(db_path)
+                try:
+                    counts = _batch_status(conn, track)
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            self._send_json(200, counts)
+
+        def _handle_batch_post(self) -> None:
+            if draft_config is None:
+                self._send_json(
+                    503,
+                    {"error": "génération non configurée : renseignez le bloc 'draft' de config.yaml"},
+                )
+                return
+            body = self._read_json_body()
+            fields = body if isinstance(body, dict) else {}
+            cv_library_id = fields.get("cv_library_id")
+            track = fields.get("track")
+            if not isinstance(cv_library_id, int) or isinstance(cv_library_id, bool):
+                self._send_json(400, {"error": "champ cv_library_id invalide"})
+                return
+            if track not in TRACKS:
+                self._send_json(400, {"error": "champ track invalide"})
+                return
+            try:
+                conn = connect(db_path)
+                try:
+                    match_ids = _batch_eligible_ids(conn, track)
+                    job_ids = []
+                    for match_id in match_ids:
+                        cur = conn.execute(
+                            "INSERT INTO draft_job (match_id, track, cv_library_id, status) "
+                            "VALUES (?, ?, ?, 'queued')",
+                            (match_id, track, cv_library_id),
+                        )
+                        job_ids.append(int(cur.lastrowid))
+                    conn.commit()
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            for job_id in job_ids:
+                _spawn_draft_job(db_path, draft_config, job_id)
+            self._send_json(202, {"count": len(job_ids)})
 
         def _latest_draft(self, conn: sqlite3.Connection, match_id: int) -> sqlite3.Row | None:
             return conn.execute(
@@ -933,7 +1155,8 @@ def make_handler(
                         self._send_text(404, "404 Not Found\n")
                         return
                     running = conn.execute(
-                        "SELECT id FROM draft_job WHERE match_id = ? AND status = 'running'",
+                        "SELECT id FROM draft_job WHERE match_id = ? "
+                        "AND status IN ('running', 'queued')",
                         (match_id,),
                     ).fetchone()
                     if running is not None:
@@ -958,6 +1181,9 @@ def make_handler(
             path = urlsplit(self.path).path
             if path == _UPLOAD_PATH:
                 self._handle_upload()
+                return
+            if path == "/draft/batch":
+                self._handle_batch_post()
                 return
             draft_post = _DRAFT_POST_RE.match(path)
             if draft_post:
@@ -1711,7 +1937,7 @@ _JS = """\
         .then(resp => resp.ok ? resp.json() : null)
         .then(payload => {
           if (!payload) return;
-          if (payload.status !== 'running') {
+          if (payload.status !== 'running' && payload.status !== 'queued') {
             clearInterval(timer);
             draftPolls.delete(matchId);
           }
@@ -1724,7 +1950,7 @@ _JS = """\
     }, DRAFT_POLL_MS);
     draftPolls.set(matchId, timer);
   };
-  [...document.querySelectorAll('.draft-area[data-status="running"]')]
+  [...document.querySelectorAll('.draft-area[data-status="running"], .draft-area[data-status="queued"]')]
     .forEach(area => pollDraft(area.dataset.matchId));
   [...document.querySelectorAll('.draft-form')].forEach(form => {
     const select = form.elements.cv_library_id;
@@ -1941,4 +2167,314 @@ def _page_template(*, body, total, new_count, seen_count, applied_count, stamp, 
 </div>
 <script>
 {_JS}</script></body></html>
+"""
+
+
+_SWIPE_CSS = """\
+.sort-link { display:flex; align-items:center; justify-content:center; min-height:52px;
+  margin:0 0 14px; border:1px solid color-mix(in srgb, var(--violet) 40%, transparent);
+  border-radius:var(--radius-lg); color:var(--violet); background:var(--violet-soft);
+  font-size:.85rem; font-weight:750; text-decoration:none;
+  transition:background .15s ease, border-color .15s ease }
+@media (hover:hover) {
+  .sort-link:hover { border-color:var(--violet); background:color-mix(in srgb, var(--violet) 18%, transparent) }
+}
+.swipe-shell { position:relative; z-index:1; display:flex; flex-direction:column;
+  width:min(100%, 560px); min-height:100vh; min-height:100dvh; margin:0 auto;
+  padding:max(14px, env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right))
+  calc(14px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left)) }
+.swipe-top { display:flex; align-items:center; justify-content:space-between; gap:10px;
+  margin-bottom:12px }
+.swipe-back { display:inline-flex; align-items:center; min-height:44px; padding:0 13px;
+  border:1px solid var(--line); border-radius:11px; color:var(--fg); background:var(--surface);
+  font-size:.76rem; font-weight:700; text-decoration:none }
+.swipe-count { color:var(--muted); font-size:.8rem; font-weight:700;
+  font-variant-numeric:tabular-nums }
+.swipe-stage { position:relative; flex:1; min-height:340px }
+.swipe-stage[hidden] { display:none }
+.swipe-card { position:absolute; inset:0; display:none; flex-direction:column;
+  padding:18px 16px 14px; border:1px solid var(--line-strong); border-radius:var(--radius-xl);
+  background:var(--surface); box-shadow:var(--shadow); overflow:hidden; touch-action:pan-y }
+.swipe-card.top { display:flex; z-index:2 }
+.swipe-card.next { display:flex; z-index:1; transform:scale(.955) translateY(10px);
+  opacity:.55; pointer-events:none }
+.swipe-card.leaving { display:flex; z-index:3; pointer-events:none;
+  transition:transform .28s ease, opacity .28s ease }
+.swipe-card-scroll { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch }
+.swipe-card .content-panel { margin:10px 0 0; padding:12px 0 0; pointer-events:auto }
+.swipe-card .content-toggle { margin:12px 0 0 }
+.swipe-summary { margin:14px 0 0; padding:12px 12px 11px; border:1px dashed var(--line-strong);
+  border-radius:12px }
+.swipe-summary ul { margin:8px 0 0; padding-left:18px; color:var(--muted); font-size:.8rem }
+.swipe-summary li + li { margin-top:5px }
+.swipe-stamp { position:absolute; top:16px; padding:6px 12px; border:2px solid;
+  border-radius:10px; font-size:.78rem; font-weight:850; letter-spacing:.06em;
+  text-transform:uppercase; opacity:0; pointer-events:none; background:var(--surface) }
+.stamp-right { left:12px; color:var(--accent); border-color:var(--accent);
+  transform:rotate(-12deg) }
+.stamp-left { right:12px; color:var(--danger); border-color:var(--danger);
+  transform:rotate(12deg) }
+.swipe-controls { display:flex; align-items:center; justify-content:center; gap:16px;
+  padding:16px 0 4px }
+.swipe-controls[hidden] { display:none }
+.swipe-btn { width:64px; height:64px; display:grid; place-items:center; padding:0;
+  border:1px solid var(--line-strong); border-radius:50%; background:var(--surface);
+  box-shadow:var(--card-shadow); cursor:pointer;
+  transition:transform .15s ease, background .15s ease, opacity .15s ease }
+.swipe-btn svg { width:26px; height:26px }
+.swipe-btn:active { transform:scale(.9) }
+.swipe-btn:disabled { opacity:.35; cursor:default }
+.swipe-btn:focus-visible { outline:3px solid var(--violet); outline-offset:3px }
+.swipe-btn-no { color:var(--danger) }
+.swipe-btn-yes { color:var(--accent) }
+.swipe-btn-undo { width:50px; height:50px; color:var(--muted) }
+.swipe-btn-undo svg { width:20px; height:20px }
+@media (hover:hover) { .swipe-btn:not(:disabled):hover { background:var(--surface-hover) } }
+.swipe-done { padding:22px 18px; border:1px solid var(--line); border-radius:var(--radius-xl);
+  background:var(--surface); box-shadow:var(--card-shadow) }
+.swipe-done[hidden] { display:none }
+.swipe-done h2 { margin:0 0 6px; font-size:1.35rem; font-weight:790; letter-spacing:-.03em }
+.done-stats { margin:0 0 16px; color:var(--muted); font-size:.85rem }
+.batch-form { display:grid; grid-template-columns:minmax(0, 1fr); gap:10px }
+.batch-btn { justify-self:start; gap:5px; color:var(--violet) }
+.batch-btn:disabled { opacity:.45; cursor:default }
+.batch-progress { display:flex; align-items:center; gap:9px; margin-top:14px;
+  color:var(--muted); font-size:.8rem }
+.batch-progress[hidden] { display:none }
+"""
+
+_SWIPE_JS = """\
+(function () {
+  const stage = document.getElementById('swipe-stage');
+  const cards = [...document.querySelectorAll('.swipe-card')];
+  const countEl = document.getElementById('swipe-count');
+  const controls = document.getElementById('swipe-controls');
+  const done = document.getElementById('swipe-done');
+  const undoBtn = document.getElementById('swipe-undo');
+  const track = document.body.dataset.track;
+  const pendingInitial = Number(document.body.dataset.pending || '0');
+  const total = cards.length;
+  let index = 0;
+  const history = [];
+  const session = {right: 0, left: 0};
+
+  const showDone = () => {
+    stage.hidden = true;
+    controls.hidden = true;
+    done.hidden = false;
+    document.getElementById('done-right').textContent = String(session.right);
+    document.getElementById('done-left').textContent = String(session.left);
+    const batchBtn = document.getElementById('batch-btn');
+    if (batchBtn && !batchBtn.dataset.started) {
+      const pending = pendingInitial + session.right;
+      document.getElementById('batch-count').textContent = String(pending);
+      batchBtn.disabled = pending === 0;
+    }
+  };
+  const hideDone = () => {
+    stage.hidden = false;
+    controls.hidden = false;
+    done.hidden = true;
+  };
+  const render = () => {
+    cards.forEach((card, i) => {
+      card.classList.toggle('top', i === index);
+      card.classList.toggle('next', i === index + 1);
+    });
+    countEl.textContent = `${Math.min(index + 1, total)} / ${total}`;
+    undoBtn.disabled = history.length === 0;
+    if (index >= total) showDone();
+  };
+
+  const act = dir => {
+    if (index >= total) return;
+    const card = cards[index];
+    const action = dir === 'right' ? 'later' : 'discard';
+    fetch(`/match/${card.dataset.matchId}/${action}`, {method: 'POST'}).then(resp => {
+      if (!resp.ok) location.reload();
+    });
+    history.push({index, dir});
+    session[dir] += 1;
+    index += 1;
+    card.classList.remove('top');
+    card.classList.add('leaving');
+    const sign = dir === 'right' ? 1 : -1;
+    requestAnimationFrame(() => {
+      card.style.transform = `translateX(${sign * 130}%) rotate(${sign * 14}deg)`;
+      card.style.opacity = '0';
+    });
+    setTimeout(() => {
+      card.classList.remove('leaving');
+      card.style.transform = '';
+      card.style.opacity = '';
+    }, 300);
+    render();
+  };
+
+  const undo = () => {
+    const last = history.pop();
+    if (!last) return;
+    if (index >= total) hideDone();
+    const card = cards[last.index];
+    session[last.dir] -= 1;
+    index = last.index;
+    fetch(`/match/${card.dataset.matchId}/restore`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({state: 'new'}),
+    }).then(resp => {
+      if (!resp.ok) location.reload();
+    });
+    render();
+  };
+
+  document.getElementById('swipe-no').addEventListener('click', () => act('left'));
+  document.getElementById('swipe-yes').addEventListener('click', () => act('right'));
+  undoBtn.addEventListener('click', undo);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight') { e.preventDefault(); act('right'); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); act('left'); }
+    else if (e.key === 'ArrowUp' || e.key === 'u') { e.preventDefault(); undo(); }
+  });
+
+  [...document.querySelectorAll('.swipe-content-toggle')].forEach(button => {
+    button.addEventListener('click', () => {
+      const expanded = button.getAttribute('aria-expanded') === 'true';
+      const panel = document.getElementById(button.getAttribute('aria-controls'));
+      button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+      if (panel) panel.hidden = expanded;
+    });
+  });
+
+  let drag = null;
+  const THRESHOLD = 80;
+  stage.addEventListener('pointerdown', e => {
+    if (index >= total) return;
+    const card = cards[index];
+    if (!card.contains(e.target) || e.target.closest('a, button')) return;
+    drag = {id: e.pointerId, x: e.clientX, dx: 0, card};
+    card.setPointerCapture(e.pointerId);
+  });
+  stage.addEventListener('pointermove', e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    drag.dx = e.clientX - drag.x;
+    drag.card.style.transform = `translateX(${drag.dx}px) rotate(${drag.dx / 22}deg)`;
+    const fade = Math.min(1, Math.max(0, (Math.abs(drag.dx) - 30) / 60));
+    drag.card.querySelector('.stamp-right').style.opacity = drag.dx > 0 ? fade : 0;
+    drag.card.querySelector('.stamp-left').style.opacity = drag.dx < 0 ? fade : 0;
+  });
+  const endDrag = e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const {card, dx} = drag;
+    drag = null;
+    card.querySelector('.stamp-right').style.opacity = '';
+    card.querySelector('.stamp-left').style.opacity = '';
+    if (dx > THRESHOLD) act('right');
+    else if (dx < -THRESHOLD) act('left');
+    else {
+      card.style.transition = 'transform .2s ease';
+      card.style.transform = '';
+      setTimeout(() => { card.style.transition = ''; }, 220);
+    }
+  };
+  stage.addEventListener('pointerup', endDrag);
+  stage.addEventListener('pointercancel', endDrag);
+
+  const batchBtn = document.getElementById('batch-btn');
+  if (batchBtn) {
+    const select = document.getElementById('batch-cv');
+    let savedCv = null;
+    try { savedCv = localStorage.getItem(`jw-cv-${track}`); } catch (_) {}
+    if (savedCv && [...select.options].some(o => o.value === savedCv)) select.value = savedCv;
+    const progress = document.getElementById('batch-progress');
+    const progressText = progress.querySelector('span:last-child');
+    let batchTimer = null;
+    const pollBatch = () => {
+      fetch(`/draft/batch/status?track=${track}`)
+        .then(resp => resp.ok ? resp.json() : null)
+        .then(payload => {
+          if (!payload) return;
+          const active = payload.queued + payload.running;
+          progress.hidden = false;
+          progressText.textContent =
+            `${payload.ok} générée(s) · ${payload.failed} échec(s) · ${active} en cours`;
+          if (active === 0 && batchTimer) {
+            clearInterval(batchTimer);
+            batchTimer = null;
+            progress.querySelector('.draft-spinner').hidden = true;
+            progressText.textContent += ' — terminé, les lettres sont sur le tableau de bord';
+          }
+        })
+        .catch(() => {});
+    };
+    batchBtn.addEventListener('click', () => {
+      if (!select.value) return;
+      try { localStorage.setItem(`jw-cv-${track}`, select.value); } catch (_) {}
+      batchBtn.disabled = true;
+      batchBtn.dataset.started = '1';
+      fetch('/draft/batch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({track, cv_library_id: Number(select.value)}),
+      }).then(resp => {
+        if (!resp.ok) { batchBtn.disabled = false; delete batchBtn.dataset.started; return; }
+        if (!batchTimer) batchTimer = setInterval(pollBatch, 3000);
+        pollBatch();
+      }).catch(() => {});
+    });
+  }
+
+  render();
+})();
+"""
+
+
+def _swipe_page_template(*, track, cards, total, pending, batch, back_href) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="fr" data-theme="dark"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#090b10">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>jobwatch · tri des offres</title>
+<script>
+(function () {{
+  try {{
+    const saved = localStorage.getItem('jw-theme');
+    document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
+  }} catch (_) {{
+    document.documentElement.dataset.theme = 'dark';
+  }}
+}})();
+</script>
+<style>
+{_CSS}{_SWIPE_CSS}</style></head>
+<body data-track="{track}" data-pending="{pending}">
+<div class="ambient" aria-hidden="true"></div>
+<div class="swipe-shell">
+  <div class="swipe-top">
+    <a class="swipe-back" href="{back_href}">← Tableau de bord</a>
+    <span class="swipe-count" id="swipe-count">1 / {total}</span>
+  </div>
+  <div class="swipe-stage" id="swipe-stage">
+{cards}
+  </div>
+  <div class="swipe-controls" id="swipe-controls">
+    <button class="swipe-btn swipe-btn-no" id="swipe-no" type="button" aria-label="Écarter (flèche gauche)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+    </button>
+    <button class="swipe-btn swipe-btn-undo" id="swipe-undo" type="button" aria-label="Annuler le dernier tri (flèche haut)" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+    </button>
+    <button class="swipe-btn swipe-btn-yes" id="swipe-yes" type="button" aria-label="À candidater (flèche droite)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg>
+    </button>
+  </div>
+  <section class="swipe-done" id="swipe-done" hidden aria-live="polite">
+    <h2>Tri terminé</h2>
+    <p class="done-stats"><span id="done-right">0</span> à candidater · <span id="done-left">0</span> écartée(s)</p>
+    {batch}
+  </section>
+</div>
+<script>
+{_SWIPE_JS}</script></body></html>
 """

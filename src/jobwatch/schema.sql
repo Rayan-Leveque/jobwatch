@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS draft_job (
   track TEXT NOT NULL,               -- 'engineer' | 'project' : choisit les lettres exemples
   cv_library_id INTEGER REFERENCES document_library(id),
   instruction TEXT,                  -- consigne libre de régénération ; NULL sinon
-  status TEXT NOT NULL DEFAULT 'running', -- 'running' | 'ok' | 'failed'
+  status TEXT NOT NULL DEFAULT 'running', -- 'queued' | 'running' | 'ok' | 'failed'
   error TEXT,                        -- message d'échec ; NULL si ok
   warning TEXT,                      -- ex. lettre générée sans le texte complet de l'offre
   tex_path TEXT,
