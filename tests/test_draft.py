@@ -815,3 +815,26 @@ def test_call_llm_codex_failure_raises_drafterror(monkeypatch) -> None:
     config = DraftConfig(model="m", runner="codex")
     with pytest.raises(DraftError, match="codex"):
         draft._call_llm(config, "prompt", "bundle")
+
+
+def test_call_opencode_denies_every_tool_and_ignores_user_config(monkeypatch) -> None:
+    """Le fichier opencode.json écrit à côté du bundle est le contrat lu par opencode."""
+    import subprocess as sp
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["permissions"] = json.loads(
+            (Path(kwargs["cwd"]) / "opencode.json").read_text(encoding="utf-8")
+        )
+        event = json.dumps({"type": "text", "part": {"text": MINIMAL_TEX}})
+        return sp.CompletedProcess(command, 0, stdout=event, stderr="")
+
+    monkeypatch.setattr("jobwatch.draft.subprocess.run", fake_run)
+    config = DraftConfig(model="m", runner="opencode")
+    text = draft._call_llm(config, "Rédige la lettre.", "# OFFRE\n\ncontenu")
+
+    assert text.strip() == MINIMAL_TEX.strip()
+    assert "--pure" in captured["command"]
+    assert captured["permissions"]["permission"] == {"*": "deny"}

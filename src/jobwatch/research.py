@@ -253,7 +253,9 @@ def _parse_result(text: str, max_results: int) -> ResearchResult:
     offers: list[RawOffer] = []
     fits: dict[str, str] = {}
     signatures: set[tuple[str, str]] = set()
-    for row in rows[:max_results]:
+    for row in rows:
+        if len(offers) >= max_results:
+            break
         if not isinstance(row, dict):
             continue
         title = row.get("title")

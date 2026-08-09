@@ -276,6 +276,23 @@ def _summarize_codex(
     return fields, _verified_quotes(quotes, markdown), bullets
 
 
+def write_opencode_denials(tmp_dir: Path) -> Path:
+    """Écrit un opencode.json qui refuse tout outil, à côté du prompt.
+
+    Le texte vient d'une page tierce : le modèle ne doit pouvoir ni lire, ni
+    écrire, ni exécuter quoi que ce soit, seulement répondre. Avec --pure, la
+    configuration utilisateur est ignorée et seul ce fichier s'applique.
+    """
+    path = tmp_dir / "opencode.json"
+    path.write_text(
+        json.dumps(
+            {"$schema": "https://opencode.ai/config.json", "permission": {"*": "deny"}}
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _summarize_opencode(
     config: EnrichConfig, markdown: str
 ) -> SummaryParts | None:
@@ -284,7 +301,8 @@ def _summarize_opencode(
     with tempfile.TemporaryDirectory() as tmp_dir:
         content_path = Path(tmp_dir) / "offer.md"
         content_path.write_text(markdown, encoding="utf-8")
-        command = [config.opencode_bin, "run", "--model", config.model]
+        write_opencode_denials(Path(tmp_dir))
+        command = [config.opencode_bin, "run", "--pure", "--model", config.model]
         if config.variant:
             command += ["--variant", config.variant]
         command += ["--format", "json", f"--file={content_path}", "--", SUMMARY_PROMPT]
