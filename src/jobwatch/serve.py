@@ -337,6 +337,18 @@ _BATCH_ELIGIBLE_SQL = (
 )
 
 
+_BATCH_PILL_HTML = (
+    '<div class="batch-pill" id="batch-pill" hidden aria-live="polite">'
+    '<span class="draft-spinner" id="batch-pill-spinner" aria-hidden="true"></span>'
+    '<span class="batch-pill-text" id="batch-pill-text"></span>'
+    '<button class="batch-pill-close" id="batch-pill-close" type="button" '
+    'aria-label="Masquer l\'avancement">'
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    'stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>'
+    "</button></div>"
+)
+
+
 def _batch_eligible_ids(conn: sqlite3.Connection, track: str) -> list[int]:
     rows = conn.execute(
         f"SELECT m.id AS id {_BATCH_ELIGIBLE_SQL}{_track_filter(track)}ORDER BY m.id",
@@ -857,6 +869,7 @@ def render_page(
         track=track,
         swipe_fab=swipe_fab,
         swipe_popup=swipe_popup,
+        batch_pill=_BATCH_PILL_HTML if draft_enabled else "",
     )
 
 
@@ -964,8 +977,6 @@ def render_swipe_page(
             '<button class="card-action batch-btn" id="batch-btn" type="button">'
             f'Générer <span id="batch-count">{pending}</span> lettre(s)</button>'
             "</div>"
-            '<div class="batch-progress" id="batch-progress" hidden>'
-            '<span class="draft-spinner" aria-hidden="true"></span><span></span></div>'
         )
     elif draft_enabled:
         batch = (
@@ -981,6 +992,7 @@ def render_swipe_page(
     return _swipe_page_template(
         track=track, cards=cards, total=len(deck), pending=pending,
         batch=batch, back_href=back_href,
+        batch_pill=_BATCH_PILL_HTML if draft_enabled else "",
     )
 
 
@@ -1746,6 +1758,20 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .draft-area { position:relative; z-index:3; display:flex; align-items:center; flex-wrap:wrap;
   gap:9px; margin:0 13px; pointer-events:auto; color:var(--muted); font-size:.75rem }
 .draft-area:not(:empty) { margin-top:12px }
+.batch-pill { position:fixed; z-index:40; display:flex; align-items:center; gap:9px;
+  right:calc(14px + env(safe-area-inset-right)); bottom:calc(14px + env(safe-area-inset-bottom));
+  max-width:min(300px, calc(100vw - 28px)); padding:11px 9px 11px 14px;
+  border:1px solid var(--line); border-radius:var(--radius-md);
+  background:var(--surface-2); box-shadow:var(--shadow); color:var(--fg);
+  font-size:.78rem; line-height:1.35;
+  /* laisse passer le glissement des cartes de tri, sauf sur la croix */
+  pointer-events:none }
+.batch-pill[hidden] { display:none }
+.batch-pill-text { min-width:0; overflow-wrap:anywhere }
+.batch-pill-close { display:flex; flex:none; padding:4px; border:0; border-radius:8px;
+  background:none; color:var(--muted-2); cursor:pointer; pointer-events:auto }
+.batch-pill-close svg { width:15px; height:15px }
+.batch-pill-close:hover { color:var(--fg); background:var(--surface-hover) }
 .draft-spinner { width:14px; height:14px; flex:none; border:2px solid var(--line-strong);
   border-top-color:var(--violet); border-radius:50%; animation:draft-spin .8s linear infinite }
 @keyframes draft-spin { to { transform:rotate(360deg) } }
@@ -1838,6 +1864,61 @@ a { color:var(--blue) }
   *, *::before, *::after { scroll-behavior:auto !important; animation:none !important; transition:none !important }
 }
 """
+
+_BATCH_PILL_JS = """\
+(function () {
+  const pill = document.getElementById('batch-pill');
+  if (!pill) return;
+  const spinner = document.getElementById('batch-pill-spinner');
+  const text = document.getElementById('batch-pill-text');
+  const track = document.body.dataset.track || 'engineer';
+  let timer = null;
+  let dismissed = false;
+
+  const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+  const poll = () => fetch(`/draft/batch/status?track=${track}`)
+    .then(resp => resp.ok ? resp.json() : null)
+    .then(payload => {
+      if (!payload) return;
+      const active = payload.queued + payload.running;
+      const failed = payload.failed ? ` · ${payload.failed} échec(s)` : '';
+      if (active > 0) {
+        if (!dismissed) pill.hidden = false;
+        spinner.hidden = false;
+        text.textContent =
+          `${payload.ok} lettre(s) prête(s) · ${active} en cours${failed}`;
+        if (!timer) timer = setInterval(poll, 3000);
+        return;
+      }
+      stop();
+      if (pill.hidden) return;
+      spinner.hidden = true;
+      text.textContent =
+        `Terminé — ${payload.ok} lettre(s) prête(s) sur le tableau de bord${failed}`;
+    })
+    .catch(() => {});
+
+  document.getElementById('batch-pill-close').addEventListener('click', () => {
+    dismissed = true;
+    pill.hidden = true;
+    stop();
+  });
+
+  window.jwBatchPill = {
+    poll,
+    start: () => {
+      dismissed = false;
+      pill.hidden = false;
+      spinner.hidden = false;
+      text.textContent = 'Génération lancée…';
+      if (!timer) timer = setInterval(poll, 3000);
+      poll();
+    },
+  };
+  poll();
+})();
+"""
+
 
 _JS = """\
 (function () {
@@ -2264,7 +2345,7 @@ def _track_nav(track: str) -> str:
 
 def _page_template(
     *, body, total, new_count, seen_count, applied_count, stamp, track,
-    swipe_fab="", swipe_popup="",
+    swipe_fab="", swipe_popup="", batch_pill="",
 ) -> str:
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="dark"><head><meta charset="utf-8">
@@ -2284,7 +2365,7 @@ def _page_template(
 }})();
 </script>
 <style>
-{_CSS}</style></head><body>
+{_CSS}</style></head><body data-track="{track}">
 <div class="ambient" aria-hidden="true"></div>
 <div class="shell">
   <header>
@@ -2342,8 +2423,10 @@ def _page_template(
   <footer class="footer">Lecture seule · données locales · base SQLite jobwatch</footer>
 </div>
 {swipe_popup}
+{batch_pill}
 <script>
-{_JS}</script></body></html>
+{_JS}
+{_BATCH_PILL_JS}</script></body></html>
 """
 
 
@@ -2407,9 +2490,9 @@ _SWIPE_CSS = """\
 .batch-form { display:grid; grid-template-columns:minmax(0, 1fr); gap:10px }
 .batch-btn { justify-self:start; gap:5px; color:var(--violet) }
 .batch-btn:disabled { opacity:.45; cursor:default }
-.batch-progress { display:flex; align-items:center; gap:9px; margin-top:14px;
-  color:var(--muted); font-size:.8rem }
-.batch-progress[hidden] { display:none }
+.done-back { display:inline-flex; margin-top:18px; text-decoration:none }
+/* remontée au-dessus des boutons de tri, qui occupent le bas de l'écran */
+.batch-pill { bottom:calc(108px + env(safe-area-inset-bottom)) }
 """
 
 _SWIPE_JS = """\
@@ -2555,27 +2638,6 @@ _SWIPE_JS = """\
     let savedCv = null;
     try { savedCv = localStorage.getItem(`jw-cv-${track}`); } catch (_) {}
     if (savedCv && [...select.options].some(o => o.value === savedCv)) select.value = savedCv;
-    const progress = document.getElementById('batch-progress');
-    const progressText = progress.querySelector('span:last-child');
-    let batchTimer = null;
-    const pollBatch = () => {
-      fetch(`/draft/batch/status?track=${track}`)
-        .then(resp => resp.ok ? resp.json() : null)
-        .then(payload => {
-          if (!payload) return;
-          const active = payload.queued + payload.running;
-          progress.hidden = false;
-          progressText.textContent =
-            `${payload.ok} générée(s) · ${payload.failed} échec(s) · ${active} en cours`;
-          if (active === 0 && batchTimer) {
-            clearInterval(batchTimer);
-            batchTimer = null;
-            progress.querySelector('.draft-spinner').hidden = true;
-            progressText.textContent += ' — terminé, les lettres sont sur le tableau de bord';
-          }
-        })
-        .catch(() => {});
-    };
     batchBtn.addEventListener('click', () => {
       if (!select.value) return;
       try { localStorage.setItem(`jw-cv-${track}`, select.value); } catch (_) {}
@@ -2587,8 +2649,7 @@ _SWIPE_JS = """\
         body: JSON.stringify({track, cv_library_id: Number(select.value)}),
       }).then(resp => {
         if (!resp.ok) { batchBtn.disabled = false; delete batchBtn.dataset.started; return; }
-        if (!batchTimer) batchTimer = setInterval(pollBatch, 3000);
-        pollBatch();
+        if (window.jwBatchPill) window.jwBatchPill.start();
       }).catch(() => {});
     });
   }
@@ -2598,7 +2659,9 @@ _SWIPE_JS = """\
 """
 
 
-def _swipe_page_template(*, track, cards, total, pending, batch, back_href) -> str:
+def _swipe_page_template(
+    *, track, cards, total, pending, batch, back_href, batch_pill=""
+) -> str:
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="dark"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -2642,8 +2705,11 @@ def _swipe_page_template(*, track, cards, total, pending, batch, back_href) -> s
     <h2>Tri terminé</h2>
     <p class="done-stats"><span id="done-right">0</span> à candidater · <span id="done-left">0</span> écartée(s)</p>
     {batch}
+    <a class="card-action done-back" href="{back_href}">← Retour au tableau de bord</a>
   </section>
 </div>
+{batch_pill}
 <script>
-{_SWIPE_JS}</script></body></html>
+{_SWIPE_JS}
+{_BATCH_PILL_JS}</script></body></html>
 """

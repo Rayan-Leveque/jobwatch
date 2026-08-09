@@ -573,6 +573,30 @@ def test_render_swipe_page_without_draft_config(db_path: Path) -> None:
     assert 'id="batch-btn"' not in page
 
 
+def test_swipe_done_offers_a_way_out(db_path: Path, tmp_path: Path) -> None:
+    """La fin du tri propose un retour explicite ; l'avancement part dans la pastille."""
+    conn = _conn(db_path)
+    _seed_match(conn)
+    _seed_cv(conn, tmp_path)
+    page = render_swipe_page(conn, draft_enabled=True)
+    conn.close()
+    assert 'class="card-action done-back" href="/"' in page
+    assert 'id="batch-pill"' in page
+    assert 'id="batch-progress"' not in page
+
+
+def test_batch_pill_follows_to_the_dashboard(db_path: Path, tmp_path: Path) -> None:
+    """Le tableau de bord affiche la même pastille d'avancement, piste comprise."""
+    conn = _conn(db_path)
+    _seed_match(conn)
+    page = render_page(conn, track="project", draft_enabled=True)
+    plain = render_page(conn)
+    conn.close()
+    assert 'id="batch-pill"' in page
+    assert 'data-track="project"' in page
+    assert 'id="batch-pill"' not in plain
+
+
 def test_http_swipe_routes(db_path: Path, tmp_path: Path) -> None:
     server, thread = _start_server(db_path, _config(tmp_path))
     try:
