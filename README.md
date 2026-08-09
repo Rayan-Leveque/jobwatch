@@ -92,7 +92,8 @@ ne coûtent aucun token. Pour chaque offre active sans texte stocké ou sans cha
    annonce, retente via Playwright (Chromium headless) et convertit la page rendue.
 4. Stocke le texte complet dans `offer_content`, avec son statut (`ok` ou `failed`) et sa méthode
    de récupération (`http` ou `playwright`).
-5. Génère un résumé structuré via `deepseek-v4-flash` appelé en subprocess OpenCode : quatre
+5. Génère un résumé structuré via le LLM configuré (runner `opencode` ou `codex`, en
+   subprocess, jusqu'à `concurrency` appels simultanés) : quatre
    champs fixes - Expérience souhaitée, Salaire, Télétravail, Stack, valeur « non précisé »
    quand l'annonce ne dit rien (table `summary_field`) - suivis de puces mission
    (`offer_summary`/`summary_bullet`, `source = 'auto'`). Les puces d'un résumé `manual`
