@@ -46,8 +46,11 @@ enrich: {}
 
 # draft : génération de lettre de motivation depuis le dashboard (bouton « Générer LM »).
 # Pour activer, supprimez la ligne « draft: {} » ci-dessous, puis décommentez et remplissez :
-#   opencode_bin: opencode              # binaire ou commande OpenCode
-#   model: opencode-go/gpt-5.6-luna     # modèle de rédaction (lettre destinée à un employeur)
+#   runner: opencode                    # opencode (API) ou codex (CLI codex exec, abonnement ChatGPT)
+#   opencode_bin: opencode              # binaire OpenCode (requis avec runner opencode)
+#   codex_bin: codex                    # binaire codex (runner codex)
+#   model: opencode-go/gpt-5.6-luna     # modèle de rédaction fort (lettre destinée à un employeur)
+#   variant: max                        # optionnel : effort de raisonnement
 #   examples:                           # lettres .tex existantes servant d'exemples de format et de ton
 #     engineer:
 #       - ~/lettres/exemple_ingenieur.tex

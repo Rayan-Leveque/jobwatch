@@ -200,7 +200,7 @@ lance un job en arrière-plan (table `draft_job`) :
 1. Le texte de l'offre est lu depuis `offer_content`, ou récupéré à la demande avec la mécanique
    de `jw enrich` (HTTP puis Playwright). Si la page est irrécupérable, la lettre est générée à
    partir du titre, de la société et du résumé, avec un avertissement affiché sur la carte.
-2. Le LLM (OpenCode, modèle du bloc `draft`) reçoit l'offre, le texte du CV choisi (extrait via
+2. Le LLM (bloc `draft` : runner `opencode` ou `codex`, comme pour `enrich`) reçoit l'offre, le texte du CV choisi (extrait via
    `pdftotext` pour un PDF) et les lettres exemples `.tex` de la piste métier de l'onglet, puis
    rédige le document LaTeX complet, sans image, daté du jour.
 3. Le `.tex` est compilé avec `lualatex` ; en cas d'erreur, le log est renvoyé au LLM pour
@@ -226,8 +226,8 @@ RAG »...) transmet la lettre précédente au modèle et remplace la même entr�
 | `searches` | Liste des recherches enregistrées. Chaque recherche a : `name` (identifiant unique), `include` (mots-clés, au moins un, correspondance insensible à la casse sur le titre), `exclude` (mots-clés, aucun), `locations` (correspondance par sous-chaîne sur la localisation de l'offre ; vide = n'importe où), `contract` (optionnel : `permanent`, `fixed_term`, `internship`, `other`). |
 | `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` (requête côté serveur) et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. |
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
-| `enrich` | Configuration de `jw enrich` : `opencode_bin` (binaire ou commande OpenCode) et `model` (identifiant de modèle OpenCode, ex. `opencode/deepseek-v4-flash-free`). Les deux clés sont requises dès que `enrich` n'est pas vide. |
-| `draft` | Génération de lettre de motivation depuis le tableau de bord : `opencode_bin` et `model` (modèle de rédaction, ex. `opencode-go/gpt-5.6-luna`), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. Requis dès que `draft` n'est pas vide. |
+| `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, ou `codex` pour passer par le CLI `codex exec` couvert par un abonnement ChatGPT), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (ex. `opencode/deepseek-v4-flash-free` ou `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). |
+| `draft` | Génération de lettre de motivation depuis le tableau de bord : `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. |
 
 Le filtre `locations` est une correspondance par sous-chaîne sur la localisation de l'offre :
 une offre située à « Puteaux » ou « Levallois-Perret » ne matche PAS une recherche avec
