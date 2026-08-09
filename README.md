@@ -57,7 +57,10 @@ données sous `~/.local/share/jobwatch/instances/<nom>/`. Les variables XDG sont
 Un `--config PATH` explicite reste prioritaire.
 `account invite` active l'authentification de l'instance et produit un chemin d'invitation
 propriétaire valable 48 heures. Ouvrez ce chemin sur le serveur de l'instance pour choisir le mot
-de passe. Les pages, documents et actions deviennent alors inaccessibles sans session. Le cookie
+de passe. Une instance n'accepte qu'une seule adresse propriétaire : offres, documents et
+candidatures y sont communs, donc une deuxième personne a besoin de sa propre `--instance`.
+Tant que l'invitation n'a pas été acceptée, la relancer avec une autre adresse remplace la
+précédente ; une fois le compte créé, l'adresse ne change plus. Les pages, documents et actions deviennent alors inaccessibles sans session. Le cookie
 est réservé à HTTPS par défaut. Pour un serveur HTTP strictement local ou privé, lancez
 explicitement `jw --instance alice serve --no-secure-cookie`; ne publiez jamais ce mode sur Internet.
 
@@ -323,7 +326,7 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `document` | Fichiers CV et lettre de motivation attachés à une candidature |
 | `document_library` | Bibliothèque de documents réutilisables (CV, lettres) du tableau de bord |
 | `draft_job` | Jobs de génération de lettre de motivation (état, fichiers produits, avertissements) |
-| `workspace`, `account`, `membership` | Instance, comptes et droits préparant le passage au multi-utilisateur |
+| `workspace`, `account`, `membership` | Instance, compte propriétaire unique et droits, préparant le passage au multi-utilisateur |
 | `account_invite`, `web_session` | Invitations à durée limitée et sessions web opaques |
 | `candidate_profile`, `career_intent` | Profil d'onboarding et catégories métier confirmées d'un compte |
 

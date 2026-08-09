@@ -16,6 +16,7 @@ from jobwatch.auth import (
     create_session,
     delete_session,
     hash_password,
+    invite_status,
     login_allowed,
     login_throttle_key,
     record_login_failure,
@@ -156,15 +157,19 @@ def test_invite_refuses_a_second_owner_email(tmp_path) -> None:
     conn.close()
 
 
-def test_invite_refuses_a_second_pending_email(tmp_path) -> None:
+def test_new_invite_replaces_a_pending_one_sent_to_a_typo(tmp_path) -> None:
     conn = connect(":memory:")
     init_db(conn)
-    create_invite(conn, "alice", "alice@example.com")
+    mistyped = create_invite(conn, "alice", "alic@example.com")
 
-    with pytest.raises(AuthError, match="alice@example.com"):
-        create_invite(conn, "alice", "bob@example.com")
+    token = create_invite(conn, "alice", "alice@example.com")
 
+    assert invite_status(conn, mistyped, "alice") == "expired"
+    assert invite_status(conn, token, "alice") == "valid"
+    account_id = accept_invite(
+        conn, token, "une très longue phrase secrète", workspace_slug="alice"
+    )
     assert conn.execute(
-        "SELECT count(*) FROM account_invite WHERE email = 'bob@example.com'"
-    ).fetchone()[0] == 0
+        "SELECT email FROM account WHERE id = ?", (account_id,)
+    ).fetchone()[0] == "alice@example.com"
     conn.close()
