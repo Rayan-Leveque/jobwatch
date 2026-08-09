@@ -340,7 +340,8 @@ _BATCH_ELIGIBLE_SQL = (
 _BATCH_PILL_HTML = (
     '<div class="batch-pill" id="batch-pill" hidden aria-live="polite">'
     '<span class="draft-spinner" id="batch-pill-spinner" aria-hidden="true"></span>'
-    '<span class="batch-pill-text" id="batch-pill-text"></span>'
+    '<span class="batch-pill-text">'
+    '<span id="batch-pill-line1"></span><span id="batch-pill-line2"></span></span>'
     '<button class="batch-pill-close" id="batch-pill-close" type="button" '
     'aria-label="Masquer l\'avancement">'
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
@@ -1758,19 +1759,27 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .draft-area { position:relative; z-index:3; display:flex; align-items:center; flex-wrap:wrap;
   gap:9px; margin:0 13px; pointer-events:auto; color:var(--muted); font-size:.75rem }
 .draft-area:not(:empty) { margin-top:12px }
-.batch-pill { position:fixed; z-index:40; display:flex; align-items:center; gap:9px;
-  right:calc(14px + env(safe-area-inset-right)); bottom:calc(14px + env(safe-area-inset-bottom));
-  max-width:min(300px, calc(100vw - 28px)); padding:11px 9px 11px 14px;
-  border:1px solid var(--line); border-radius:var(--radius-md);
+/* centrée dans le tiers droit de l'écran : même écart à gauche, à droite et en bas */
+.batch-pill { --pill-gap:16px;
+  position:fixed; z-index:40; display:flex; align-items:center; gap:12px;
+  right:calc(var(--pill-gap) + env(safe-area-inset-right));
+  bottom:calc(var(--pill-gap) + env(safe-area-inset-bottom));
+  /* le tiers droit dès qu'il reste lisible ; en dessous, un plancher pour que
+     le texte ne s'empile pas lettre par lettre sur les écrans étroits */
+  width:max(240px, calc(100vw / 3 - 2 * var(--pill-gap))); padding:15px 13px 15px 18px;
+  border:1px solid var(--line); border-radius:var(--radius-lg);
   background:var(--surface-2); box-shadow:var(--shadow); color:var(--fg);
-  font-size:.78rem; line-height:1.35;
+  font-size:.88rem; line-height:1.4;
   /* laisse passer le glissement des cartes de tri, sauf sur la croix */
   pointer-events:none }
 .batch-pill[hidden] { display:none }
-.batch-pill-text { min-width:0; overflow-wrap:anywhere }
-.batch-pill-close { display:flex; flex:none; padding:4px; border:0; border-radius:8px;
+.batch-pill .draft-spinner { width:18px; height:18px; border-width:2.5px }
+.batch-pill-text { display:flex; flex-direction:column; min-width:0;
+  overflow-wrap:anywhere }
+.batch-pill-text span:last-child { color:var(--muted) }
+.batch-pill-close { display:flex; flex:none; padding:5px; border:0; border-radius:9px;
   background:none; color:var(--muted-2); cursor:pointer; pointer-events:auto }
-.batch-pill-close svg { width:15px; height:15px }
+.batch-pill-close svg { width:17px; height:17px }
 .batch-pill-close:hover { color:var(--fg); background:var(--surface-hover) }
 .draft-spinner { width:14px; height:14px; flex:none; border:2px solid var(--line-strong);
   border-top-color:var(--violet); border-radius:50%; animation:draft-spin .8s linear infinite }
@@ -1870,7 +1879,9 @@ _BATCH_PILL_JS = """\
   const pill = document.getElementById('batch-pill');
   if (!pill) return;
   const spinner = document.getElementById('batch-pill-spinner');
-  const text = document.getElementById('batch-pill-text');
+  const line1 = document.getElementById('batch-pill-line1');
+  const line2 = document.getElementById('batch-pill-line2');
+  const say = (first, second) => { line1.textContent = first; line2.textContent = second; };
   const track = document.body.dataset.track || 'engineer';
   let timer = null;
   let dismissed = false;
@@ -1885,16 +1896,17 @@ _BATCH_PILL_JS = """\
       if (active > 0) {
         if (!dismissed) pill.hidden = false;
         spinner.hidden = false;
-        text.textContent =
-          `${payload.ok} lettre(s) prête(s) · ${active} en cours${failed}`;
+        say(`${active} lettre(s) en cours`, `${payload.ok} prête(s)${failed}`);
         if (!timer) timer = setInterval(poll, 3000);
         return;
       }
       stop();
       if (pill.hidden) return;
       spinner.hidden = true;
-      text.textContent =
-        `Terminé — ${payload.ok} lettre(s) prête(s) sur le tableau de bord${failed}`;
+      say(
+        `Terminé · ${payload.ok} lettre(s) prête(s)`,
+        `sur le tableau de bord${failed}`,
+      );
     })
     .catch(() => {});
 
@@ -1910,7 +1922,7 @@ _BATCH_PILL_JS = """\
       dismissed = false;
       pill.hidden = false;
       spinner.hidden = false;
-      text.textContent = 'Génération lancée…';
+      say('Génération lancée…', '');
       if (!timer) timer = setInterval(poll, 3000);
       poll();
     },
