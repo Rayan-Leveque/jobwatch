@@ -1763,8 +1763,7 @@ def _login_form(email: str = "", error: str = "") -> str:
 <form method="post" action="/login">
   <label>Email<input type="email" name="email" autocomplete="username" required
     value="{html.escape(email, quote=True)}"></label>
-  <label>Mot de passe<input type="password" name="password"
-    autocomplete="current-password" required></label>
+  {_password_field("password", "Mot de passe", "current-password")}
   <button type="submit">Se connecter</button>
 </form>"""
 
@@ -1775,12 +1774,28 @@ def _invite_form(token: str, error: str = "") -> str:
     return f"""{error_html}
 <p class="auth-intro">Choisissez un mot de passe d'au moins 8 caractères.</p>
 <form method="post" action="{action}">
-  <label>Mot de passe<input type="password" name="password"
-    autocomplete="new-password" minlength="8" required></label>
-  <label>Confirmation<input type="password" name="password_confirmation"
-    autocomplete="new-password" minlength="8" required></label>
+  {_password_field("password", "Mot de passe", "new-password", minlength=8)}
+  {_password_field("password_confirmation", "Confirmation", "new-password", minlength=8)}
   <button type="submit">Créer mon compte</button>
 </form>"""
+
+
+def _password_field(
+    name: str, label: str, autocomplete: str, *, minlength: int | None = None
+) -> str:
+    minimum = f' minlength="{minlength}"' if minlength is not None else ""
+    field_id = f"auth-{name}"
+    return f"""<label>{html.escape(label)}<span class="password-field">
+    <input id="{field_id}" type="password" name="{name}" autocomplete="{autocomplete}"
+      {minimum} required>
+    <button class="password-toggle" type="button" data-password-target="{field_id}"
+      aria-label="Afficher le mot de passe" aria-pressed="false">
+      <svg class="eye-show" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/>
+        <circle cx="12" cy="12" r="2.5"/></svg>
+      <svg class="eye-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" aria-hidden="true"><path d="m3 3 18 18M10.6 6.2A10.8 10.8 0 0 1 12 6c6 0 9.5 6 9.5 6a16 16 0 0 1-2.3 3M6.3 6.3C3.9 8 2.5 12 2.5 12s3.5 6 9.5 6c1.7 0 3.2-.5 4.5-1.2"/></svg>
+    </button></span></label>"""
 
 
 def _auth_page(title: str, body: str) -> str:
@@ -1803,13 +1818,32 @@ label {{ display:grid; gap:8px; color:#686d76; font-size:.86rem; font-weight:650
 input {{ width:100%; padding:13px 14px; border:1px solid rgba(29,31,35,.17);
   border-radius:12px; color:#191b1f; background:#f8f6ef; font:inherit; }}
 input:focus {{ outline:2px solid #42752d; outline-offset:2px; }}
+.password-field {{ position:relative; display:block; }}
+.password-field input {{ padding-right:48px; }}
 button {{ margin-top:4px; padding:14px 18px; border:0; border-radius:12px;
   color:#fff; background:#42752d; font:inherit; font-weight:800; cursor:pointer; }}
+.password-toggle {{ position:absolute; top:50%; right:5px; width:38px; height:38px;
+  margin:0; padding:9px; transform:translateY(-50%); color:#686d76; background:transparent; }}
+.password-toggle:hover {{ color:#191b1f; background:rgba(29,31,35,.06); }}
+.password-toggle svg {{ width:20px; height:20px; }}
+.password-toggle .eye-hide {{ display:none; }}
+.password-toggle[aria-pressed="true"] .eye-show {{ display:none; }}
+.password-toggle[aria-pressed="true"] .eye-hide {{ display:block; }}
 .auth-intro {{ color:#686d76; line-height:1.5; }}
 .auth-error {{ padding:12px 14px; border-radius:12px; color:#8f2940;
   background:rgba(182,60,84,.10); }}
 </style></head><body><main class="auth-card"><div class="auth-brand">jobwatch</div>
-<h1>{html.escape(title)}</h1>{body}</main></body></html>"""
+<h1>{html.escape(title)}</h1>{body}</main><script>
+document.querySelectorAll('[data-password-target]').forEach(button => {{
+  button.addEventListener('click', () => {{
+    const input = document.getElementById(button.dataset.passwordTarget);
+    const visible = input.type === 'text';
+    input.type = visible ? 'password' : 'text';
+    button.setAttribute('aria-pressed', visible ? 'false' : 'true');
+    button.setAttribute('aria-label', visible ? 'Afficher le mot de passe' : 'Masquer le mot de passe');
+  }});
+}});
+</script></body></html>"""
 
 
 _CSS = """\
