@@ -106,10 +106,16 @@ def extract(html: str) -> Extraction:
     posting = _job_posting(document) if document is not None else None
     fields = _jsonld_fields(posting) if posting else {}
 
-    for method, candidate in (
-        ("jsonld", _jsonld_markdown(posting) if posting else ""),
-        ("readable", _readable_markdown(html)),
+    # trafilatura est l'étape la plus coûteuse : elle n'est lancée que si
+    # JSON-LD n'a pas déjà gagné, et son résultat sert aussi au repli.
+    readable = ""
+    for method, make_candidate in (
+        ("jsonld", lambda: _jsonld_markdown(posting) if posting else ""),
+        ("readable", lambda: _readable_markdown(html)),
     ):
+        candidate = make_candidate()
+        if method == "readable":
+            readable = candidate
         if len(candidate) < MIN_EXTRACT_LENGTH:
             continue
         lost = _lost_markers(raw, candidate)
@@ -122,7 +128,7 @@ def extract(html: str) -> Extraction:
         markdown=raw,
         method="raw",
         fields=fields,
-        lost_markers=_lost_markers(raw, _readable_markdown(html)),
+        lost_markers=_lost_markers(raw, readable),
     )
 
 

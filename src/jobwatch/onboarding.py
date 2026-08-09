@@ -251,7 +251,8 @@ def _sync_intent_searches(
     )
     if stale:
         conn.execute(
-            "UPDATE search SET name = name || ' (archivée ' || id || ')', active = 0 "
+            "UPDATE search SET name = name || ' (archivée ' || id || ')', active = 0, "
+            "archived_at = datetime('now') "
             f"WHERE id IN ({','.join('?' for _ in stale)})",
             tuple(stale),
         )
@@ -279,7 +280,8 @@ def _sync_intent_searches(
         else:
             conn.execute(
                 "UPDATE search SET name = ?, include_json = ?, exclude_json = ?, "
-                "locations_json = ?, contract = ?, active = 1 WHERE id = ?",
+                "locations_json = ?, contract = ?, active = 1, archived_at = NULL "
+                "WHERE id = ?",
                 (
                     search.name,
                     include_json,

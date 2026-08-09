@@ -19,6 +19,7 @@ COLUMN_MIGRATIONS = (
     ("offer_content", "extract_method", "TEXT"),
     ("offer_content", "html_gz", "BLOB"),
     ("career_intent", "search_id", "INTEGER REFERENCES search(id)"),
+    ("search", "archived_at", "TEXT"),
 )
 
 

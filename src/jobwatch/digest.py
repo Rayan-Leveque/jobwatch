@@ -22,7 +22,7 @@ def _collect_unnotified(conn: sqlite3.Connection) -> dict[str, list[sqlite3.Row]
         "SELECT m.id AS match_id, s.name AS search_name, c.name AS company, o.title AS title, "
         "       o.location AS location, o.url AS url "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "JOIN company c ON c.id = o.company_id "
         "WHERE m.notified_at IS NULL AND m.state = 'new' "

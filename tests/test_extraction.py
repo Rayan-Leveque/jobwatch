@@ -43,3 +43,40 @@ def test_extract_keeps_raw_page_when_readable_text_loses_salary(monkeypatch) -> 
     assert result.method == "raw"
     assert "55 000 EUR" in result.markdown
     assert "salary" in result.lost_markers
+
+
+def test_extract_skips_readable_extraction_when_jsonld_wins(monkeypatch) -> None:
+    description = "Mission principale : construire des systèmes RAG en Python. " * 12
+    posting = {
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": "AI Engineer",
+        "hiringOrganization": {"name": "Acme"},
+        "description": description,
+    }
+    page = (
+        '<html><body><script type="application/ld+json">'
+        f"{json.dumps(posting)}</script></body></html>"
+    )
+    calls = []
+    monkeypatch.setattr(
+        extraction, "_readable_markdown", lambda html: calls.append(html) or ""
+    )
+
+    result = extraction.extract(page)
+
+    assert result.method == "jsonld"
+    assert calls == []
+
+
+def test_extract_runs_readable_extraction_once_on_the_raw_fallback(monkeypatch) -> None:
+    page = "<html><body><main>Trop court</main></body></html>"
+    calls = []
+    monkeypatch.setattr(
+        extraction, "_readable_markdown", lambda html: calls.append(html) or "Trop court"
+    )
+
+    result = extraction.extract(page)
+
+    assert result.method == "raw"
+    assert len(calls) == 1

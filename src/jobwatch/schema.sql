@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS search (
   exclude_json TEXT NOT NULL,        -- JSON list of keywords (title match, none-of)
   locations_json TEXT NOT NULL,      -- JSON list; empty = anywhere
   contract TEXT,                     -- NULL = any
-  active INTEGER NOT NULL DEFAULT 1
+  active INTEGER NOT NULL DEFAULT 1, -- 0 = ne collecte plus (config.yaml ou catégorie retirée)
+  archived_at TEXT                   -- non NULL = retirée par l'utilisateur, masquée du tableau de bord
 );
 CREATE TABLE IF NOT EXISTS match (
   id INTEGER PRIMARY KEY,
