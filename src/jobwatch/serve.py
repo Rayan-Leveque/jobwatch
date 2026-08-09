@@ -1630,10 +1630,21 @@ _JS = """\
       });
     });
   });
-  [...document.querySelectorAll('.action-apply')].forEach(button => {
+  // Candidater et Générer LM partagent l'espace sous la carte : ouvrir l'un
+  // referme l'autre pour éviter deux formulaires empilés.
+  [...document.querySelectorAll('.action-apply, .action-draft')].forEach(button => {
     button.addEventListener('click', () => {
       const expanded = button.getAttribute('aria-expanded') === 'true';
       const form = document.getElementById(button.getAttribute('aria-controls'));
+      if (!expanded) {
+        [...button.closest('.row').querySelectorAll('.action-apply, .action-draft')]
+          .forEach(other => {
+            if (other === button) return;
+            other.setAttribute('aria-expanded', 'false');
+            const otherForm = document.getElementById(other.getAttribute('aria-controls'));
+            if (otherForm) otherForm.hidden = true;
+          });
+      }
       button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
       if (form) form.hidden = expanded;
     });
@@ -1665,14 +1676,6 @@ _JS = """\
     const panel = document.getElementById(btn.getAttribute('aria-controls'));
     btn.setAttribute('aria-expanded', expanded ? 'false' : 'true');
     if (panel) panel.hidden = expanded;
-  });
-  [...document.querySelectorAll('.action-draft')].forEach(button => {
-    button.addEventListener('click', () => {
-      const expanded = button.getAttribute('aria-expanded') === 'true';
-      const form = document.getElementById(button.getAttribute('aria-controls'));
-      button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-      if (form) form.hidden = expanded;
-    });
   });
   const RUNNING_HTML = '<span class="draft-spinner" aria-hidden="true"></span>'
     + '<span>Génération de la lettre en cours…</span>';

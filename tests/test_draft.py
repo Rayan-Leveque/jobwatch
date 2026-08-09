@@ -323,8 +323,8 @@ def test_run_job_failure_lands_in_error(db_path: Path, tmp_path: Path, monkeypat
 def test_render_page_hides_draft_button_when_disabled(db_path: Path) -> None:
     conn = _conn(db_path)
     _seed_match(conn)
-    assert "Générer LM" not in render_page(conn)
-    assert "Générer LM" in render_page(conn, draft_enabled=True)
+    assert ">Générer LM</button>" not in render_page(conn)
+    assert ">Générer LM</button>" in render_page(conn, draft_enabled=True)
     conn.close()
 
 
