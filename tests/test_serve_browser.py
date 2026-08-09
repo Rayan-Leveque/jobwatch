@@ -57,9 +57,14 @@ def dashboard(tmp_path: Path):
     thread.join(timeout=5)
 
 
-def _open_page(browser, url: str):
+def _open_page(browser, url: str, dismiss_popup: bool = True):
     page = browser.new_page()
     page.goto(url)
+    if dismiss_popup:
+        popup = page.locator("#swipe-popup")
+        if popup.count() and popup.is_visible():
+            page.locator(".swipe-popup-later").click()
+            popup.wait_for(state="hidden")
     # sentinelle : disparaît si la page est rechargée
     page.evaluate("window.__jw_no_reload = true")
     return page
@@ -192,4 +197,20 @@ def test_card_action_buttons_render_in_order_later_apply_discard(browser, dashbo
     page = _open_page(browser, url)
     buttons = _card(page, "NewCo").locator(".card-actions .card-action")
     assert buttons.all_inner_texts() == ["Plus tard", "Candidater", "Écarter"]
+    page.close()
+
+
+def test_swipe_popup_shows_once_per_session(browser, dashboard) -> None:
+    url, _db_path = dashboard
+    page = _open_page(browser, url, dismiss_popup=False)
+    popup = page.locator("#swipe-popup")
+    popup.wait_for(state="visible")
+    assert "C'est le moment de swiper." in popup.inner_text()
+    page.locator(".swipe-popup-later").click()
+    popup.wait_for(state="hidden")
+    # Rechargement dans la même session : le popup ne revient pas,
+    # le bouton badge de la barre du haut reste disponible.
+    page.reload()
+    page.wait_for_selector(".swipe-fab")
+    assert not page.locator("#swipe-popup").is_visible()
     page.close()

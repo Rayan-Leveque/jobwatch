@@ -1173,7 +1173,7 @@ def test_apply_button_and_form_rendered_for_actionable_sections_only(
         assert 'class="apply-form"' in section
         assert 'name="cv_library_id"' in section
         assert 'name="cover_letter_library_id"' in section
-        assert 'class="doc-upload-btn"' in section
+        assert 'class="doc-icon-btn doc-upload-btn"' in section
     for key in ("discarded", "applied"):
         section = _section_html(page, key)
         assert 'class="card-action action-apply"' not in section
@@ -1390,3 +1390,50 @@ def test_serve_prints_url_and_stops_on_ctrl_c(
     assert "arrêt du serveur" in result.output
     assert captured["addr"] == ("127.0.0.1", 8123)
     assert captured["closed"] is True
+
+
+def test_document_field_has_icon_buttons(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    _seed_offer(conn)
+    page = render_page(conn)
+    assert 'doc-preview-btn' in page
+    assert 'doc-upload-btn' in page
+    assert 'title="Prévisualiser"' in page
+    assert 'title="Uploader"' in page
+    assert "Uploader</button>" not in page
+
+
+def test_http_document_preview_serves_library_file(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    pdf = tmp_path / "cv.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    text = tmp_path / "lettre.tex"
+    text.write_text("\\documentclass{article}")
+    connection.execute(
+        "INSERT INTO document_library (type, label, file_path) VALUES ('cv', 'CV', ?)",
+        (str(pdf),),
+    )
+    connection.execute(
+        "INSERT INTO document_library (type, label, file_path) VALUES "
+        "('cover_letter', 'LM', ?)",
+        (str(text),),
+    )
+    connection.commit()
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, headers, body = _get(port, "/documents/1")
+        assert status == 200
+        assert headers["Content-Type"] == "application/pdf"
+        assert body.startswith("%PDF-1.4")
+        status, headers, body = _get(port, "/documents/2")
+        assert status == 200
+        assert headers["Content-Type"] == "text/plain; charset=utf-8"
+        status, _, _ = _get(port, "/documents/99")
+        assert status == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

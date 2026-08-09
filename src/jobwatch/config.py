@@ -83,6 +83,18 @@ class EnrichConfig:
     model: str
 
 
+DRAFT_TRACKS = ("engineer", "project")
+
+
+@dataclass
+class DraftConfig:
+    opencode_bin: str
+    model: str
+    # Lettres exemples .tex par piste métier ('engineer' | 'project') : elles
+    # donnent au LLM le format LaTeX et le ton des vraies lettres du candidat.
+    examples: dict[str, list[Path]] = field(default_factory=dict)
+
+
 @dataclass
 class Config:
     db: Path
@@ -90,6 +102,7 @@ class Config:
     sources: SourcesConfig
     notify: NotifyConfig
     enrich: EnrichConfig | None = None
+    draft: DraftConfig | None = None
 
 
 def _string_list(value: object, field_name: str) -> list[str]:
@@ -240,6 +253,35 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
     return EnrichConfig(opencode_bin=opencode_bin, model=model)
 
 
+def _draft_from_dict(raw: object) -> DraftConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'draft' doit être un mapping")
+    if not raw:
+        return None
+    opencode_bin = raw.get("opencode_bin")
+    model = raw.get("model")
+    if not isinstance(opencode_bin, str) or not opencode_bin:
+        raise ConfigError("draft.opencode_bin est requis quand draft est présent")
+    if not isinstance(model, str) or not model:
+        raise ConfigError("draft.model est requis quand draft est présent")
+    examples_raw = raw.get("examples", {})
+    if not isinstance(examples_raw, dict):
+        raise ConfigError("draft.examples doit être un mapping piste -> liste de chemins .tex")
+    unknown = set(examples_raw) - set(DRAFT_TRACKS)
+    if unknown:
+        raise ConfigError(
+            f"draft.examples : piste(s) inconnue(s) {sorted(unknown)} "
+            f"(pistes valides : {list(DRAFT_TRACKS)})"
+        )
+    examples: dict[str, list[Path]] = {}
+    for track, paths in examples_raw.items():
+        entries = _string_list(paths, f"draft.examples.{track}")
+        examples[track] = [Path(os.path.expanduser(p)) for p in entries]
+    return DraftConfig(opencode_bin=opencode_bin, model=model, examples=examples)
+
+
 def load_config(path: Path) -> Config:
     """Analyse et valide un fichier de config, levant ConfigError en cas de problème."""
     try:
@@ -273,6 +315,7 @@ def load_config(path: Path) -> Config:
         sources=_sources_from_dict(raw.get("sources")),
         notify=_notify_from_dict(raw.get("notify")),
         enrich=_enrich_from_dict(raw.get("enrich")),
+        draft=_draft_from_dict(raw.get("draft")),
     )
 
 

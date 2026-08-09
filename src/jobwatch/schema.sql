@@ -88,3 +88,20 @@ CREATE TABLE IF NOT EXISTS document_library (
   file_path TEXT NOT NULL,
   uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS draft_job (
+  id INTEGER PRIMARY KEY,
+  match_id INTEGER NOT NULL REFERENCES match(id),
+  track TEXT NOT NULL,               -- 'engineer' | 'project' : choisit les lettres exemples
+  cv_library_id INTEGER REFERENCES document_library(id),
+  instruction TEXT,                  -- consigne libre de régénération ; NULL sinon
+  status TEXT NOT NULL DEFAULT 'running', -- 'queued' | 'running' | 'ok' | 'failed'
+  error TEXT,                        -- message d'échec ; NULL si ok
+  warning TEXT,                      -- ex. lettre générée sans le texte complet de l'offre
+  tex_path TEXT,
+  pdf_path TEXT,
+  png_pages INTEGER,                 -- nombre de pages rendues en PNG
+  library_id INTEGER REFERENCES document_library(id), -- entrée cover_letter produite
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_draft_job_match ON draft_job(match_id, id);
