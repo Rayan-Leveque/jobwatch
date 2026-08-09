@@ -79,26 +79,31 @@ SQLite/jobwatch devient la source de vérité.
 
 ## Enrichissement des offres
 
-`jw enrich` traite les offres collectées par les collecteurs jobwatch (`france_travail`,
-`smartrecruiters` — pas celles ingérées via `jw ingest-daily`) qui n'ont pas encore de contenu
-stocké :
+`jw enrich` traite les offres **actives** - celles qu'au moins un match `new`, `seen` ou
+`later` ou une candidature rend visibles au tableau de bord, quelle que soit leur source
+(collecteurs jobwatch comme imports `jw ingest-daily`). La corbeille et les offres sans match
+ne coûtent aucun token. Pour chaque offre active sans texte stocké ou sans champs structurés :
 
-1. Récupère la page de l'offre (`url`) en HTTP simple.
+1. Récupère la page de l'offre (`url`) en HTTP simple si le texte manque (une offre dont le
+   texte est déjà en base est résumée sans aucun accès réseau).
 2. Convertit le HTML en Markdown brut (sans extraction intelligente du contenu principal :
    le résumé LLM qui suit est censé faire le tri dans le bruit).
 3. Si le fetch HTTP échoue, ou si le Markdown obtenu est vide/trop court pour être une vraie
    annonce, retente via Playwright (Chromium headless) et convertit la page rendue.
 4. Stocke le texte complet dans `offer_content`, avec son statut (`ok` ou `failed`) et sa méthode
    de récupération (`http` ou `playwright`).
-5. Génère un résumé court (quelques puces) via `deepseek-v4-flash` appelé en subprocess OpenCode,
-   et l'écrit dans `offer_summary`/`summary_bullet` avec `source = 'auto'`. Un résumé `manual`
-   existant (importé via `jw import-summaries`) n'est jamais écrasé ; le contenu complet est tout
-   de même stocké dans ce cas.
-6. Patiente 1 à 2 secondes entre deux offres pour ne pas marteler les sites tiers.
+5. Génère un résumé structuré via `deepseek-v4-flash` appelé en subprocess OpenCode : quatre
+   champs fixes - Expérience souhaitée, Salaire, Télétravail, Stack, valeur « non précisé »
+   quand l'annonce ne dit rien (table `summary_field`) - suivis de puces mission
+   (`offer_summary`/`summary_bullet`, `source = 'auto'`). Les puces d'un résumé `manual`
+   existant (importé via `jw import-summaries`) ne sont jamais écrasées ; les champs fixes,
+   eux, s'ajoutent à tout résumé qui n'en a pas encore.
+6. Patiente 1 à 2 secondes entre deux fetchs web pour ne pas marteler les sites tiers.
 
 Un échec (réseau ou LLM) est consigné en avertissement et n'interrompt jamais le traitement des
-offres suivantes ; une offre déjà traitée (`offer_content` existant, `ok` ou `failed`) n'est
-jamais retraitée par un run ultérieur.
+offres suivantes ; un fetch en échec (`offer_content` en statut `failed`) n'est jamais retenté
+par un run ultérieur. Le panneau « En bref » du tableau de bord et des cartes de tri affiche
+les champs étiquetés en tête puis les puces, pour toute carte ayant un résumé.
 
 `jw enrich` nécessite le bloc `enrich` de `config.yaml` (voir la référence de configuration
 ci-dessous) ; sans lui, la commande refuse proprement avec un message clair, sans réseau ni erreur
@@ -118,9 +123,9 @@ sur `/` et `Chef de projet / PO` sur `/po`. Toute offre ou candidature dont le t
 contient « chef de projet », « chef de produit », « product owner » ou « product manager »
 n'apparaît que dans l'onglet `Chef de projet / PO` ; l'onglet `Ingénieur IA` montre tout le
 reste. Chaque onglet porte ses propres sections et compteurs.
-La section `Priorité haute` regroupe les matchs high avant `Nouveaux matchs` et `Vus`; les
-cartes high disposant d'un résumé affichent un bloc `En bref`, repliable en cliquant sur la
-carte ou au clavier. Indépendamment du fit ou d'un résumé, toute carte dont l'offre a un
+La section `Priorité haute` regroupe les matchs high avant `Nouveaux matchs` et `Vus`; toute
+carte disposant d'un résumé affiche un bloc `En bref` (champs structurés étiquetés puis puces),
+repliable en cliquant sur la carte ou au clavier. Indépendamment du fit ou d'un résumé, toute carte dont l'offre a un
 contenu récupéré (`jw enrich`, statut `ok`) affiche un bouton « Annonce complète » qui déplie le
 texte intégral de l'annonce.
 
@@ -264,6 +269,7 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `offer` | Offres d'emploi (dédupliquées par URL et société+titre) |
 | `offer_content` | Texte complet de l'annonce (Markdown), récupéré par `jw enrich` |
 | `offer_summary` | Résumé factuel unique associé à une offre existante (`source` : `manual` ou `auto`) |
+| `summary_field` | Champs structurés d'un résumé (expérience, salaire, télétravail, stack) |
 | `summary_bullet` | Bullets d'un résumé avec leur position explicite |
 | `search` | Recherches enregistrées (mots-clés, localisations, contrat) |
 | `match` | Paire offre/recherche avec état et statut de notification |

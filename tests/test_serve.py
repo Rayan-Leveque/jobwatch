@@ -114,7 +114,7 @@ def _apply(conn: sqlite3.Connection, match_id: int, offer_id: int, note: str = "
     return application_id
 
 
-def _add_summary(conn: sqlite3.Connection, offer_id: int, *bullets: str) -> None:
+def _add_summary(conn: sqlite3.Connection, offer_id: int, *bullets: str) -> int:
     summary_id = int(
         conn.execute("INSERT INTO offer_summary (offer_id) VALUES (?)", (offer_id,)).lastrowid
     )
@@ -123,6 +123,7 @@ def _add_summary(conn: sqlite3.Connection, offer_id: int, *bullets: str) -> None
         ((summary_id, position, bullet) for position, bullet in enumerate(bullets)),
     )
     conn.commit()
+    return summary_id
 
 
 def _add_content(
@@ -447,18 +448,44 @@ def test_high_summary_renders_escaped_ordered_accessible_collapsible_block(
     assert section.index("Premier") < section.index("Deuxième &amp; dernier")
 
 
-@pytest.mark.parametrize("fit", ["medium", "low", None])
-def test_summary_is_not_rendered_for_non_high_fit(
+@pytest.mark.parametrize("fit", ["high", "medium", "low", None])
+def test_summary_is_rendered_for_any_fit(
     conn: sqlite3.Connection, fit: str | None
 ) -> None:
+    """Depuis les résumés structurés systématiques, En bref s'affiche quel que soit le fit."""
     _match_id, offer_id = _seed_offer(conn, company=f"Co-{fit}", fit=fit)
-    _add_summary(conn, offer_id, "Fait masqué")
+    _add_summary(conn, offer_id, "Fait visible")
 
     page = render_page(conn)
 
-    assert "Fait masqué" not in page
-    assert "En bref" not in page
-    assert '<button class="card-toggle"' not in page
+    assert "Fait visible" in page
+    assert "En bref" in page
+    assert '<button class="card-toggle"' in page
+
+
+def test_summary_fields_render_labeled_lines(conn: sqlite3.Connection) -> None:
+    _match_id, offer_id = _seed_offer(conn, company="FieldsCo")
+    summary_id = _add_summary(conn, offer_id, "Puce mission")
+    conn.executemany(
+        "INSERT INTO summary_field (summary_id, key, value) VALUES (?, ?, ?)",
+        [
+            (summary_id, "experience", "3-5 ans"),
+            (summary_id, "salary", "non précisé"),
+            (summary_id, "remote", "hybride 2 jours"),
+            (summary_id, "stack", "Python, RAG"),
+        ],
+    )
+    conn.commit()
+
+    page = render_page(conn)
+
+    assert "Expérience souhaitée" in page
+    assert "3-5 ans" in page
+    assert "hybride 2 jours" in page
+    # Champ « non précisé » : affiché mais atténué
+    assert 'summary-field sf-empty' in page
+    # L'ordre d'affichage suit FIELD_LABELS : expérience avant stack
+    assert page.index("Expérience souhaitée") < page.index("Stack")
 
 
 def test_high_without_summary_has_no_empty_summary_space(conn: sqlite3.Connection) -> None:
