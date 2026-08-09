@@ -13,8 +13,8 @@ mutation de match. POST /match/<id>/draft lance une génération de lettre de
 motivation en arrière-plan (voir jobwatch.draft) quand le bloc 'draft' de la
 config est renseigné ; GET /match/<id>/draft/status la sonde, et
 GET /match/<id>/letter.pdf|.tex|/letter/<n>.png servent les fichiers produits.
-Aucune authentification n'est ajoutée, le périmètre Tailscale est la
-frontière de confiance.
+Une instance nommée peut activer un compte propriétaire par invitation. Dans
+ce cas, toutes les pages, actions et pièces jointes exigent une session.
 """
 
 from __future__ import annotations
@@ -29,12 +29,33 @@ from dataclasses import field as dataclasses_field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import click
 
 from jobwatch import draft
 from jobwatch.applications import ApplicationError, record_application
+from jobwatch.auth import (
+    AuthError,
+    Session,
+    accept_invite,
+    auth_required,
+    clear_login_failures,
+    create_session,
+    delete_session,
+    login_allowed,
+    login_throttle_key,
+    record_login_failure,
+    resolve_session,
+)
+from jobwatch.auth_http import (
+    CSRF_HEADER,
+    csrf_valid,
+    expired_session_cookie,
+    security_headers,
+    session_cookie,
+    session_token,
+)
 from jobwatch.config import DraftConfig
 from jobwatch.db import connect
 from jobwatch.library import LibraryError, list_library, resolve_path, save_upload
@@ -806,7 +827,10 @@ def _section(
 
 
 def render_page(
-    conn: sqlite3.Connection, track: str = "engineer", draft_enabled: bool = False
+    conn: sqlite3.Connection,
+    track: str = "engineer",
+    draft_enabled: bool = False,
+    csrf_token: str = "",
 ) -> str:
     """Rend la page HTML complète d'un onglet depuis l'état actuel de la base."""
     priority = _priority_matches(conn, track)
@@ -871,6 +895,7 @@ def render_page(
         swipe_fab=swipe_fab,
         swipe_popup=swipe_popup,
         batch_pill=_BATCH_PILL_HTML if draft_enabled else "",
+        csrf_token=csrf_token,
     )
 
 
@@ -949,7 +974,10 @@ def _swipe_card(row: sqlite3.Row, summary: Summary, content: str | None) -> str:
 
 
 def render_swipe_page(
-    conn: sqlite3.Connection, track: str = "engineer", draft_enabled: bool = False
+    conn: sqlite3.Connection,
+    track: str = "engineer",
+    draft_enabled: bool = False,
+    csrf_token: str = "",
 ) -> str:
     """Rend la page de tri type swipe : une carte 'new' à la fois, bilan à la fin."""
     deck = _swipe_deck(conn, track)
@@ -994,6 +1022,7 @@ def render_swipe_page(
         track=track, cards=cards, total=len(deck), pending=pending,
         batch=batch, back_href=back_href,
         batch_pill=_BATCH_PILL_HTML if draft_enabled else "",
+        csrf_token=csrf_token,
     )
 
 
@@ -1005,7 +1034,11 @@ def _spawn_draft_job(db_path: Path, config: DraftConfig, job_id: int) -> None:
 
 
 def make_handler(
-    db_path: Path, draft_config: DraftConfig | None = None
+    db_path: Path,
+    draft_config: DraftConfig | None = None,
+    *,
+    workspace_slug: str | None = None,
+    secure_cookie: bool = True,
 ) -> type[BaseHTTPRequestHandler]:
     """Fabrique une classe de gestionnaire HTTP branchée sur render_page.
 
@@ -1016,8 +1049,63 @@ def make_handler(
     class Handler(BaseHTTPRequestHandler):
         server_version = "jobwatch"
 
+        def _authentication(self) -> tuple[bool, Session | None, str | None]:
+            conn = connect(db_path)
+            try:
+                required = auth_required(conn)
+                token = session_token(self.headers.get("Cookie"))
+                session = resolve_session(conn, token) if required and token else None
+                if session is not None and workspace_slug is not None:
+                    workspace = conn.execute(
+                        "SELECT 1 FROM workspace WHERE id = ? AND slug = ?",
+                        (session.workspace_id, workspace_slug),
+                    ).fetchone()
+                    if workspace is None:
+                        session = None
+                return required, session, token
+            finally:
+                conn.close()
+
+        def _require_session(self, path: str) -> Session | None:
+            required, session, _token = self._authentication()
+            if not required:
+                return None
+            if workspace_slug is None:
+                self._send_text(503, "instance nommée requise pour l'authentification\n")
+                return None
+            if session is not None:
+                return session
+            if path.startswith(("/draft/", "/match/", "/documents")):
+                self._send_json(401, {"error": "authentification requise"})
+            else:
+                self._redirect("/login")
+            return None
+
+        def _auth_enabled_without_session(self, path: str) -> tuple[bool, Session | None]:
+            required, session, _token = self._authentication()
+            if required and session is None and path not in ("/login",) and not path.startswith(
+                "/invite/"
+            ):
+                self._require_session(path)
+                return True, None
+            return required, session
+
         def do_GET(self) -> None:
             path = urlsplit(self.path).path
+            if path == "/login":
+                required, session, _token = self._authentication()
+                if not required or session is not None:
+                    self._redirect("/")
+                else:
+                    self._send_auth_page("Connexion", _login_form())
+                return
+            invite = re.fullmatch(r"/invite/([^/]+)", path)
+            if invite:
+                self._send_auth_page("Créer votre compte", _invite_form(invite.group(1)))
+                return
+            required, session = self._auth_enabled_without_session(path)
+            if required and session is None:
+                return
             status = _DRAFT_STATUS_RE.match(path)
             if status:
                 self._handle_draft_status(int(status.group(1)))
@@ -1051,7 +1139,12 @@ def make_handler(
                 conn = connect(db_path)
                 try:
                     render = render_swipe_page if swipe else render_page
-                    page = render(conn, track, draft_enabled=draft_config is not None)
+                    page = render(
+                        conn,
+                        track,
+                        draft_enabled=draft_config is not None,
+                        csrf_token=session.csrf_token if session is not None else "",
+                    )
                 finally:
                     conn.close()
             except sqlite3.Error as exc:
@@ -1281,6 +1374,31 @@ def make_handler(
 
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
+            if path == "/login":
+                self._handle_login()
+                return
+            invite = re.fullmatch(r"/invite/([^/]+)", path)
+            if invite:
+                self._handle_invite(invite.group(1))
+                return
+            required, session = self._auth_enabled_without_session(path)
+            if required and session is None:
+                return
+            if required and not csrf_valid(session, self.headers.get(CSRF_HEADER)):
+                self._send_json(403, {"error": "jeton CSRF invalide"})
+                return
+            if path == "/logout":
+                token = session_token(self.headers.get("Cookie"))
+                if token:
+                    conn = connect(db_path)
+                    try:
+                        delete_session(conn, token)
+                    finally:
+                        conn.close()
+                self._redirect(
+                    "/login", headers={"Set-Cookie": expired_session_cookie(secure=secure_cookie)}
+                )
+                return
             if path == _UPLOAD_PATH:
                 self._handle_upload()
                 return
@@ -1408,6 +1526,109 @@ def make_handler(
                 201, {"id": int(entry["id"]), "label": str(entry["label"]), "type": str(entry["type"])}
             )
 
+        def _handle_login(self) -> None:
+            if not self._same_origin():
+                self._send_text(403, "origine invalide\n")
+                return
+            fields = self._read_form_body()
+            email = fields.get("email", "")
+            password = fields.get("password", "")
+            if workspace_slug is None:
+                self._send_auth_page(
+                    "Connexion", _login_form(email, "Instance nommée requise."), status=503
+                )
+                return
+            conn = connect(db_path)
+            try:
+                if not auth_required(conn):
+                    self._redirect("/")
+                    return
+                key = login_throttle_key(email, self.client_address[0])
+                if not login_allowed(conn, key):
+                    self._send_auth_page(
+                        "Connexion",
+                        _login_form(email, "Trop de tentatives. Réessayez dans 15 minutes."),
+                        status=429,
+                    )
+                    return
+                try:
+                    token, _session = create_session(conn, email, password, workspace_slug)
+                except AuthError:
+                    record_login_failure(conn, key)
+                    self._send_auth_page(
+                        "Connexion", _login_form(email, "Email ou mot de passe incorrect."),
+                        status=401,
+                    )
+                    return
+                clear_login_failures(conn, key)
+            finally:
+                conn.close()
+            self._redirect(
+                "/", headers={"Set-Cookie": session_cookie(token, secure=secure_cookie)}
+            )
+
+        def _handle_invite(self, token: str) -> None:
+            if not self._same_origin():
+                self._send_text(403, "origine invalide\n")
+                return
+            fields = self._read_form_body()
+            password = fields.get("password", "")
+            confirmation = fields.get("password_confirmation", "")
+            if workspace_slug is None:
+                self._send_auth_page(
+                    "Créer votre compte",
+                    _invite_form(token, "Instance nommée requise."),
+                    status=503,
+                )
+                return
+            if password != confirmation:
+                self._send_auth_page(
+                    "Créer votre compte",
+                    _invite_form(token, "Les deux mots de passe sont différents."),
+                    status=400,
+                )
+                return
+            conn = connect(db_path)
+            try:
+                try:
+                    account_id = accept_invite(conn, token, password)
+                    account = conn.execute(
+                        "SELECT email FROM account WHERE id = ?", (account_id,)
+                    ).fetchone()
+                    if account is None:
+                        raise AuthError("instance nommée requise")
+                    session_value, _session = create_session(
+                        conn, str(account["email"]), password, workspace_slug
+                    )
+                except AuthError as exc:
+                    self._send_auth_page(
+                        "Créer votre compte", _invite_form(token, str(exc)), status=400
+                    )
+                    return
+            finally:
+                conn.close()
+            self._redirect(
+                "/", headers={"Set-Cookie": session_cookie(session_value, secure=secure_cookie)}
+            )
+
+        def _read_form_body(self) -> dict[str, str]:
+            try:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                return {}
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            return {key: values[-1] for key, values in parse_qs(raw).items() if values}
+
+        def _same_origin(self) -> bool:
+            fetch_site = self.headers.get("Sec-Fetch-Site")
+            if fetch_site:
+                return fetch_site == "same-origin"
+            origin = self.headers.get("Origin")
+            if not origin or origin == "null":
+                return True
+            parsed = urlsplit(origin)
+            return parsed.netloc == self.headers.get("Host") and parsed.scheme in ("http", "https")
+
         def _read_json_body(self) -> object:
             try:
                 length = int(self.headers.get("Content-Length", 0) or 0)
@@ -1424,17 +1645,33 @@ def make_handler(
         def _send_json(self, status: int, payload: dict) -> None:
             self._send_bytes(status, json.dumps(payload).encode("utf-8"), "application/json")
 
-        def _send_bytes(self, status: int, data: bytes, content_type: str) -> None:
+        def _send_bytes(
+            self,
+            status: int,
+            data: bytes,
+            content_type: str,
+            headers: dict[str, str] | None = None,
+        ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
-            if status == 200:
-                self.send_header("Cache-Control", "no-store")
+            for name, value in security_headers().items():
+                self.send_header(name, value)
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
 
         def _send_text(self, status: int, text: str) -> None:
             self._send_bytes(status, text.encode("utf-8"), "text/plain; charset=utf-8")
+
+        def _send_auth_page(self, title: str, body: str, *, status: int = 200) -> None:
+            page = _auth_page(title, body)
+            self._send_bytes(status, page.encode("utf-8"), "text/html; charset=utf-8")
+
+        def _redirect(self, location: str, *, headers: dict[str, str] | None = None) -> None:
+            response_headers = {"Location": location, **(headers or {})}
+            self._send_bytes(303, b"", "text/plain; charset=utf-8", response_headers)
 
         def log_message(self, format: str, *args: object) -> None:
             pass
@@ -1464,12 +1701,26 @@ def _fail_interrupted_draft_jobs(db_path: Path) -> None:
 
 
 def serve_http(
-    db_path: Path, host: str, port: int, draft_config: DraftConfig | None = None
+    db_path: Path,
+    host: str,
+    port: int,
+    draft_config: DraftConfig | None = None,
+    *,
+    workspace_slug: str | None = None,
+    secure_cookie: bool = True,
 ) -> None:
     """Crée le serveur HTTP et le sert jusqu'à Ctrl-C."""
     _fail_interrupted_draft_jobs(db_path)
     try:
-        server = ThreadingHTTPServer((host, port), make_handler(db_path, draft_config))
+        server = ThreadingHTTPServer(
+            (host, port),
+            make_handler(
+                db_path,
+                draft_config,
+                workspace_slug=workspace_slug,
+                secure_cookie=secure_cookie,
+            ),
+        )
     except (OSError, OverflowError) as exc:
         raise ServeError(f"impossible d'écouter sur {host}:{port} : {exc}") from exc
     bound_port = int(server.server_address[1])
@@ -1480,6 +1731,83 @@ def serve_http(
         click.echo("arrêt du serveur")
     finally:
         server.server_close()
+
+
+def _csrf_head(token: str) -> str:
+    if not token:
+        return ""
+    escaped = html.escape(token, quote=True)
+    return f"""<meta name="csrf-token" content="{escaped}">
+<script>
+(function () {{
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {{
+    const options = Object.assign({{}}, init || {{}});
+    const method = String(options.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {{
+      const headers = new Headers(options.headers || {{}});
+      headers.set('X-CSRF-Token', document.querySelector('meta[name="csrf-token"]').content);
+      options.headers = headers;
+    }}
+    return originalFetch(input, options);
+  }};
+}})();
+</script>"""
+
+
+def _login_form(email: str = "", error: str = "") -> str:
+    error_html = f'<p class="auth-error">{html.escape(error)}</p>' if error else ""
+    return f"""{error_html}
+<form method="post" action="/login">
+  <label>Email<input type="email" name="email" autocomplete="username" required
+    value="{html.escape(email, quote=True)}"></label>
+  <label>Mot de passe<input type="password" name="password"
+    autocomplete="current-password" required></label>
+  <button type="submit">Se connecter</button>
+</form>"""
+
+
+def _invite_form(token: str, error: str = "") -> str:
+    error_html = f'<p class="auth-error">{html.escape(error)}</p>' if error else ""
+    action = f"/invite/{html.escape(token, quote=True)}"
+    return f"""{error_html}
+<p class="auth-intro">Choisissez un mot de passe d'au moins 15 caractères.</p>
+<form method="post" action="{action}">
+  <label>Mot de passe<input type="password" name="password"
+    autocomplete="new-password" minlength="15" required></label>
+  <label>Confirmation<input type="password" name="password_confirmation"
+    autocomplete="new-password" minlength="15" required></label>
+  <button type="submit">Créer mon compte</button>
+</form>"""
+
+
+def _auth_page(title: str, body: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="fr" data-theme="dark"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#090b10"><title>jobwatch · {html.escape(title)}</title>
+<style>
+:root {{ color-scheme:dark; font-family:Inter,ui-sans-serif,system-ui,sans-serif; }}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24px;
+  color:#f3f5f8; background:radial-gradient(circle at 20% 0,#202934 0,transparent 35%),#090b10; }}
+.auth-card {{ width:min(100%,430px); padding:32px; border:1px solid rgba(255,255,255,.12);
+  border-radius:24px; background:#11141c; box-shadow:0 24px 80px rgba(0,0,0,.4); }}
+.auth-brand {{ color:#b9f46f; font-size:.78rem; font-weight:800; letter-spacing:.16em;
+  text-transform:uppercase; }}
+h1 {{ margin:12px 0 24px; font-size:clamp(1.8rem,8vw,2.5rem); line-height:1.05; }}
+form {{ display:grid; gap:18px; }}
+label {{ display:grid; gap:8px; color:#b7bdc9; font-size:.86rem; font-weight:650; }}
+input {{ width:100%; padding:13px 14px; border:1px solid rgba(255,255,255,.16);
+  border-radius:12px; color:#f3f5f8; background:#090b10; font:inherit; }}
+input:focus {{ outline:2px solid #b9f46f; outline-offset:2px; }}
+button {{ margin-top:4px; padding:14px 18px; border:0; border-radius:12px;
+  color:#17210d; background:#b9f46f; font:inherit; font-weight:800; cursor:pointer; }}
+.auth-intro {{ color:#9198a8; line-height:1.5; }}
+.auth-error {{ padding:12px 14px; border-radius:12px; color:#ffd5dc;
+  background:rgba(255,135,155,.14); }}
+</style></head><body><main class="auth-card"><div class="auth-brand">jobwatch</div>
+<h1>{html.escape(title)}</h1>{body}</main></body></html>"""
 
 
 _CSS = """\
@@ -1764,9 +2092,10 @@ h1 span { color:var(--muted-2); font-weight:620 }
   position:fixed; z-index:40; display:flex; align-items:center; gap:12px;
   right:calc(var(--pill-gap) + env(safe-area-inset-right));
   bottom:calc(var(--pill-gap) + env(safe-area-inset-bottom));
-  /* le tiers droit dès qu'il reste lisible ; en dessous, un plancher pour que
-     le texte ne s'empile pas lettre par lettre sur les écrans étroits */
-  width:max(240px, calc(100vw / 3 - 2 * var(--pill-gap))); padding:15px 13px 15px 18px;
+  /* la largeur suit le texte, jamais la fenêtre : sur un grand écran, une
+     largeur proportionnelle donnait un large aplat vide qui mordait la carte */
+  width:max-content; max-width:min(340px, calc(100vw - 2 * var(--pill-gap)));
+  padding:14px 12px 14px 17px;
   border:1px solid var(--line); border-radius:var(--radius-lg);
   background:var(--surface-2); box-shadow:var(--shadow); color:var(--fg);
   font-size:.88rem; line-height:1.4;
@@ -2357,8 +2686,15 @@ def _track_nav(track: str) -> str:
 
 def _page_template(
     *, body, total, new_count, seen_count, applied_count, stamp, track,
-    swipe_fab="", swipe_popup="", batch_pill="",
+    swipe_fab="", swipe_popup="", batch_pill="", csrf_token="",
 ) -> str:
+    logout_button = (
+        '<button class="theme-toggle" type="button" aria-label="Se déconnecter" '
+        'onclick="fetch(\'/logout\',{method:\'POST\'}).then(()=>location.href=\'/login\')">'
+        "↪</button>"
+        if csrf_token
+        else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="dark"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -2366,6 +2702,7 @@ def _page_template(
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>jobwatch · tableau de bord</title>
+{_csrf_head(csrf_token)}
 <script>
 (function () {{
   try {{
@@ -2389,6 +2726,7 @@ def _page_template(
       </div>
       <div class="topbar-tools">
       {swipe_fab}
+      {logout_button}
       <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Passer au thème clair">
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
           <circle cx="12" cy="12" r="3.7"/><path d="M12 2v2.1M12 19.9V22M4.93 4.93l1.49 1.49M17.58 17.58l1.49 1.49M2 12h2.1M19.9 12H22M4.93 19.07l1.49-1.49M17.58 6.42l1.49-1.49"/>
@@ -2672,7 +3010,7 @@ _SWIPE_JS = """\
 
 
 def _swipe_page_template(
-    *, track, cards, total, pending, batch, back_href, batch_pill=""
+    *, track, cards, total, pending, batch, back_href, batch_pill="", csrf_token=""
 ) -> str:
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="dark"><head><meta charset="utf-8">
@@ -2680,6 +3018,7 @@ def _swipe_page_template(
 <meta name="theme-color" content="#090b10">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>jobwatch · tri des offres</title>
+{_csrf_head(csrf_token)}
 <script>
 (function () {{
   try {{
