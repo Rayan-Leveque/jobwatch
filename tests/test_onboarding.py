@@ -226,7 +226,9 @@ def test_removed_category_search_is_deactivated_but_others_are_kept(tmp_path) ->
         row["name"]: row["active"]
         for row in conn.execute("SELECT name, active FROM search")
     }
-    assert searches == {"historique": 1, "Data": 1, "Ops": 0}
+    active = {name: state for name, state in searches.items() if state == 1}
+    assert active == {"historique": 1, "Data": 1}
+    assert [name for name, state in searches.items() if state == 0] == ["Ops (archivée 3)"]
     conn.close()
 
 
@@ -328,4 +330,127 @@ def test_matching_failure_after_save_keeps_the_profile(tmp_path, monkeypatch) ->
         "SELECT completed_at IS NOT NULL FROM candidate_profile WHERE account_id = ?",
         (account_id,),
     ).fetchone()[0] == 1
+    conn.close()
+
+
+def test_deleted_category_frees_its_name_for_a_later_rename(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [
+            {"label": "Data", "keywords": ["AI Engineer"], "exclude": []},
+            {"label": "Ops", "keywords": ["SRE"], "exclude": []},
+        ],
+    )
+    data_id = conn.execute("SELECT id FROM career_intent WHERE label = 'Data'").fetchone()[0]
+
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [{"id": data_id, "label": "Data", "keywords": ["AI Engineer"], "exclude": []}],
+    )
+    data_id = conn.execute("SELECT id FROM career_intent WHERE label = 'Data'").fetchone()[0]
+
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [{"id": data_id, "label": "Ops", "keywords": ["AI Engineer"], "exclude": []}],
+    )
+
+    active = {
+        row["name"]: row["id"]
+        for row in conn.execute("SELECT id, name FROM search WHERE active = 1")
+    }
+    assert set(active) == {"historique", "Ops"}
+    assert active["Ops"] == conn.execute(
+        "SELECT search_id FROM career_intent WHERE account_id = ?", (account_id,)
+    ).fetchone()[0]
+    conn.close()
+
+
+def test_category_deleted_and_its_name_reused_in_the_same_save(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [
+            {"label": "Data", "keywords": ["AI Engineer"], "exclude": []},
+            {"label": "Ops", "keywords": ["SRE"], "exclude": []},
+        ],
+    )
+    intents = {
+        row["label"]: (row["id"], row["search_id"])
+        for row in conn.execute("SELECT id, label, search_id FROM career_intent")
+    }
+
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [{"id": intents["Data"][0], "label": "Ops", "keywords": ["AI Engineer"], "exclude": []}],
+    )
+
+    kept = conn.execute("SELECT search_id FROM career_intent").fetchone()[0]
+    assert kept == intents["Data"][1]
+    assert conn.execute("SELECT name FROM search WHERE id = ?", (kept,)).fetchone()[0] == "Ops"
+    assert conn.execute(
+        "SELECT active FROM search WHERE id = ?", (intents["Ops"][1],)
+    ).fetchone()[0] == 0
+    conn.close()
+
+
+def test_other_account_categories_stay_active(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    other_id = conn.execute(
+        "INSERT INTO account (email) VALUES ('autre@example.com')"
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO membership (account_id, workspace_id, role) VALUES (?, ?, 'owner')",
+        (other_id, workspace_id),
+    )
+    conn.commit()
+    complete_profile(
+        conn,
+        int(other_id),
+        workspace_id,
+        [cv_id],
+        [{"label": "Produit", "keywords": ["Product Owner"], "exclude": []}],
+    )
+
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [{"label": "Data", "keywords": ["AI Engineer"], "exclude": []}],
+    )
+
+    assert conn.execute("SELECT active FROM search WHERE name = 'Produit'").fetchone()[0] == 1
+    assert conn.execute("SELECT active FROM search WHERE name = 'Data'").fetchone()[0] == 1
+    conn.close()
+
+
+def test_manual_category_with_code_fence_is_saved(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    label = "Data ```json``` avancé"
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [{"label": label, "keywords": ["AI Engineer"], "exclude": []}],
+    )
+
+    assert conn.execute("SELECT label FROM career_intent").fetchone()[0] == label
+    assert conn.execute("SELECT active FROM search WHERE name = ?", (label,)).fetchone()[0] == 1
     conn.close()

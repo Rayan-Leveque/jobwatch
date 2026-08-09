@@ -108,13 +108,8 @@ def analyze_cv(
     return analyze_cvs(conn, config, [cv_library_id])
 
 
-def parse_intents(response: str, *, strict: bool = False) -> list[CareerIntent]:
-    """Valide des pistes proposées par l'IA, ou saisies par l'utilisateur si strict.
-
-    Le mode strict ne laisse rien tomber en silence : chaque ligne refusée
-    devient une erreur affichée dans le formulaire, alors que la proposition de
-    l'IA reste tolérante et ignore ce qui n'est pas exploitable.
-    """
+def parse_intents(response: str) -> list[CareerIntent]:
+    """Décode la réponse JSON de l'IA, puis valide les pistes proposées."""
     match = _JSON_FENCE_RE.search(response)
     text = match.group(1).strip() if match else response.strip()
     try:
@@ -124,17 +119,23 @@ def parse_intents(response: str, *, strict: bool = False) -> list[CareerIntent]:
     rows = payload.get("intents") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         raise OnboardingError("l'IA n'a pas renvoyé de pistes valides")
+    return validate_intents(rows, strict=False)
+
+
+def validate_intents(rows: list[object], *, strict: bool = True) -> list[CareerIntent]:
+    """Valide des pistes déjà décodées.
+
+    Le mode strict, utilisé pour la saisie de l'utilisateur, ne laisse rien
+    tomber en silence : chaque ligne refusée devient une erreur affichée dans le
+    formulaire. La proposition de l'IA reste tolérante et ignore l'inexploitable.
+    """
     if strict and len(rows) > MAX_INTENTS:
         raise OnboardingError(f"{MAX_INTENTS} catégories maximum")
-
-    def reject(message: str) -> bool:
-        if strict:
-            raise OnboardingError(message)
-        return True
-
     intents: list[CareerIntent] = []
     for row in rows[:MAX_INTENTS]:
-        if not isinstance(row, dict) and reject("catégorie invalide"):
+        if not isinstance(row, dict):
+            if strict:
+                raise OnboardingError("catégorie invalide")
             continue
         label = row.get("label")
         keywords = row.get("keywords")
@@ -142,18 +143,19 @@ def parse_intents(response: str, *, strict: bool = False) -> list[CareerIntent]:
         intent_id = row.get("id")
         if not isinstance(intent_id, int) or isinstance(intent_id, bool):
             intent_id = None
-        if (not isinstance(label, str) or not label.strip()) and reject(
-            "chaque catégorie doit avoir un nom"
+        if not isinstance(label, str) or not label.strip():
+            if strict:
+                raise OnboardingError("chaque catégorie doit avoir un nom")
+            continue
+        if not isinstance(keywords, list) or not all(
+            isinstance(keyword, str) and keyword.strip() for keyword in keywords
         ):
+            if strict:
+                raise OnboardingError("chaque catégorie doit contenir au moins un mot-clé")
             continue
-        if (
-            not isinstance(keywords, list)
-            or not all(isinstance(keyword, str) and keyword.strip() for keyword in keywords)
-        ) and reject("chaque catégorie doit contenir au moins un mot-clé"):
-            continue
-        if (
-            not isinstance(exclude, list) or not all(isinstance(term, str) for term in exclude)
-        ) and reject("les termes à exclure doivent être du texte"):
+        if not isinstance(exclude, list) or not all(isinstance(term, str) for term in exclude):
+            if strict:
+                raise OnboardingError("les termes à exclure doivent être du texte")
             continue
         intents.append(
             CareerIntent(
@@ -180,12 +182,24 @@ def parse_intents(response: str, *, strict: bool = False) -> list[CareerIntent]:
     return intents
 
 
-def _sync_intent_searches(conn: sqlite3.Connection, intents: list[CareerIntent]) -> list[int]:
+def _sync_intent_searches(
+    conn: sqlite3.Connection, account_id: int, intents: list[CareerIntent]
+) -> list[int]:
     """Aligne les recherches sur les catégories et renvoie leur id, dans l'ordre.
 
     La recherche déjà rattachée à une catégorie est renommée sur place : les
     matchs conservent leur recherche, donc le tri déjà fait par l'utilisateur.
+    Seules les recherches déjà rattachées à une catégorie de ce compte sont
+    touchées : celles de config.yaml et du pont Markdown restent actives.
     """
+    owned = {
+        int(row["search_id"])
+        for row in conn.execute(
+            "SELECT DISTINCT search_id FROM career_intent "
+            "WHERE account_id = ? AND search_id IS NOT NULL",
+            (account_id,),
+        )
+    }
     searches = [
         SearchConfig(name=intent.label, include=intent.keywords, exclude=intent.exclude)
         for intent in intents
@@ -209,9 +223,18 @@ def _sync_intent_searches(conn: sqlite3.Connection, intents: list[CareerIntent])
             taken.add(search_id)
         resolved.append(search_id)
 
+    # Une catégorie retirée libère son nom : sa recherche est archivée, jamais
+    # supprimée, pour que ses matchs restent en base.
+    stale = sorted(owned - taken)
+
     for search, search_id in zip(searches, resolved):
         clash = conn.execute("SELECT id FROM search WHERE name = ?", (search.name,)).fetchone()
-        if clash is not None and int(clash["id"]) != search_id and int(clash["id"]) not in taken:
+        if (
+            clash is not None
+            and int(clash["id"]) != search_id
+            and int(clash["id"]) not in taken
+            and int(clash["id"]) not in stale
+        ):
             raise OnboardingError(f"une recherche nommée « {search.name} » existe déjà")
 
     # Renommage en deux temps : sans nom provisoire, échanger deux noms de
@@ -220,6 +243,12 @@ def _sync_intent_searches(conn: sqlite3.Connection, intents: list[CareerIntent])
         "UPDATE search SET name = ? WHERE id = ?",
         [(f"__jobwatch_sync_{search_id}", search_id) for search_id in sorted(taken)],
     )
+    if stale:
+        conn.execute(
+            "UPDATE search SET name = name || ' (archivée ' || id || ')', active = 0 "
+            f"WHERE id IN ({','.join('?' for _ in stale)})",
+            tuple(stale),
+        )
 
     search_ids: list[int] = []
     for search, search_id in zip(searches, resolved):
@@ -255,21 +284,6 @@ def _sync_intent_searches(conn: sqlite3.Connection, intents: list[CareerIntent])
                 ),
             )
         search_ids.append(search_id)
-
-    # Seules les recherches déjà rattachées à une catégorie sont désactivées :
-    # les recherches de config.yaml et celles du pont Markdown restent actives.
-    owned = {
-        int(row["search_id"])
-        for row in conn.execute(
-            "SELECT DISTINCT search_id FROM career_intent WHERE search_id IS NOT NULL"
-        )
-    }
-    stale = sorted(owned - set(search_ids))
-    if stale:
-        conn.execute(
-            f"UPDATE search SET active = 0 WHERE id IN ({','.join('?' for _ in stale)})",
-            tuple(stale),
-        )
     return search_ids
 
 
@@ -285,7 +299,7 @@ def sync_profile_searches(conn: sqlite3.Connection) -> bool:
     intents = profile_intents(conn, account_id)
     if not intents:
         return False
-    search_ids = _sync_intent_searches(conn, intents)
+    search_ids = _sync_intent_searches(conn, account_id, intents)
     _store_intent_search_ids(conn, intents, search_ids)
     conn.commit()
     return True
@@ -319,7 +333,7 @@ def complete_profile(
         raise OnboardingError("CV invalide")
     if len(cv_library_ids) != len(set(cv_library_ids)):
         raise OnboardingError("un même CV ne peut être sélectionné qu'une fois")
-    intents = parse_intents(json.dumps({"intents": rows}, ensure_ascii=False), strict=True)
+    intents = validate_intents(rows)
     conn.execute("BEGIN IMMEDIATE")
     try:
         owned = {
@@ -363,7 +377,7 @@ def complete_profile(
                 for position, cv_library_id in enumerate(cv_library_ids)
             ],
         )
-        search_ids = _sync_intent_searches(conn, intents)
+        search_ids = _sync_intent_searches(conn, account_id, intents)
         conn.execute("DELETE FROM career_intent WHERE account_id = ?", (account_id,))
         conn.executemany(
             "INSERT INTO career_intent (account_id, label, keywords_json, exclude_json, "
