@@ -544,13 +544,26 @@ def apps(config_path: Path | None) -> None:
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 @click.option("--host", "host", default="127.0.0.1", show_default=True, help="adresse d'écoute")
 @click.option("--port", "port", type=int, default=8000, show_default=True, help="port d'écoute")
-def serve(config_path: Path | None, host: str, port: int) -> None:
+@click.option(
+    "--secure-cookie/--no-secure-cookie",
+    default=True,
+    show_default=True,
+    help="cookie réservé à HTTPS ; désactiver explicitement pour un accès HTTP privé",
+)
+def serve(config_path: Path | None, host: str, port: int, secure_cookie: bool) -> None:
     """Sert un tableau de bord web local."""
     config = _require_config(config_path)
     conn = _open_db(config)
     conn.close()
     try:
-        serve_http(config.db, host, port, draft_config=config.draft)
+        serve_http(
+            config.db,
+            host,
+            port,
+            draft_config=config.draft,
+            workspace_slug=_current_instance(),
+            secure_cookie=secure_cookie,
+        )
     except ServeError as exc:
         _fatal(str(exc))
 
