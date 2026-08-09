@@ -1196,8 +1196,9 @@ def make_handler(
                         self._send_json(409, {"error": "une génération est déjà en cours"})
                         return
                     cur = conn.execute(
-                        "INSERT INTO draft_job (match_id, track, cv_library_id, instruction) "
-                        "VALUES (?, ?, ?, ?)",
+                        "INSERT INTO draft_job "
+                        "(match_id, track, cv_library_id, instruction, status) "
+                        "VALUES (?, ?, ?, ?, 'queued')",
                         (match_id, track, cv_library_id, (instruction or "").strip() or None),
                     )
                     job_id = int(cur.lastrowid)
@@ -1379,10 +1380,26 @@ def url_of(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
+def _fail_interrupted_draft_jobs(db_path: Path) -> None:
+    """Marque en échec les jobs laissés en 'running'/'queued' par un arrêt du serveur."""
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE draft_job SET status = 'failed', "
+            "error = 'interrompu par un redémarrage du serveur', "
+            "finished_at = datetime('now') "
+            "WHERE status IN ('running', 'queued')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def serve_http(
     db_path: Path, host: str, port: int, draft_config: DraftConfig | None = None
 ) -> None:
     """Crée le serveur HTTP et le sert jusqu'à Ctrl-C."""
+    _fail_interrupted_draft_jobs(db_path)
     try:
         server = ThreadingHTTPServer((host, port), make_handler(db_path, draft_config))
     except (OSError, OverflowError) as exc:

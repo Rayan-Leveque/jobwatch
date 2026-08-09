@@ -417,7 +417,7 @@ def test_http_draft_post_creates_job_and_rejects_concurrent(
         status, body = _request(port, f"/match/{match_id}/draft/status")
         assert status == 200
         payload = json.loads(body)
-        assert payload["status"] == "running"
+        assert payload["status"] == "queued"
         assert "draft-spinner" in payload["html"]
 
         status, _ = _request(port, "/match/999/draft/status")
@@ -430,6 +430,57 @@ def test_http_draft_post_creates_job_and_rejects_concurrent(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_fail_interrupted_draft_jobs_unblocks_match(
+    db_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    running_id = _seed_job(conn, match_id, cv_id)
+    cur = conn.execute(
+        "INSERT INTO draft_job (match_id, track, cv_library_id, status) "
+        "VALUES (?, 'engineer', ?, 'queued')",
+        (match_id, cv_id),
+    )
+    queued_id = int(cur.lastrowid)
+    cur = conn.execute(
+        "INSERT INTO draft_job (match_id, track, cv_library_id, status) "
+        "VALUES (?, 'engineer', ?, 'ok')",
+        (match_id, cv_id),
+    )
+    ok_id = int(cur.lastrowid)
+    conn.commit()
+    conn.close()
+
+    serve._fail_interrupted_draft_jobs(db_path)
+
+    conn = _conn(db_path)
+    rows = {row["id"]: row for row in conn.execute("SELECT * FROM draft_job")}
+    conn.close()
+    for job_id in (running_id, queued_id):
+        assert rows[job_id]["status"] == "failed"
+        assert "redémarrage" in rows[job_id]["error"]
+        assert rows[job_id]["finished_at"] is not None
+    assert rows[ok_id]["status"] == "ok"
+    assert rows[ok_id]["finished_at"] is None
+
+    spawned: list[int] = []
+    monkeypatch.setattr(serve, "_spawn_draft_job", lambda db, cfg, job_id: spawned.append(job_id))
+    server, thread = _start_server(db_path, _config(tmp_path))
+    try:
+        status, body = _request(
+            server.server_address[1],
+            f"/match/{match_id}/draft",
+            {"cv_library_id": cv_id, "track": "engineer"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert status == 202, body
+    assert spawned == [json.loads(body)["job_id"]]
 
 
 def test_http_draft_post_validates_fields(db_path: Path, tmp_path: Path) -> None:
