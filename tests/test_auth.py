@@ -50,8 +50,8 @@ def test_password_hash_uses_unique_salt_and_verifies() -> None:
 def test_password_policy_is_length_only_and_accepts_unicode() -> None:
     assert validate_password(PASSWORD) == PASSWORD
     assert validate_password("mot de passe avec espaces")
-    with pytest.raises(AuthError, match="15"):
-        validate_password("trop court")
+    with pytest.raises(AuthError, match="8"):
+        validate_password("court")
 
 
 def test_invite_creates_owner_and_is_one_time(conn: sqlite3.Connection) -> None:

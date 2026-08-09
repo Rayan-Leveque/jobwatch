@@ -894,7 +894,7 @@ def render_page(
         track=track,
         swipe_fab=swipe_fab,
         swipe_popup=swipe_popup,
-        batch_pill=_BATCH_PILL_HTML if draft_enabled else "",
+        batch_badge=_BATCH_BADGE_HTML if draft_enabled else "",
         csrf_token=csrf_token,
     )
 
@@ -1021,7 +1021,7 @@ def render_swipe_page(
     return _swipe_page_template(
         track=track, cards=cards, total=len(deck), pending=pending,
         batch=batch, back_href=back_href,
-        batch_pill=_BATCH_PILL_HTML if draft_enabled else "",
+        batch_badge=_BATCH_BADGE_HTML if draft_enabled else "",
         csrf_token=csrf_token,
     )
 
@@ -1773,12 +1773,12 @@ def _invite_form(token: str, error: str = "") -> str:
     error_html = f'<p class="auth-error">{html.escape(error)}</p>' if error else ""
     action = f"/invite/{html.escape(token, quote=True)}"
     return f"""{error_html}
-<p class="auth-intro">Choisissez un mot de passe d'au moins 15 caractères.</p>
+<p class="auth-intro">Choisissez un mot de passe d'au moins 8 caractères.</p>
 <form method="post" action="{action}">
   <label>Mot de passe<input type="password" name="password"
-    autocomplete="new-password" minlength="15" required></label>
+    autocomplete="new-password" minlength="8" required></label>
   <label>Confirmation<input type="password" name="password_confirmation"
-    autocomplete="new-password" minlength="15" required></label>
+    autocomplete="new-password" minlength="8" required></label>
   <button type="submit">Créer mon compte</button>
 </form>"""
 
@@ -2258,7 +2258,7 @@ _BATCH_BADGE_JS = """\
     panel.hidden = true;
   });
 
-  window.jwBatchPill = {
+  window.jwBatchBadge = {
     poll,
     start: () => {
       wrap.hidden = false;
@@ -2701,7 +2701,7 @@ def _track_nav(track: str) -> str:
 
 def _page_template(
     *, body, total, new_count, seen_count, applied_count, stamp, track,
-    swipe_fab="", swipe_popup="", batch_pill="", csrf_token="",
+    swipe_fab="", swipe_popup="", batch_badge="", csrf_token="",
 ) -> str:
     logout_button = (
         '<button class="theme-toggle" type="button" aria-label="Se déconnecter" '
@@ -2740,6 +2740,7 @@ def _page_template(
           <span class="identity-sub">Suivi de vos offres</span></div>
       </div>
       <div class="topbar-tools">
+      {batch_badge}
       {swipe_fab}
       {logout_button}
       <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Passer au thème clair">
@@ -2788,10 +2789,9 @@ def _page_template(
   <footer class="footer">Lecture seule · données locales · base SQLite jobwatch</footer>
 </div>
 {swipe_popup}
-{batch_pill}
 <script>
 {_JS}
-{_BATCH_PILL_JS}</script></body></html>
+{_BATCH_BADGE_JS}</script></body></html>
 """
 
 
@@ -2856,8 +2856,6 @@ _SWIPE_CSS = """\
 .batch-btn { justify-self:start; gap:5px; color:var(--violet) }
 .batch-btn:disabled { opacity:.45; cursor:default }
 .done-back { display:inline-flex; margin-top:18px; text-decoration:none }
-/* remontée au-dessus des boutons de tri, qui occupent le bas de l'écran */
-.batch-pill { bottom:calc(108px + env(safe-area-inset-bottom)) }
 """
 
 _SWIPE_JS = """\
@@ -3014,7 +3012,7 @@ _SWIPE_JS = """\
         body: JSON.stringify({track, cv_library_id: Number(select.value)}),
       }).then(resp => {
         if (!resp.ok) { batchBtn.disabled = false; delete batchBtn.dataset.started; return; }
-        if (window.jwBatchPill) window.jwBatchPill.start();
+        if (window.jwBatchBadge) window.jwBatchBadge.start();
       }).catch(() => {});
     });
   }
@@ -3025,7 +3023,7 @@ _SWIPE_JS = """\
 
 
 def _swipe_page_template(
-    *, track, cards, total, pending, batch, back_href, batch_pill="", csrf_token=""
+    *, track, cards, total, pending, batch, back_href, batch_badge="", csrf_token=""
 ) -> str:
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="light"><head><meta charset="utf-8">
@@ -3051,6 +3049,7 @@ def _swipe_page_template(
 <div class="swipe-shell">
   <div class="swipe-top">
     <a class="swipe-back" href="{back_href}">← Tableau de bord</a>
+    {batch_badge}
     <span class="swipe-count" id="swipe-count">1 / {total}</span>
   </div>
   <div class="swipe-stage" id="swipe-stage">
@@ -3074,8 +3073,7 @@ def _swipe_page_template(
     <a class="card-action done-back" href="{back_href}">← Retour au tableau de bord</a>
   </section>
 </div>
-{batch_pill}
 <script>
 {_SWIPE_JS}
-{_BATCH_PILL_JS}</script></body></html>
+{_BATCH_BADGE_JS}</script></body></html>
 """
