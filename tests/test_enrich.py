@@ -472,3 +472,72 @@ def test_enrich_summarizes_in_parallel_pool(conn: sqlite3.Connection, monkeypatc
     assert result.summaries_written == 3
     assert result.fields_written == 3
     assert peak == 2  # borné par concurrency, mais bien parallèle
+
+
+def test_config_parses_codex_runner(tmp_path) -> None:
+    from jobwatch.config import ConfigError, load_config
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "enrich:\n"
+        "  runner: codex\n"
+        "  model: gpt-5.6-luna\n"
+        "  variant: max\n"
+    )
+    config = load_config(config_file).enrich
+    assert config is not None
+    assert config.runner == "codex"
+    assert config.codex_bin == "codex"
+    assert config.model == "gpt-5.6-luna"
+
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "enrich:\n"
+        "  runner: gemini\n"
+        "  model: m\n"
+    )
+    import pytest as _pytest
+
+    with _pytest.raises(ConfigError, match="runner"):
+        load_config(config_file)
+
+    # Le runner opencode exige toujours opencode_bin explicitement.
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "enrich:\n"
+        "  model: m\n"
+    )
+    with _pytest.raises(ConfigError, match="opencode_bin"):
+        load_config(config_file)
+
+
+def test_summarize_codex_builds_command_and_reads_output(monkeypatch) -> None:
+    import subprocess as sp
+    from pathlib import Path as P
+
+    from jobwatch.enrich import _summarize
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["input"] = kwargs.get("input")
+        out_path = P(command[command.index("-o") + 1])
+        out_path.write_text("EXPERIENCE: 4 ans\nSALAIRE: 50k\n- Mission IA\n", encoding="utf-8")
+        return sp.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("jobwatch.enrich.subprocess.run", fake_run)
+    config = EnrichConfig(model="gpt-5.6-luna", runner="codex", variant="max")
+    result = _summarize(config, "texte de l'offre")
+
+    assert result == ({"experience": "4 ans", "salary": "50k"}, ["Mission IA"])
+    command = captured["command"]
+    assert command[:2] == ["codex", "exec"]
+    assert command[command.index("--model") + 1] == "gpt-5.6-luna"
+    assert "model_reasoning_effort=max" in command
+    assert "-s" in command and command[command.index("-s") + 1] == "danger-full-access"
+    assert captured["input"] == "texte de l'offre"

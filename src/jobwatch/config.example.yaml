@@ -36,9 +36,11 @@ notify: {}
 
 # enrich : pour activer, supprimez la ligne « enrich: {} » ci-dessous,
 # puis décommentez et remplissez :
-#   opencode_bin: opencode              # binaire ou commande OpenCode
-#   model: opencode/deepseek-v4-flash-free
-#   variant: max                        # optionnel : effort de raisonnement (--variant OpenCode)
+#   runner: opencode                    # opencode (API) ou codex (CLI codex exec, abonnement ChatGPT)
+#   opencode_bin: opencode              # binaire OpenCode (requis avec runner opencode)
+#   codex_bin: codex                    # binaire codex (runner codex)
+#   model: opencode/deepseek-v4-flash-free   # avec codex : nom de modèle côté codex, ex. gpt-5.6-luna
+#   variant: max                        # optionnel : effort de raisonnement (--variant / model_reasoning_effort)
 #   concurrency: 4                      # optionnel : appels LLM de résumé simultanés (défaut 4)
 enrich: {}
 
