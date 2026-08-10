@@ -339,6 +339,48 @@ def test_offer_markdown_renders_visually_not_as_raw_syntax(browser, dashboard) -
     page.close()
 
 
+def test_swipe_card_scroll_uses_themed_scrollbar(browser, dashboard) -> None:
+    """La scrollbar interne de la carte swipe suit le thème (var(--line-strong)),
+    pas la scrollbar par défaut du navigateur, une fois le contenu déplié en
+    overflow réel."""
+    url, db_path = dashboard
+    conn = connect(db_path)
+    offer_id = int(
+        conn.execute(
+            "SELECT o.id FROM offer o JOIN company c ON c.id = o.company_id "
+            "WHERE c.name = 'NewCo'"
+        ).fetchone()["id"]
+    )
+    long_content = "\n\n".join(f"## Section {i}\n\nTexte de section {i}." for i in range(30))
+    _add_content(conn, offer_id, long_content)
+    conn.close()
+
+    page = browser.new_page()
+    page.goto(f"{url}/swipe")
+    popup = page.locator("#swipe-popup")
+    if popup.count() and popup.is_visible():
+        page.locator(".swipe-popup-later").click()
+    card = page.locator(".swipe-card.top")
+    card.locator(".swipe-content-toggle").click()
+
+    scroll = card.locator(".swipe-card-scroll")
+    assert scroll.evaluate("el => el.scrollHeight > el.clientHeight")
+
+    expected = {
+        "light": "rgba(29, 31, 35, 0.17) rgba(0, 0, 0, 0)",
+        "dark": "rgba(255, 255, 255, 0.16) rgba(0, 0, 0, 0)",
+    }
+    for theme, expected_color in expected.items():
+        page.evaluate("t => document.documentElement.dataset.theme = t", theme)
+        computed = scroll.evaluate(
+            "el => { const s = getComputedStyle(el); "
+            "return { color: s.scrollbarColor, width: s.scrollbarWidth }; }"
+        )
+        assert computed["color"] == expected_color, (theme, computed)
+        assert computed["width"] == "thin", (theme, computed)
+    page.close()
+
+
 def test_invite_then_protected_action_in_browser(browser, protected_dashboard) -> None:
     url, invite = protected_dashboard
     page = browser.new_page()
