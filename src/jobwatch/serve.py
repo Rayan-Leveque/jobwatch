@@ -1694,21 +1694,17 @@ def make_handler(
             _spawn_draft_job(db_path, draft_config, job_id)
             self._send_json(202, {"ok": True, "job_id": job_id})
 
+        @_db_error_response()
         def _handle_letter_body_get(self, match_id: int) -> None:
             try:
-                conn = connect(db_path)
-                try:
+                with self._db() as conn:
                     body_text = draft.get_body_edit(conn, match_id)
-                finally:
-                    conn.close()
             except draft.DraftError as exc:
                 self._send_json(404, {"error": str(exc)})
                 return
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
             self._send_json(200, {"body": body_text})
 
+        @_db_error_response()
         def _handle_letter_body_post(self, match_id: int) -> None:
             if draft_config is None:
                 self._send_json(
@@ -1722,28 +1718,21 @@ def make_handler(
             if not isinstance(text, str) or not text.strip():
                 self._send_json(400, {"error": "le texte de la lettre ne peut pas être vide"})
                 return
-            try:
-                conn = connect(db_path)
+            with self._db() as conn:
                 try:
-                    try:
-                        job_id = draft.apply_body_edit(conn, db_path, match_id, text)
-                    except draft.DraftError as exc:
-                        self._send_json(422, {"error": str(exc)})
-                        return
-                    job = conn.execute(
-                        "SELECT * FROM draft_job WHERE id = ?", (job_id,)
+                    job_id = draft.apply_body_edit(conn, db_path, match_id, text)
+                except draft.DraftError as exc:
+                    self._send_json(422, {"error": str(exc)})
+                    return
+                job = conn.execute(
+                    "SELECT * FROM draft_job WHERE id = ?", (job_id,)
+                ).fetchone()
+                entry = None
+                if job is not None and job["library_id"] is not None:
+                    entry = conn.execute(
+                        "SELECT id, label FROM document_library WHERE id = ?",
+                        (job["library_id"],),
                     ).fetchone()
-                    entry = None
-                    if job is not None and job["library_id"] is not None:
-                        entry = conn.execute(
-                            "SELECT id, label FROM document_library WHERE id = ?",
-                            (job["library_id"],),
-                        ).fetchone()
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
             payload = {"status": str(job["status"]), "html": _draft_status_html(match_id, job)}
             if entry is not None:
                 payload["library_id"] = int(entry["id"])
