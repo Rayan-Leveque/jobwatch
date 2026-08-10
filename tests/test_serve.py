@@ -644,10 +644,70 @@ def test_markdown_to_html_renders_safe_link() -> None:
     )
 
 
-def test_markdown_to_html_leaves_unsafe_link_scheme_as_text() -> None:
-    html_out = _markdown_to_html("[cliquer](javascript:alert(1))")
+def test_markdown_to_html_degrades_unsafe_link_scheme_to_label_only() -> None:
+    """Ni lien ni syntaxe brute : le contenu réel regorge de liens relatifs/ancre
+    de navigation scrapés (ex. '#main-content'), les laisser en littéral donnerait
+    une impression de rendu cassé sur une bonne partie des annonces."""
+    html_out = _markdown_to_html("[cliquer](javascript:malicious)")
     assert "<a " not in html_out
-    assert "[cliquer](javascript:alert(1))" in html_out
+    assert "javascript:" not in html_out
+    assert html_out == "<p>cliquer</p>"
+
+
+def test_markdown_to_html_degrades_relative_nav_link_to_label_only() -> None:
+    html_out = _markdown_to_html("[Skip to main content](#main-content)")
+    assert "<a " not in html_out
+    assert html_out == "<p>Skip to main content</p>"
+
+
+def test_markdown_to_html_renders_titled_link() -> None:
+    html_out = _markdown_to_html('[Wavestone](https://www.wavestone.com/ "Wavestone")')
+    assert (
+        '<a href="https://www.wavestone.com/" target="_blank" '
+        'rel="noopener noreferrer">Wavestone</a>' in html_out
+    )
+
+
+def test_markdown_to_html_renders_link_with_parens_in_url() -> None:
+    """Motif réel (choisirleservicepublic.gouv.fr) : une URL peut contenir des parenthèses."""
+    html_out = _markdown_to_html("[Fiche](https://example.gouv.fr/metiers/ingenieur(e)/)")
+    assert (
+        '<a href="https://example.gouv.fr/metiers/ingenieur(e)/" target="_blank" '
+        'rel="noopener noreferrer">Fiche</a>' in html_out
+    )
+
+
+def test_markdown_to_html_degrades_mailto_with_raw_spaces_to_label_only() -> None:
+    """Motif réel (partage par email) : espaces bruts non encodés dans l'URL,
+    et un titre optionnel en fin de parenthèse ne doit pas être avalé par l'URL."""
+    html_out = _markdown_to_html(
+        '[Partager par email](mailto:?subject=Une offre &body=Voir ici "Partager par email")'
+    )
+    assert "<a " not in html_out
+    assert html_out == "<p>Partager par email</p>"
+
+
+def test_markdown_to_html_renders_clickable_logo_as_plain_link() -> None:
+    """Motif réel des offres scrapées : logo cliquable [![alt](image)](lien)."""
+    html_out = _markdown_to_html(
+        "[![Wavestone logo](https://c.example.com/logo.png)](https://www.wavestone.com/)"
+    )
+    assert (
+        '<a href="https://www.wavestone.com/" target="_blank" '
+        'rel="noopener noreferrer">Wavestone logo</a>' in html_out
+    )
+    assert "![" not in html_out
+
+
+def test_markdown_to_html_drops_standalone_image() -> None:
+    html_out = _markdown_to_html("![Decorative banner](https://example.com/banner.png)")
+    assert html_out == "<p>Decorative banner</p>"
+
+
+def test_markdown_to_html_renders_underlined_setext_heading() -> None:
+    """markdownify produit ce style par défaut pour les h1/h2 (pas de #)."""
+    html_out = _markdown_to_html("Missions\n========\n\nTexte.")
+    assert html_out == '<p class="md-heading">Missions</p><p>Texte.</p>'
 
 
 def test_markdown_to_html_escapes_html_inside_formatting() -> None:

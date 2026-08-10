@@ -512,11 +512,52 @@ def _summary_panel(row: sqlite3.Row, summary: Summary, prefix: str) -> tuple[str
 
 
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+# Titre "souligné" (markdownify produit ce style par défaut pour les h1/h2,
+# ex. "Titre\n===" ou "Titre\n---") : seulement reconnu juste après une ligne
+# de texte non vide, jamais après une ligne blanche (sinon ce serait plutôt
+# une séparation visuelle sans rapport avec un titre).
+_MD_SETEXT_RE = re.compile(r"^(?:=+|-{2,})$")
 _MD_UL_RE = re.compile(r"^[-*]\s+(.+)$")
 _MD_OL_RE = re.compile(r"^\d+\.\s+(.+)$")
-_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^()\s]+)\)")
+# Quotes du titre optionnel déjà html.escape()-ées (&quot;/&#x27;) au moment où
+# ce motif s'applique : le texte est échappé avant tout formatage (voir plus bas).
+_MD_TITLE = r"(?:&quot;.*?&quot;|&#x27;.*?&#x27;)"
+_MD_TITLE_SUFFIX = r"(?:\s+" + _MD_TITLE + r")?"
+# Une URL réelle peut contenir une paire de parenthèses (ex. une page
+# gouvernementale ".../ingenieur(e)") ou des espaces bruts (ex. un lien
+# mailto:?subject=... non encodé) : on tolère un niveau de parenthèses
+# imbriquées et les espaces, la sécurité venant du filtre de schéma
+# http(s) dans _render_anchor, pas de la forme de l'URL elle-même. Un espace
+# n'est consommé dans l'URL que s'il n'amorce pas un titre optionnel (sinon
+# l'URL gloutonne avalerait le titre avant que _MD_TITLE_SUFFIX ne le voie).
+_MD_URL = r"(?:[^()\s]|\([^()]*\)|\s(?!" + _MD_TITLE + r"\)))*"
+# Logo/illustration cliquable : [![alt](image)](lien) -> lien texté avec l'alt.
+_MD_LINKED_IMAGE_RE = re.compile(
+    r"\[!\[([^\]]*)\]\(" + _MD_URL + r"\)\]\((" + _MD_URL + r")" + _MD_TITLE_SUFFIX + r"\)"
+)
+# Image seule, jamais affichée (pas de support image) : on ne garde que l'alt.
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(" + _MD_URL + _MD_TITLE_SUFFIX + r"\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((" + _MD_URL + r")" + _MD_TITLE_SUFFIX + r"\)")
 _MD_BOLD_RE = re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*")
 _MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)")
+
+
+def _render_anchor(label: str, url: str) -> str:
+    """Lien réel seulement en http(s) ; sinon juste le texte, sans crochets/URL.
+
+    Le contenu réel des offres regorge de liens de navigation relatifs ou en
+    ancre (`#main-content`, `/fr/companies`...) issus de la page complète
+    scrapée : les garder cliquables serait inutile (URL relative à nulle
+    part) et les laisser en syntaxe Markdown littérale ([texte](url)) donne
+    une impression de rendu cassé. Le texte seul est le repli le plus propre.
+    """
+    try:
+        scheme = urlsplit(url).scheme.lower()
+    except ValueError:
+        return label
+    if scheme not in ("http", "https"):
+        return label
+    return f'<a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a>'
 
 
 def _format_inline(text: str) -> str:
@@ -525,21 +566,20 @@ def _format_inline(text: str) -> str:
     L'échappement précède le formatage : les caractères Markdown (*, [, ], (,
     )) traversent html.escape intacts, donc les regex ci-dessous opèrent en
     toute sécurité sur du texte déjà échappé sans jamais réinjecter de HTML
-    fourni par l'offre.
+    fourni par l'offre. Les images (seules ou cliquables, ex. logo d'entreprise
+    lié à son site) ne sont jamais affichées, faute de support image : un logo
+    cliquable devient un lien texté avec son alt, une image isolée devient son
+    alt en texte brut. Doit tourner avant _MD_LINK_RE, qui matcherait sinon
+    à l'intérieur des crochets imbriqués et laisserait des fragments cassés.
     """
     escaped = html.escape(text)
-
-    def _replace_link(match: re.Match[str]) -> str:
-        label, url = match.group(1), match.group(2)
-        try:
-            scheme = urlsplit(url).scheme.lower()
-        except ValueError:
-            return match.group(0)
-        if scheme not in ("http", "https"):
-            return match.group(0)
-        return f'<a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a>'
-
-    escaped = _MD_LINK_RE.sub(_replace_link, escaped)
+    escaped = _MD_LINKED_IMAGE_RE.sub(
+        lambda match: _render_anchor(match.group(1), match.group(2)), escaped
+    )
+    escaped = _MD_IMAGE_RE.sub(lambda match: match.group(1), escaped)
+    escaped = _MD_LINK_RE.sub(
+        lambda match: _render_anchor(match.group(1), match.group(2)), escaped
+    )
     escaped = _MD_BOLD_RE.sub(r"<strong>\1</strong>", escaped)
     escaped = _MD_ITALIC_RE.sub(r"<em>\1</em>", escaped)
     return escaped
@@ -573,8 +613,11 @@ def _markdown_to_html(markdown: str) -> str:
             list_items.clear()
         list_tag = None
 
-    for raw_line in markdown.strip().splitlines():
-        line = raw_line.strip()
+    lines = markdown.strip().splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        index += 1
         if not line:
             flush_paragraph()
             flush_list()
@@ -587,6 +630,12 @@ def _markdown_to_html(markdown: str) -> str:
             continue
         ul_match = _MD_UL_RE.match(line)
         ol_match = _MD_OL_RE.match(line) if not ul_match else None
+        if not (ul_match or ol_match) and index < len(lines) and _MD_SETEXT_RE.match(lines[index].strip()):
+            flush_paragraph()
+            flush_list()
+            blocks.append(f'<p class="md-heading">{_format_inline(line)}</p>')
+            index += 1
+            continue
         if ul_match or ol_match:
             flush_paragraph()
             tag = "ul" if ul_match else "ol"
