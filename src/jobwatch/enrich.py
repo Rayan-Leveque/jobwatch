@@ -27,24 +27,25 @@ from __future__ import annotations
 import gzip
 import json
 import logging
-import os
 import random
 import re
 import sqlite3
-import subprocess
-import tempfile
 import time
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from dataclasses import field as dataclasses_field
-from pathlib import Path
 
 import httpx
 from playwright.sync_api import sync_playwright
 
+from jobwatch import llm_runner
 from jobwatch.config import EnrichConfig
 from jobwatch.extraction import Extraction, extract
+from jobwatch.llm_runner import LLMRunnerError, run_codex, run_opencode
+
+OPENCODE_TOOLS = llm_runner.OPENCODE_TOOLS
+opencode_sandbox = llm_runner.opencode_sandbox
 
 log = logging.getLogger(__name__)
 
@@ -263,127 +264,30 @@ def _summarize(config: EnrichConfig, markdown: str) -> SummaryParts | None:
     return _summarize_opencode(config, markdown)
 
 
-def _summarize_codex(
-    config: EnrichConfig, markdown: str
-) -> SummaryParts | None:
-    # Le texte de l'offre passe par stdin (bloc <stdin> côté codex) : pas de
-    # limite d'argument ni de fichier temporaire à faire lire au modèle. La
-    # réponse finale est écrite par codex dans un fichier (-o), donc aucun
-    # parsing de log. Le texte vient d'une page tierce, donc non fiable :
-    # lecture seule, config utilisateur ignorée et outils désactivés.
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        out_path = Path(tmp_dir) / "reponse.txt"
-        command = [
-            config.codex_bin, "exec",
-            "--ignore-user-config",
-            "--disable", "shell_tool",
-            "--disable", "code_mode_host",
-            "--disable", "apps",
-            "--disable", "plugins",
-            "--model", config.model,
-            "-s", "read-only",
-            "--skip-git-repo-check",
-            "--ephemeral",
-            "-o", str(out_path),
-        ]
-        if config.variant:
-            command += ["-c", f"model_reasoning_effort={config.variant}"]
-        command.append(CODEX_SUMMARY_PROMPT)
-        try:
-            completed = subprocess.run(
-                command,
-                input=markdown,
-                capture_output=True,
-                text=True,
-                timeout=CODEX_TIMEOUT_SECONDS,
-                check=False,
-                cwd=tmp_dir,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log.warning("enrich: codex subprocess failed: %s", exc)
-            return None
-        if completed.returncode != 0:
-            log.warning("enrich: codex exited with status %s", completed.returncode)
-            return None
-        try:
-            text = out_path.read_text(encoding="utf-8")
-        except OSError:
-            log.warning("enrich: codex did not write its final message")
-            return None
+def _summarize_codex(config: EnrichConfig, markdown: str) -> SummaryParts | None:
+    try:
+        text = run_codex(binary=config.codex_bin, model=config.model,
+                         prompt=CODEX_SUMMARY_PROMPT, attachment=markdown,
+                         timeout=CODEX_TIMEOUT_SECONDS, variant=config.variant)
+    except LLMRunnerError as exc:
+        log.warning("enrich: %s", exc)
+        return None
     fields, quotes, bullets = _parse_summary(text)
     if not fields and not bullets:
         return None
     return fields, _verified_quotes(quotes, markdown), bullets
 
 
-OPENCODE_TOOLS = (
-    "bash",
-    "read",
-    "edit",
-    "write",
-    "patch",
-    "glob",
-    "grep",
-    "list",
-    "lsp",
-    "skill",
-    "task",
-    "todowrite",
-    "webfetch",
-    "websearch",
-)
-
-
-def opencode_sandbox(tmp_dir: Path, allow: tuple[str, ...] = ()) -> dict[str, str]:
-    """Refuse à OpenCode tout outil hors `allow`, et renvoie l'environnement à utiliser.
-
-    Le texte fourni au modèle vient d'une page tierce. `--pure` ne coupe que les
-    plugins externes : la configuration globale de l'utilisateur reste fusionnée
-    avec le fichier de projet écrit ici, et une permission nommée qu'elle
-    accorderait l'emporterait sur un simple `*`. Chaque outil connu est donc
-    refusé nommément, dans le fichier et dans OPENCODE_PERMISSION, que OpenCode
-    applique après tous les fichiers de configuration.
-    """
-    permission = {"*": "deny"}
-    permission.update({tool: "deny" for tool in OPENCODE_TOOLS if tool not in allow})
-    permission.update({tool: "allow" for tool in allow})
-    (tmp_dir / "opencode.json").write_text(
-        json.dumps({"$schema": "https://opencode.ai/config.json", "permission": permission}),
-        encoding="utf-8",
-    )
-    return {**os.environ, "OPENCODE_PERMISSION": json.dumps(permission)}
-
-
-def _summarize_opencode(
-    config: EnrichConfig, markdown: str
-) -> SummaryParts | None:
-    # Le Markdown est passé en pièce jointe (--file) et non en argument CLI :
-    # le noyau Linux limite chaque argument individuel à ~128 Ko (MAX_ARG_STRLEN).
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        content_path = Path(tmp_dir) / "offer.md"
-        content_path.write_text(markdown, encoding="utf-8")
-        env = opencode_sandbox(Path(tmp_dir))
-        command = [config.opencode_bin, "run", "--pure", "--model", config.model]
-        if config.variant:
-            command += ["--variant", config.variant]
-        command += ["--format", "json", f"--file={content_path}", "--", SUMMARY_PROMPT]
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-                cwd=tmp_dir,
-                env=env,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log.warning("enrich: opencode subprocess failed: %s", exc)
-            return None
-    if completed.returncode != 0:
-        log.warning("enrich: opencode exited with status %s", completed.returncode)
+def _summarize_opencode(config: EnrichConfig, markdown: str) -> SummaryParts | None:
+    try:
+        stdout = run_opencode(binary=config.opencode_bin, model=config.model,
+                              prompt=SUMMARY_PROMPT, attachment=markdown,
+                              timeout=120, variant=config.variant, pass_variant=True,
+                              attachment_name="offer.md")
+    except LLMRunnerError as exc:
+        log.warning("enrich: %s", exc)
         return None
-    text = _extract_text(completed.stdout)
+    text = _extract_text(stdout)
     fields, quotes, bullets = _parse_summary(text)
     if not fields and not bullets:
         return None

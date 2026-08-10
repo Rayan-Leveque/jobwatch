@@ -152,7 +152,7 @@ def test_codex_research_uses_schema_and_candidate_attachment(monkeypatch) -> Non
         out_path.write_text(json.dumps({"offers": [row]}), encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr("jobwatch.research.subprocess.run", fake_run)
+    monkeypatch.setattr("jobwatch.llm_runner.subprocess.run", fake_run)
     result = research_offers(_config(variant="max"), _searches(), [candidate])
     assert result.fits_by_url[candidate.url] == "high"
     assert result.offers[0].company == "Acme"
@@ -175,7 +175,7 @@ def test_opencode_research_denies_local_tools_and_allows_web(monkeypatch) -> Non
         event = {"type": "text", "part": {"text": json.dumps({"offers": []})}}
         return subprocess.CompletedProcess(command, 0, json.dumps(event), "")
 
-    monkeypatch.setattr("jobwatch.research.subprocess.run", fake_run)
+    monkeypatch.setattr("jobwatch.llm_runner.subprocess.run", fake_run)
 
     result = research_offers(
         _config(runner="opencode", opencode_bin="opencode-test"), _searches(), []
@@ -186,7 +186,7 @@ def test_opencode_research_denies_local_tools_and_allows_web(monkeypatch) -> Non
 
 def test_research_failure_is_non_blocking(monkeypatch) -> None:
     monkeypatch.setattr(
-        "jobwatch.research.subprocess.run",
+        "jobwatch.llm_runner.subprocess.run",
         lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, "", "boom"),
     )
     assert research_offers(_config(), _searches(), []) == ResearchResult([], {}, failed=True)

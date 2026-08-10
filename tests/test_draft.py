@@ -1154,7 +1154,7 @@ def test_call_llm_codex_builds_command_and_reads_output(monkeypatch) -> None:
         out_path.write_text(MINIMAL_TEX, encoding="utf-8")
         return sp.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr("jobwatch.draft.subprocess.run", fake_run)
+    monkeypatch.setattr("jobwatch.llm_runner.subprocess.run", fake_run)
     config = DraftConfig(model="gpt-5.6-luna", runner="codex", variant="max")
     text = draft._call_llm(config, "Rédige la lettre.", "# OFFRE\n\ncontenu")
 
@@ -1175,7 +1175,7 @@ def test_call_llm_codex_failure_raises_drafterror(monkeypatch) -> None:
     import subprocess as sp
 
     monkeypatch.setattr(
-        "jobwatch.draft.subprocess.run",
+        "jobwatch.llm_runner.subprocess.run",
         lambda command, **kwargs: sp.CompletedProcess(command, 1, stdout="", stderr="boom"),
     )
     config = DraftConfig(model="m", runner="codex")
@@ -1200,7 +1200,7 @@ def test_call_opencode_denies_every_tool_by_name(monkeypatch) -> None:
         event = json.dumps({"type": "text", "part": {"text": MINIMAL_TEX}})
         return sp.CompletedProcess(command, 0, stdout=event, stderr="")
 
-    monkeypatch.setattr("jobwatch.draft.subprocess.run", fake_run)
+    monkeypatch.setattr("jobwatch.llm_runner.subprocess.run", fake_run)
     config = DraftConfig(model="m", runner="opencode")
     text = draft._call_llm(config, "Rédige la lettre.", "# OFFRE\n\ncontenu")
 

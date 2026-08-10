@@ -449,7 +449,7 @@ def test_summarize_passes_variant_to_opencode(monkeypatch) -> None:
         event = json.dumps({"type": "text", "part": {"text": "EXPERIENCE: 2 ans\n- Puce"}})
         return sp.CompletedProcess(command, 0, stdout=event, stderr="")
 
-    monkeypatch.setattr("jobwatch.enrich.subprocess.run", fake_run)
+    monkeypatch.setattr("jobwatch.llm_runner.subprocess.run", fake_run)
     result = _summarize(
         EnrichConfig(opencode_bin="opencode", model="opencode-go/gpt-5.6-luna", variant="max"),
         "texte d'offre",
@@ -554,7 +554,7 @@ def test_summarize_codex_builds_command_and_reads_output(monkeypatch) -> None:
         out_path.write_text("EXPERIENCE: 4 ans\nSALAIRE: 50k\n- Mission IA\n", encoding="utf-8")
         return sp.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr("jobwatch.enrich.subprocess.run", fake_run)
+    monkeypatch.setattr("jobwatch.llm_runner.subprocess.run", fake_run)
     config = EnrichConfig(model="gpt-5.6-luna", runner="codex", variant="max")
     result = _summarize(config, "texte de l'offre")
 
@@ -589,7 +589,7 @@ def test_summarize_opencode_denies_every_tool_by_name(monkeypatch) -> None:
         event = json.dumps({"type": "text", "part": {"text": "EXPERIENCE: 2 ans\n- Puce"}})
         return sp.CompletedProcess(command, 0, stdout=event, stderr="")
 
-    monkeypatch.setattr("jobwatch.enrich.subprocess.run", fake_run)
+    monkeypatch.setattr("jobwatch.llm_runner.subprocess.run", fake_run)
     _summarize(EnrichConfig(opencode_bin="opencode", model="m"), "texte d'offre")
 
     assert "--pure" in captured["command"]

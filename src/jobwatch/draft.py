@@ -32,8 +32,9 @@ import httpx
 
 from jobwatch.config import DRAFT_TRACKS, DraftConfig
 from jobwatch.db import connect
-from jobwatch.enrich import _extract_text, _fetch_and_extract, opencode_sandbox
+from jobwatch.enrich import _extract_text, _fetch_and_extract
 from jobwatch.library import documents_dir
+from jobwatch.llm_runner import LLMRunnerError, run_codex, run_opencode
 
 log = logging.getLogger(__name__)
 
@@ -302,88 +303,28 @@ def _call_llm(config: DraftConfig, prompt: str, attachment: str) -> str:
 
 
 def _call_codex(config: DraftConfig, prompt: str, attachment: str) -> str:
-    # Le bundle passe par stdin (bloc <stdin> côté codex) et la réponse finale
-    # est écrite par codex dans un fichier (-o) : pas de limite d'argument ni
-    # de parsing de log. Le bundle contient du texte d'annonce scrapé, donc non
-    # fiable : lecture seule, config utilisateur ignorée et outils désactivés.
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        out_path = Path(tmp_dir) / "reponse.txt"
-        command = [
-            config.codex_bin, "exec",
-            "--ignore-user-config",
-            "--disable", "shell_tool",
-            "--disable", "code_mode_host",
-            "--disable", "apps",
-            "--disable", "plugins",
-            "--model", config.model,
-            "-s", "read-only",
-            "--skip-git-repo-check",
-            "--ephemeral",
-            "-o", str(out_path),
-        ]
-        if config.variant:
-            command += ["-c", f"model_reasoning_effort={config.variant}"]
-        command.append(CODEX_PREAMBLE + prompt)
-        try:
-            completed = subprocess.run(
-                command,
-                input=attachment,
-                capture_output=True,
-                text=True,
-                timeout=CODEX_TIMEOUT_SECONDS,
-                check=False,
-                cwd=tmp_dir,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise DraftError(f"appel codex échoué : {exc}") from exc
-        if completed.returncode != 0:
-            raise DraftError(f"codex a quitté avec le code {completed.returncode}")
-        try:
-            text = out_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise DraftError("codex n'a pas écrit sa réponse finale") from exc
+    try:
+        text = run_codex(binary=config.codex_bin, model=config.model,
+                         prompt=CODEX_PREAMBLE + prompt, attachment=attachment,
+                         timeout=CODEX_TIMEOUT_SECONDS, variant=config.variant)
+    except LLMRunnerError as exc:
+        raise DraftError(str(exc)) from exc
     if not text.strip():
         raise DraftError("réponse vide du modèle")
     return text
 
 
 def _call_opencode(config: DraftConfig, prompt: str, attachment: str) -> str:
-    # Pièce jointe via --file et non en argument : le noyau limite chaque
-    # argument à ~128 Ko (MAX_ARG_STRLEN), un bundle offre+CV+exemples dépasse.
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        bundle_path = Path(tmp_dir) / "bundle.md"
-        bundle_path.write_text(attachment, encoding="utf-8")
-        env = opencode_sandbox(Path(tmp_dir))
-        try:
-            completed = subprocess.run(
-                [
-                    config.opencode_bin,
-                    "run",
-                    "--pure",
-                    "--model",
-                    config.model,
-                    "--format",
-                    "json",
-                    f"--file={bundle_path}",
-                    "--",
-                    prompt,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=LLM_TIMEOUT_SECONDS,
-                check=False,
-                cwd=tmp_dir,
-                env=env,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise DraftError(f"appel OpenCode échoué : {exc}") from exc
-    if completed.returncode != 0:
-        raise DraftError(f"OpenCode a quitté avec le code {completed.returncode}")
-    text = _extract_text(completed.stdout)
+    try:
+        stdout = run_opencode(binary=config.opencode_bin, model=config.model,
+                              prompt=prompt, attachment=attachment,
+                              timeout=LLM_TIMEOUT_SECONDS, attachment_name="bundle.md")
+    except LLMRunnerError as exc:
+        raise DraftError(str(exc)) from exc
+    text = _extract_text(stdout)
     if not text.strip():
         raise DraftError("réponse vide du modèle")
     return text
-
 
 def extract_latex(text: str) -> str:
     """Extrait le document LaTeX d'une réponse LLM (bloc ```latex``` ou texte brut)."""
