@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 import gzip
 import logging
+import os
 import re
 import shutil
 import sqlite3
@@ -688,6 +689,41 @@ def get_body_edit(conn: sqlite3.Connection, match_id: int) -> str:
     return body
 
 
+def _commit_letter_files(
+    target_dir: Path, stem: str, tex: str, pdf_path: Path, png_paths: list[Path]
+) -> tuple[Path, Path]:
+    """Publie tex/pdf/pngs vers target_dir par rename atomique une fois chaque nouvelle
+    version entièrement écrite, pour qu'un échec d'écriture en cours de route (disque
+    plein, permission) ne laisse jamais la lettre live partiellement écrasée."""
+    final_tex = target_dir / f"{stem}.tex"
+    final_pdf = target_dir / f"{stem}.pdf"
+    staged: list[tuple[Path, Path]] = []
+    try:
+        staged_tex = target_dir / f".{stem}.tex.new"
+        staged_tex.write_text(tex, encoding="utf-8")
+        staged.append((staged_tex, final_tex))
+
+        staged_pdf = target_dir / f".{stem}.pdf.new"
+        shutil.copyfile(pdf_path, staged_pdf)
+        staged.append((staged_pdf, final_pdf))
+
+        for png in png_paths:
+            staged_png = target_dir / f".{png.name}.new"
+            shutil.copyfile(png, staged_png)
+            staged.append((staged_png, target_dir / png.name))
+
+        kept_names = {dest.name for _, dest in staged}
+        for src, dest in staged:
+            os.replace(src, dest)
+        for stale in target_dir.glob(f"{stem}-*.png"):
+            if stale.name not in kept_names:
+                stale.unlink()
+    finally:
+        for src, _ in staged:
+            src.unlink(missing_ok=True)
+    return final_tex, final_pdf
+
+
 def apply_body_edit(conn: sqlite3.Connection, db_path: Path, match_id: int, body_text: str) -> int:
     """Recompile la lettre existante avec un corps édité à la main ; renvoie l'id du nouveau job.
 
@@ -739,20 +775,23 @@ def apply_body_edit(conn: sqlite3.Connection, db_path: Path, match_id: int, body
             work_pdf = work_dir / f"{stem}.pdf"
             shutil.copyfile(result, work_pdf)
             render_pngs(work_pdf, work_dir, stem)
+            new_pngs = sorted(work_dir.glob(f"{stem}-*.png"))
 
             target_dir.mkdir(parents=True, exist_ok=True)
-            final_tex = target_dir / f"{stem}.tex"
-            final_pdf = target_dir / f"{stem}.pdf"
-            final_tex.write_text(new_tex, encoding="utf-8")
-            shutil.copyfile(work_pdf, final_pdf)
-            for stale in target_dir.glob(f"{stem}-*.png"):
-                stale.unlink()
-            for png in sorted(work_dir.glob(f"{stem}-*.png")):
-                shutil.copyfile(png, target_dir / png.name)
-    except Exception:
+            final_tex, final_pdf = _commit_letter_files(
+                target_dir, stem, new_tex, work_pdf, new_pngs
+            )
+    except DraftError:
         conn.execute("DELETE FROM draft_job WHERE id = ?", (placeholder_id,))
         conn.commit()
         raise
+    except Exception as exc:
+        conn.execute("DELETE FROM draft_job WHERE id = ?", (placeholder_id,))
+        conn.commit()
+        log.exception(
+            "draft: échec inattendu de l'édition manuelle pour le match %d", match_id
+        )
+        raise DraftError(f"erreur interne : {exc}") from exc
 
     library_id = _upsert_library_entry(conn, match_id, _label_for(match), final_pdf)
     _finish_job(

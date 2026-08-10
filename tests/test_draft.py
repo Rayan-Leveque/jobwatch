@@ -562,6 +562,46 @@ def test_apply_body_edit_rejects_when_generation_running(
     assert count == 2  # le job 'ok' initial et le job 'running' : rien de plus
 
 
+@pytest.mark.skipif(not HAS_TEX, reason="lualatex/pdftoppm absents")
+def test_apply_body_edit_unexpected_failure_leaves_live_files_untouched(
+    db_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    _seed_ok_job(conn, db_path, match_id, cv_id)
+
+    first_job_id = apply_body_edit(conn, db_path, match_id, "Premier texte valide à 100%.")
+    first_job = conn.execute("SELECT * FROM draft_job WHERE id = ?", (first_job_id,)).fetchone()
+    target_dir = Path(first_job["tex_path"]).parent
+    original_tex = Path(first_job["tex_path"]).read_text(encoding="utf-8")
+    original_pdf_bytes = Path(first_job["pdf_path"]).read_bytes()
+
+    real_copyfile = shutil.copyfile
+    calls = {"n": 0}
+
+    def flaky_copyfile(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:  # échoue lors de la copie du pdf mis en scène dans target_dir
+            raise OSError("disque plein simulé")
+        return real_copyfile(src, dst)
+
+    monkeypatch.setattr(draft.shutil, "copyfile", flaky_copyfile)
+
+    with pytest.raises(DraftError, match="erreur interne"):
+        apply_body_edit(conn, db_path, match_id, "Second texte qui échoue à la publication.")
+
+    assert Path(first_job["tex_path"]).read_text(encoding="utf-8") == original_tex
+    assert Path(first_job["pdf_path"]).read_bytes() == original_pdf_bytes
+    assert not [p for p in target_dir.iterdir() if p.name.endswith(".new")]
+
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM draft_job WHERE match_id = ?", (match_id,)
+    ).fetchone()["n"]
+    conn.close()
+    assert count == 2  # le job initial et le premier edit réussi : rien de plus après l'échec
+
+
 # ---------------------------------------------------------------- rendu HTML
 
 
