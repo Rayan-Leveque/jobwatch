@@ -12,7 +12,9 @@ Pas de cloud, pas de traçage : le tableau de bord, SQLite et les documents gér
 locaux dans le dossier de l'instance sur votre machine. Trois fonctions LLM restent optionnelles
 et inertes sans configuration explicite : `research` complète les collecteurs directs par une
 recherche web large, `jw enrich` extrait et résume les annonces collectées, et le tableau de bord
-peut rédiger des lettres de motivation. Les appels passent par un binaire OpenCode ou Codex local.
+peut rédiger des lettres de motivation. Les appels passent par un binaire OpenCode ou Codex local,
+lancé en bac à sable : Codex ignore la configuration utilisateur et tourne sans outil local,
+OpenCode voit chacun de ses outils refusé nommément (seule `research` rouvre le web).
 
 ## Démarrage rapide
 
@@ -57,7 +59,10 @@ données sous `~/.local/share/jobwatch/instances/<nom>/`. Les variables XDG sont
 Un `--config PATH` explicite reste prioritaire.
 `account invite` active l'authentification de l'instance et produit un chemin d'invitation
 propriétaire valable 48 heures. Ouvrez ce chemin sur le serveur de l'instance pour choisir le mot
-de passe. Les pages, documents et actions deviennent alors inaccessibles sans session. Le cookie
+de passe. Une instance n'accepte qu'une seule adresse propriétaire : offres, documents et
+candidatures y sont communs, donc une deuxième personne a besoin de sa propre `--instance`.
+Tant que l'invitation n'a pas été acceptée, la relancer avec une autre adresse remplace la
+précédente ; une fois le compte créé, l'adresse ne change plus. Les pages, documents et actions deviennent alors inaccessibles sans session. Le cookie
 est réservé à HTTPS par défaut. Pour un serveur HTTP strictement local ou privé, lancez
 explicitement `jw --instance alice serve --no-secure-cookie`; ne publiez jamais ce mode sur Internet.
 
@@ -229,10 +234,12 @@ remet la carte sur le paquet.
 propose de générer d'un coup les lettres de motivation de **toutes** les offres « À candidater »
 de la piste qui n'en ont pas encore (les échecs précédents sont réessayés, les lettres
 existantes ne sont pas régénérées) avec un CV choisi pour tout le lot. Les jobs partent en file
-(`status='queued'`, deux générations simultanées au plus) ; l'écran affiche l'avancement en
-direct et la génération continue côté serveur même si la page est fermée. Ouvrir `/swipe` avec
-un paquet vide mène directement à ce bilan, ce qui permet de lancer la génération groupée à
-tout moment.
+(`status='queued'`, deux générations simultanées au plus) et la génération continue côté serveur
+même si la page est fermée. Le bilan est une page de sortie : une fois le lot lancé, l'avancement
+se suit dans un badge de la barre du haut (anneau de progression, puis panneau « x prête(s) ·
+z échec(s) » au clic), présent aussi bien sur le tableau de bord que sur `/swipe`, et rechargé
+depuis le serveur à chaque chargement de page. Ouvrir `/swipe` avec un paquet vide mène
+directement à ce bilan, ce qui permet de lancer la génération groupée à tout moment.
 
 ## Génération de lettre de motivation
 
@@ -270,7 +277,7 @@ RAG »...) transmet la lettre précédente au modèle et remplace la même entr�
 | `searches` | Liste des recherches enregistrées. Chaque recherche a : `name` (identifiant unique), `include` (mots-clés, au moins un, correspondance insensible à la casse sur le titre), `exclude` (mots-clés, aucun), `locations` (correspondance par sous-chaîne sur la localisation de l'offre ; vide = n'importe où), `contract` (optionnel : `permanent`, `fixed_term`, `internship`, `other`). |
 | `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. `linkedin` prend une liste de couples `keywords`/`location` et une fenêtre `hours`. `wttj` prend ses requêtes, pays, villes internationales, fenêtre `hours` et les identifiants publics de l'index Algolia utilisé par le site. |
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
-| `research` | Recherche web large facultative après les collecteurs directs : runner `codex` ou `opencode`, modèle, fenêtre `recency_days`, plafond `max_results` et instructions de profil. Le processus Codex est en lecture seule sans outils locaux ; OpenCode n'autorise que `websearch` et `webfetch`. Les catégories confirmées dans SQLite sont utilisées en priorité. |
+| `research` | Recherche web large facultative après les collecteurs directs : runner `codex` ou `opencode`, modèle, fenêtre `recency_days`, plafond `max_results` (appliqué après validation et déduplication) et instructions de profil. C'est le seul runner à qui `websearch` et `webfetch` restent autorisés. Les catégories confirmées dans SQLite sont utilisées en priorité. |
 | `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, ou `codex` pour passer par le CLI `codex exec` couvert par un abonnement ChatGPT), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (ex. `opencode/deepseek-v4-flash-free` ou `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). |
 | `draft` | Génération de lettre de motivation depuis le tableau de bord : `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. |
 
@@ -283,11 +290,16 @@ Dans `config.example.yaml`, les blocs `sources`, `notify`, `research`, `enrich` 
 (`{}`) : décommentez-les et remplissez-les pour activer la collecte, les notifications,
 l'enrichissement, la recherche large et la génération de lettres. Avec la config d'exemple non modifiée,
 `jw init && jw run` ne fait aucun appel réseau et ne publie rien ; `jw enrich` refuse de
-s'exécuter tant que `enrich` n'est pas rempli, et le bouton « Générer LM » n'apparaît pas tant
+s'exécuter tant que `enrich` n'est pas rempli, et l'onglet « Lettre » n'apparaît pas tant
 que `draft` n'est pas rempli.
 
-Les recherches sont synchronisées dans la base à chaque `jw run` : les nouvelles sont insérées,
-les modifiées mises à jour, les supprimées désactivées (les matchs existants sont conservés).
+Les recherches de `config.yaml` sont synchronisées dans la base à chaque `jw run` : les nouvelles
+sont insérées, les modifiées mises à jour, les supprimées désactivées (les matchs existants sont
+conservés). Les catégories confirmées dans le tableau de bord sont gérées à part et ne peuvent
+jamais reprendre une recherche de `config.yaml` ni celle d'un autre compte : retirer une catégorie
+l'archive (`search.archived_at`) sous un nom suffixé « (archivée N) », ce qui retire ses matchs du
+tableau de bord et du digest sans rien effacer et libère son nom ; renommer une catégorie garde en
+revanche sa recherche, donc le tri déjà fait.
 
 ## Identifiants France Travail
 
@@ -316,16 +328,17 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `offer_summary` | Résumé factuel unique associé à une offre existante (`source` : `manual` ou `auto`) |
 | `summary_field` | Champs structurés d'un résumé (expérience, salaire, télétravail, stack) et citation vérifiée optionnelle |
 | `summary_bullet` | Bullets d'un résumé avec leur position explicite |
-| `search` | Recherches enregistrées (mots-clés, localisations, contrat) |
+| `search` | Recherches enregistrées (mots-clés, localisations, contrat) ; `archived_at` marque une catégorie retirée, masquée du tableau de bord et du digest |
 | `match` | Paire offre/recherche avec état et statut de notification |
 | `application` | Votre candidature pour une offre |
 | `event` | Historique d'une candidature (applied, interview, rejected, offer, ...) |
 | `document` | Fichiers CV et lettre de motivation attachés à une candidature |
 | `document_library` | Bibliothèque de documents réutilisables (CV, lettres) du tableau de bord |
 | `draft_job` | Jobs de génération de lettre de motivation (état, fichiers produits, avertissements) |
-| `workspace`, `account`, `membership` | Instance, comptes et droits préparant le passage au multi-utilisateur |
+| `workspace`, `account`, `membership` | Instance, compte propriétaire unique et droits, préparant le passage au multi-utilisateur |
 | `account_invite`, `web_session` | Invitations à durée limitée et sessions web opaques |
-| `candidate_profile`, `career_intent` | Profil d'onboarding et catégories métier confirmées d'un compte |
+| `instance_setting`, `login_throttle` | Réglages de l'instance (dont `auth_required`) et compteur d'échecs de connexion par email/adresse |
+| `candidate_profile`, `candidate_profile_document`, `career_intent` | Profil d'onboarding, CV analysés et catégories métier confirmées d'un compte |
 
 ## Feuille de route
 

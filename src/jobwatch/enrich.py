@@ -27,6 +27,7 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
@@ -229,14 +230,19 @@ def _summarize_codex(
     # Le texte de l'offre passe par stdin (bloc <stdin> côté codex) : pas de
     # limite d'argument ni de fichier temporaire à faire lire au modèle. La
     # réponse finale est écrite par codex dans un fichier (-o), donc aucun
-    # parsing de log. Sandbox danger-full-access : le bwrap de codex exec est
-    # cassé dans ce conteneur, c'est le seul mode fonctionnel.
+    # parsing de log. Le texte vient d'une page tierce, donc non fiable :
+    # lecture seule, config utilisateur ignorée et outils désactivés.
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_path = Path(tmp_dir) / "reponse.txt"
         command = [
             config.codex_bin, "exec",
+            "--ignore-user-config",
+            "--disable", "shell_tool",
+            "--disable", "code_mode_host",
+            "--disable", "apps",
+            "--disable", "plugins",
             "--model", config.model,
-            "-s", "danger-full-access",
+            "-s", "read-only",
             "--skip-git-repo-check",
             "--ephemeral",
             "-o", str(out_path),
@@ -271,6 +277,44 @@ def _summarize_codex(
     return fields, _verified_quotes(quotes, markdown), bullets
 
 
+OPENCODE_TOOLS = (
+    "bash",
+    "read",
+    "edit",
+    "write",
+    "patch",
+    "glob",
+    "grep",
+    "list",
+    "lsp",
+    "skill",
+    "task",
+    "todowrite",
+    "webfetch",
+    "websearch",
+)
+
+
+def opencode_sandbox(tmp_dir: Path, allow: tuple[str, ...] = ()) -> dict[str, str]:
+    """Refuse à OpenCode tout outil hors `allow`, et renvoie l'environnement à utiliser.
+
+    Le texte fourni au modèle vient d'une page tierce. `--pure` ne coupe que les
+    plugins externes : la configuration globale de l'utilisateur reste fusionnée
+    avec le fichier de projet écrit ici, et une permission nommée qu'elle
+    accorderait l'emporterait sur un simple `*`. Chaque outil connu est donc
+    refusé nommément, dans le fichier et dans OPENCODE_PERMISSION, que OpenCode
+    applique après tous les fichiers de configuration.
+    """
+    permission = {"*": "deny"}
+    permission.update({tool: "deny" for tool in OPENCODE_TOOLS if tool not in allow})
+    permission.update({tool: "allow" for tool in allow})
+    (tmp_dir / "opencode.json").write_text(
+        json.dumps({"$schema": "https://opencode.ai/config.json", "permission": permission}),
+        encoding="utf-8",
+    )
+    return {**os.environ, "OPENCODE_PERMISSION": json.dumps(permission)}
+
+
 def _summarize_opencode(
     config: EnrichConfig, markdown: str
 ) -> SummaryParts | None:
@@ -279,7 +323,8 @@ def _summarize_opencode(
     with tempfile.TemporaryDirectory() as tmp_dir:
         content_path = Path(tmp_dir) / "offer.md"
         content_path.write_text(markdown, encoding="utf-8")
-        command = [config.opencode_bin, "run", "--model", config.model]
+        env = opencode_sandbox(Path(tmp_dir))
+        command = [config.opencode_bin, "run", "--pure", "--model", config.model]
         if config.variant:
             command += ["--variant", config.variant]
         command += ["--format", "json", f"--file={content_path}", "--", SUMMARY_PROMPT]
@@ -291,6 +336,7 @@ def _summarize_opencode(
                 timeout=120,
                 check=False,
                 cwd=tmp_dir,
+                env=env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             log.warning("enrich: opencode subprocess failed: %s", exc)

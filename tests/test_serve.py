@@ -1485,3 +1485,25 @@ def test_http_document_preview_serves_library_file(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_matches_of_a_config_deactivated_search_stay_visible(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="Bridge", title="Data Engineer", search="suivi-importe")
+    conn.execute("UPDATE search SET active = 0 WHERE name = 'suivi-importe'")
+    conn.commit()
+
+    page = render_page(conn, "engineer")
+
+    assert "Bridge" in page
+
+
+def test_matches_of_an_archived_category_are_hidden(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="Ancienne", title="Data Engineer", search="Data")
+    conn.execute(
+        "UPDATE search SET active = 0, archived_at = datetime('now') WHERE name = 'Data'"
+    )
+    conn.commit()
+
+    page = render_page(conn, "engineer")
+
+    assert "Ancienne" not in page

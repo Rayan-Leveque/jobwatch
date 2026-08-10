@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS search (
   exclude_json TEXT NOT NULL,        -- JSON list of keywords (title match, none-of)
   locations_json TEXT NOT NULL,      -- JSON list; empty = anywhere
   contract TEXT,                     -- NULL = any
-  active INTEGER NOT NULL DEFAULT 1
+  active INTEGER NOT NULL DEFAULT 1, -- 0 = ne collecte plus (config.yaml ou catégorie retirée)
+  archived_at TEXT                   -- non NULL = retirée par l'utilisateur, masquée du tableau de bord
 );
 CREATE TABLE IF NOT EXISTS match (
   id INTEGER PRIMARY KEY,
@@ -191,6 +192,7 @@ CREATE TABLE IF NOT EXISTS career_intent (
   exclude_json TEXT NOT NULL DEFAULT '[]',
   position INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1,
+  search_id INTEGER REFERENCES search(id),
   UNIQUE(account_id, label)
 );
 CREATE INDEX IF NOT EXISTS idx_career_intent_account ON career_intent(account_id, position);

@@ -73,7 +73,7 @@ research: {}
 #   concurrency: 4                      # optionnel : appels LLM de résumé simultanés (défaut 4)
 enrich: {}
 
-# draft : génération de lettre de motivation depuis le dashboard (bouton « Générer LM »).
+# draft : génération de lettre de motivation depuis le dashboard (onglet « Lettre » des cartes).
 # Pour activer, supprimez la ligne « draft: {} » ci-dessous, puis décommentez et remplissez :
 #   runner: opencode                    # opencode (API) ou codex (CLI codex exec, abonnement ChatGPT)
 #   opencode_bin: opencode              # binaire OpenCode (requis avec runner opencode)

@@ -156,7 +156,7 @@ def _matches(conn: sqlite3.Connection, state: str, track: str) -> list[sqlite3.R
         "       o.contract AS contract, o.platform AS platform, o.url AS url, "
         "       o.collected_at AS collected_at, o.deadline AS deadline "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id AND s.active = 1 "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = ? AND (m.fit IS NULL OR m.fit != 'high') AND NOT EXISTS "
@@ -177,7 +177,7 @@ def _priority_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]
         "       o.contract AS contract, o.platform AS platform, o.url AS url, "
         "       o.collected_at AS collected_at, o.deadline AS deadline "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id AND s.active = 1 "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.fit = 'high' AND m.state IN ('new', 'seen') AND NOT EXISTS "
@@ -196,7 +196,7 @@ def _later_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
         "       o.contract AS contract, o.platform AS platform, o.url AS url, "
         "       o.collected_at AS collected_at, o.deadline AS deadline "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id AND s.active = 1 "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = 'later' AND NOT EXISTS "
@@ -218,7 +218,7 @@ def _discarded_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row
         "       o.contract AS contract, o.platform AS platform, o.url AS url, "
         "       o.collected_at AS collected_at, o.deadline AS deadline "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id AND s.active = 1 "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = 'discarded' AND m.discarded_at > datetime('now', '-30 days') "
@@ -244,7 +244,7 @@ def _applications(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
         "JOIN offer o ON o.id = a.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "LEFT JOIN match m ON m.id = a.match_id "
-        "LEFT JOIN search s ON s.id = m.search_id AND s.active = 1 "
+        "LEFT JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         f"WHERE 1=1 {_track_filter(track)}"
         "ORDER BY a.created_at DESC, a.id DESC",
         _track_params(track),
@@ -351,7 +351,7 @@ def _swipe_deck(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
         "       o.location AS location, o.contract AS contract, o.platform AS platform, "
         "       o.url AS url, o.collected_at AS collected_at, o.deadline AS deadline "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id AND s.active = 1 "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = 'new' AND NOT EXISTS "
@@ -367,7 +367,7 @@ def _swipe_deck(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
 # ni génération en cours (les échecs précédents sont réessayés).
 _BATCH_ELIGIBLE_SQL = (
     "FROM match m "
-    "JOIN search s ON s.id = m.search_id AND s.active = 1 "
+    "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
     "JOIN offer o ON o.id = m.offer_id "
     "WHERE m.state = 'later' AND NOT EXISTS "
     "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
@@ -403,7 +403,7 @@ def _batch_status(conn: sqlite3.Connection, track: str) -> dict[str, int]:
         "SELECT (SELECT dj.status FROM draft_job dj WHERE dj.match_id = m.id "
         "        ORDER BY dj.id DESC LIMIT 1) AS status "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id AND s.active = 1 "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "WHERE m.state = 'later' AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
@@ -1117,8 +1117,6 @@ def make_handler(
     requête dans un thread dédié, et la page relit ainsi l'état le plus récent.
     """
 
-    onboarding_enabled = onboarding_enabled or onboarding_config is not None
-
     class Handler(BaseHTTPRequestHandler):
         server_version = "jobwatch"
 
@@ -1216,6 +1214,7 @@ def make_handler(
                 initial_intents = (
                     [
                         {
+                            "id": intent.intent_id,
                             "label": intent.label,
                             "keywords": intent.keywords,
                             "exclude": intent.exclude,
@@ -1256,12 +1255,15 @@ def make_handler(
             if path == "/draft/batch/status":
                 self._handle_batch_status()
                 return
+            if path in ("/", "/swipe"):
+                track = "engineer"
+            elif path in ("/po", "/po/swipe"):
+                track = "project"
+            else:
+                self._send_text(404, "404 Not Found\n")
+                return
             swipe = path in ("/swipe", "/po/swipe")
-            if (
-                path in ("/", "/po", "/swipe", "/po/swipe")
-                and session is not None
-                and onboarding_enabled
-            ):
+            if session is not None and onboarding_enabled:
                 conn = connect(db_path)
                 try:
                     needs_onboarding = not profile_complete(conn, session.account_id)
@@ -1270,15 +1272,7 @@ def make_handler(
                 if needs_onboarding:
                     self._redirect("/onboarding")
                     return
-            if session is not None and onboarding_enabled:
                 track = "all"
-            elif path in ("/", "/swipe"):
-                track = "engineer"
-            elif path in ("/po", "/po/swipe"):
-                track = "project"
-            else:
-                self._send_text(404, "404 Not Found\n")
-                return
             try:
                 conn = connect(db_path)
                 try:
@@ -1733,6 +1727,9 @@ def make_handler(
                     )
                 except OnboardingError as exc:
                     self._send_json(400, {"error": str(exc)})
+                    return
+                except sqlite3.Error as exc:
+                    self._send_json(500, {"error": f"erreur base de données : {exc}"})
                     return
             finally:
                 conn.close()

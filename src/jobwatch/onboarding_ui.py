@@ -5,6 +5,8 @@ from __future__ import annotations
 import html
 import json
 
+from jobwatch.onboarding import MAX_INTENTS
+
 
 def _script_json(value: object) -> str:
     return (
@@ -43,6 +45,7 @@ def render_onboarding(
     confirm_label = "Enregistrer mes catégories" if editing else "Confirmer et lancer la découverte"
     back_link = '<a class="back-link" href="/">← Tableau de bord</a>' if editing else ""
     mode_back_hidden = " hidden" if editing else ""
+    max_intents = MAX_INTENTS
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -279,6 +282,7 @@ const intentCard = intent => {{
     <input class="keywords" aria-label="Mots-clés">
     <label class="field-label">À exclure, séparés par des virgules</label>
     <input class="exclude" aria-label="Termes exclus"></div>`;
+  if (Number.isInteger(intent.id)) card.dataset.intentId = String(intent.id);
   card.querySelector('.intent-label').value = intent.label || '';
   card.querySelector('.keywords').value = (intent.keywords || []).join(', ');
   card.querySelector('.exclude').value = (intent.exclude || []).join(', ');
@@ -289,16 +293,33 @@ const renderIntents = intents => {{
   const list = document.getElementById('intent-list'); list.replaceChildren();
   intents.forEach(intent => list.append(intentCard(intent)));
 }};
-document.getElementById('add-intent').addEventListener('click', () =>
-  document.getElementById('intent-list').append(intentCard({{label:'',keywords:[],exclude:[]}})));
+const MAX_INTENTS = {max_intents};
+document.getElementById('add-intent').addEventListener('click', () => {{
+  const list = document.getElementById('intent-list');
+  const status = document.getElementById('intent-status');
+  if (list.querySelectorAll('.intent').length >= MAX_INTENTS) {{
+    status.textContent = `${{MAX_INTENTS}} catégories maximum.`;
+    status.classList.add('error'); return;
+  }}
+  status.textContent = ''; status.classList.remove('error');
+  list.append(intentCard({{label:'',keywords:[],exclude:[]}}));
+}});
 document.getElementById('confirm').addEventListener('click', async event => {{
   const button = event.currentTarget; const status = document.getElementById('intent-status');
   const split = value => value.split(',').map(item => item.trim()).filter(Boolean);
-  const intents = [...document.querySelectorAll('.intent')].map(card => ({{
+  const cards = [...document.querySelectorAll('.intent')].map(card => ({{
+    id:card.dataset.intentId ? Number(card.dataset.intentId) : null,
     label:card.querySelector('.intent-label').value.trim(),
     keywords:split(card.querySelector('.keywords').value),
     exclude:split(card.querySelector('.exclude').value),
-  }})).filter(intent => intent.label && intent.keywords.length);
+  }}));
+  const complete = card => card.label && card.keywords.length;
+  const started = card => card.label || card.keywords.length || card.exclude.length;
+  if (cards.some(card => started(card) && !complete(card))) {{
+    status.textContent = 'Chaque catégorie doit avoir un nom et au moins un mot-clé.';
+    status.classList.add('error'); return;
+  }}
+  const intents = cards.filter(complete);
   if (!intents.length) {{ status.textContent = 'Ajoutez au moins une catégorie avec un mot-clé.';
     status.classList.add('error'); return; }}
   button.disabled = true; status.textContent = 'Enregistrement de vos catégories…';

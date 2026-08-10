@@ -160,9 +160,16 @@ def test_codex_research_uses_schema_and_candidate_attachment(monkeypatch) -> Non
 
 def test_opencode_research_denies_local_tools_and_allows_web(monkeypatch) -> None:
     def fake_run(command, **kwargs):
+        from jobwatch.enrich import OPENCODE_TOOLS
+
+        expected = {"*": "deny"}
+        expected.update(
+            {tool: "deny" for tool in OPENCODE_TOOLS if tool not in ("webfetch", "websearch")}
+        )
+        expected.update({"webfetch": "allow", "websearch": "allow"})
         config_path = Path(kwargs["cwd"]) / "opencode.json"
-        permissions = json.loads(config_path.read_text(encoding="utf-8"))["permission"]
-        assert permissions == {"*": "deny", "webfetch": "allow", "websearch": "allow"}
+        assert json.loads(config_path.read_text(encoding="utf-8"))["permission"] == expected
+        assert json.loads(kwargs["env"]["OPENCODE_PERMISSION"]) == expected
         assert "--pure" in command
         assert "--auto" in command
         event = {"type": "text", "part": {"text": json.dumps({"offers": []})}}
@@ -209,3 +216,50 @@ def test_apply_research_fits_never_overwrites_existing_fit() -> None:
     }
     assert rows == {offers[0].url: "high", offers[1].url: "low"}
     conn.close()
+
+
+def test_max_results_counts_valid_offers_not_rejected_rows() -> None:
+    rows = [
+        {
+            "title": "Doublon",
+            "url": "https://jobs.example/dup",
+            "company": "Acme",
+            "platform": "Acme",
+            "location": None,
+            "contract": None,
+            "published_at": None,
+            "fit": "high",
+        },
+        {
+            "title": "Doublon",
+            "url": "https://jobs.example/dup-2",
+            "company": "Acme",
+            "platform": "Acme",
+            "location": None,
+            "contract": None,
+            "published_at": None,
+            "fit": "high",
+        },
+        {"title": "Invalide", "url": "javascript:alert(1)", "company": "Bad", "fit": "high"},
+    ]
+    rows += [
+        {
+            "title": f"Offre {index}",
+            "url": f"https://jobs.example/{index}",
+            "company": f"Entreprise {index}",
+            "platform": "Jobs",
+            "location": None,
+            "contract": None,
+            "published_at": None,
+            "fit": "high",
+        }
+        for index in range(2)
+    ]
+
+    result = _parse_result(json.dumps({"offers": rows}), max_results=3)
+
+    assert [offer.url for offer in result.offers] == [
+        "https://jobs.example/dup",
+        "https://jobs.example/0",
+        "https://jobs.example/1",
+    ]

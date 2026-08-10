@@ -106,24 +106,33 @@ def extract(html: str) -> Extraction:
     posting = _job_posting(document) if document is not None else None
     fields = _jsonld_fields(posting) if posting else {}
 
-    for method, candidate in (
-        ("jsonld", _jsonld_markdown(posting) if posting else ""),
-        ("readable", _readable_markdown(html)),
-    ):
-        if len(candidate) < MIN_EXTRACT_LENGTH:
-            continue
-        lost = _lost_markers(raw, candidate)
-        if lost:
-            log.debug("extraction: %s rejetée, marqueurs perdus: %s", method, ", ".join(lost))
-            continue
-        return Extraction(markdown=_with_salvage(candidate, raw), method=method, fields=fields)
+    jsonld = _jsonld_markdown(posting) if posting else ""
+    if _accepted(raw, jsonld, "jsonld"):
+        return Extraction(markdown=_with_salvage(jsonld, raw), method="jsonld", fields=fields)
+
+    # trafilatura est l'étape la plus coûteuse : elle n'est lancée que si
+    # JSON-LD n'a pas gagné, et son résultat sert aussi au repli.
+    readable = _readable_markdown(html)
+    if _accepted(raw, readable, "readable"):
+        return Extraction(markdown=_with_salvage(readable, raw), method="readable", fields=fields)
 
     return Extraction(
         markdown=raw,
         method="raw",
         fields=fields,
-        lost_markers=_lost_markers(raw, _readable_markdown(html)),
+        lost_markers=_lost_markers(raw, readable),
     )
+
+
+def _accepted(raw: str, candidate: str, method: str) -> bool:
+    """Vrai quand le candidat est assez long et ne perd aucun marqueur du brut."""
+    if len(candidate) < MIN_EXTRACT_LENGTH:
+        return False
+    lost = _lost_markers(raw, candidate)
+    if lost:
+        log.debug("extraction: %s rejetée, marqueurs perdus: %s", method, ", ".join(lost))
+        return False
+    return True
 
 
 def _parse(html: str) -> lxml_html.HtmlElement | None:

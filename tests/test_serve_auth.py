@@ -8,11 +8,16 @@ from urllib.parse import urlencode
 
 from jobwatch.auth import create_invite
 from jobwatch.db import connect, init_db
+from jobwatch.onboarding import complete_profile
 from jobwatch.serve import make_handler
 
 
 def _start_server(
-    db_path: Path, *, workspace_slug: str | None = None, secure_cookie: bool = True
+    db_path: Path,
+    *,
+    workspace_slug: str | None = None,
+    secure_cookie: bool = True,
+    onboarding_enabled: bool = False,
 ) -> tuple[ThreadingHTTPServer, threading.Thread]:
     server = ThreadingHTTPServer(
         ("127.0.0.1", 0),
@@ -20,6 +25,7 @@ def _start_server(
             db_path,
             workspace_slug=workspace_slug,
             secure_cookie=secure_cookie,
+            onboarding_enabled=onboarding_enabled,
         ),
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -193,6 +199,56 @@ def test_login_cookie_is_secure_by_default(tmp_path: Path) -> None:
         )
         assert status == 303
         assert "Secure" in headers["Set-Cookie"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_unknown_path_is_404_for_onboarded_session(tmp_path: Path) -> None:
+    db_path = tmp_path / "jobwatch.db"
+    conn = connect(db_path)
+    init_db(conn)
+    invite = create_invite(conn, "alice", "alice@example.com")
+    conn.close()
+    server, thread = _start_server(
+        db_path, workspace_slug="alice", secure_cookie=False, onboarding_enabled=True
+    )
+    port = server.server_address[1]
+    try:
+        password = "une très longue phrase secrète"
+        encoded = urlencode(
+            {"password": password, "password_confirmation": password}
+        ).encode()
+        _status, headers, _body = _request(
+            port,
+            "POST",
+            f"/invite/{invite}",
+            body=encoded,
+            headers=_form_headers(port),
+        )
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+
+        conn = connect(db_path)
+        account_id = conn.execute("SELECT id FROM account").fetchone()["id"]
+        workspace_id = conn.execute("SELECT id FROM workspace").fetchone()["id"]
+        complete_profile(
+            conn,
+            int(account_id),
+            int(workspace_id),
+            [],
+            [{"label": "Data", "keywords": ["AI"], "exclude": []}],
+        )
+        conn.close()
+
+        status, _headers, _body = _request(port, "GET", "/", headers={"Cookie": cookie})
+        assert status == 200
+
+        status, _headers, body = _request(
+            port, "GET", "/favicon.ico", headers={"Cookie": cookie}
+        )
+        assert status == 404
+        assert "Nouveaux matchs" not in body
     finally:
         server.shutdown()
         server.server_close()

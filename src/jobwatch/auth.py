@@ -143,6 +143,27 @@ def auth_required(conn: sqlite3.Connection) -> bool:
     return row is not None and row["value"] == "1"
 
 
+def _refuse_second_owner(conn: sqlite3.Connection, workspace_id: int, email: str) -> None:
+    """Interdit un second compte sur l'instance.
+
+    Offres, documents et candidatures sont communs à l'instance : tant qu'ils ne
+    portent pas de propriétaire, un deuxième compte lirait les CV, les lettres et
+    le tri du premier. Une instance par personne reste la règle. Une invitation
+    encore en attente ne compte pas : elle n'a rien créé et reste remplaçable,
+    sinon une adresse mal tapée bloquerait l'instance pendant 48 h.
+    """
+    other = conn.execute(
+        "SELECT a.email FROM membership m JOIN account a ON a.id = m.account_id "
+        "WHERE m.workspace_id = ? AND a.email <> ? LIMIT 1",
+        (workspace_id, email),
+    ).fetchone()
+    if other is not None:
+        raise AuthError(
+            f"cette instance appartient déjà à {other['email']} : "
+            "créez une instance dédiée avec --instance NAME"
+        )
+
+
 def create_invite(
     conn: sqlite3.Connection,
     workspace_slug: str,
@@ -157,10 +178,11 @@ def create_invite(
     conn.execute("BEGIN IMMEDIATE")
     try:
         workspace_id = ensure_workspace(conn, workspace_slug)
+        _refuse_second_owner(conn, workspace_id, normalized_email)
         conn.execute(
             "UPDATE account_invite SET expires_at = ? "
-            "WHERE workspace_id = ? AND email = ? AND accepted_at IS NULL",
-            (_timestamp(current), workspace_id, normalized_email),
+            "WHERE workspace_id = ? AND accepted_at IS NULL",
+            (_timestamp(current), workspace_id),
         )
         conn.execute(
             "INSERT INTO account_invite "
@@ -178,7 +200,7 @@ def create_invite(
             (AUTH_REQUIRED_KEY,),
         )
         conn.commit()
-    except sqlite3.Error:
+    except (AuthError, sqlite3.Error):
         conn.rollback()
         raise
     return token

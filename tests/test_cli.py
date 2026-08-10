@@ -328,7 +328,7 @@ research:
     conn.close()
 
 
-def test_run_research_uses_confirmed_profile_categories(
+def test_run_research_uses_profile_categories_and_keeps_config_searches(
     runner: CliRunner, tmp_path: Path, monkeypatch
 ) -> None:
     from jobwatch.research import ResearchResult
@@ -378,7 +378,7 @@ research:
     result = runner.invoke(cli, ["run", "--config", str(config)])
 
     assert result.exit_code == 0, result.output
-    assert received == ["Data"]
+    assert sorted(received) == ["Data", "historique"]
 
 
 def test_init_then_run_with_unmodified_example_makes_no_network_calls(

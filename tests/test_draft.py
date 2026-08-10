@@ -797,7 +797,10 @@ def test_call_llm_codex_builds_command_and_reads_output(monkeypatch) -> None:
     assert command[:2] == ["codex", "exec"]
     assert command[command.index("--model") + 1] == "gpt-5.6-luna"
     assert "model_reasoning_effort=max" in command
-    assert command[command.index("-s") + 1] == "danger-full-access"
+    assert command[command.index("-s") + 1] == "read-only"
+    assert "--ignore-user-config" in command
+    disabled = {command[index + 1] for index, item in enumerate(command) if item == "--disable"}
+    assert disabled == {"shell_tool", "code_mode_host", "apps", "plugins"}
     assert captured["input"] == "# OFFRE\n\ncontenu"
     assert command[-1].endswith("Rédige la lettre.")
 
@@ -812,3 +815,31 @@ def test_call_llm_codex_failure_raises_drafterror(monkeypatch) -> None:
     config = DraftConfig(model="m", runner="codex")
     with pytest.raises(DraftError, match="codex"):
         draft._call_llm(config, "prompt", "bundle")
+
+
+def test_call_opencode_denies_every_tool_by_name(monkeypatch) -> None:
+    """opencode.json et OPENCODE_PERMISSION sont les contrats lus par opencode."""
+    import subprocess as sp
+
+    from jobwatch.enrich import OPENCODE_TOOLS
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["file"] = json.loads(
+            (Path(kwargs["cwd"]) / "opencode.json").read_text(encoding="utf-8")
+        )
+        captured["env"] = json.loads(kwargs["env"]["OPENCODE_PERMISSION"])
+        event = json.dumps({"type": "text", "part": {"text": MINIMAL_TEX}})
+        return sp.CompletedProcess(command, 0, stdout=event, stderr="")
+
+    monkeypatch.setattr("jobwatch.draft.subprocess.run", fake_run)
+    config = DraftConfig(model="m", runner="opencode")
+    text = draft._call_llm(config, "Rédige la lettre.", "# OFFRE\n\ncontenu")
+
+    assert text.strip() == MINIMAL_TEX.strip()
+    assert "--pure" in captured["command"]
+    expected = {"*": "deny", **{tool: "deny" for tool in OPENCODE_TOOLS}}
+    assert captured["file"]["permission"] == expected
+    assert captured["env"] == expected
