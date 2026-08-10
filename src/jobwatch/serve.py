@@ -2608,13 +2608,20 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .sf-value { color:var(--fg); overflow-wrap:anywhere }
 .summary-field.sf-empty .sf-value { color:var(--muted-2); font-style:italic }
 @media (max-width:370px) { .sf-label { min-width:104px } }
-.content-toggle { position:relative; z-index:3; margin:12px 13px 0; padding:9px 12px;
-  display:inline-flex; align-items:center; gap:7px; border:1px solid var(--line);
-  border-radius:11px; color:var(--fg); background:var(--surface); font-size:.71rem;
-  font-weight:700; letter-spacing:.02em; cursor:pointer; pointer-events:auto;
-  transition:border-color .15s ease, background .15s ease }
+.content-toggle { position:relative; z-index:3; margin:12px 13px 0; padding:0 14px;
+  display:flex; width:calc(100% - 26px); justify-content:center; align-items:center;
+  gap:7px; min-height:38px; border:1px solid var(--line); border-radius:11px;
+  color:var(--fg); background:var(--surface); font-size:.74rem; font-weight:740;
+  letter-spacing:.02em; cursor:pointer; pointer-events:auto;
+  transition:border-color .15s ease, background .15s ease, box-shadow .15s ease }
 .content-toggle .summary-chevron { margin:0 }
+.content-toggle[aria-expanded="true"] { background:var(--surface-hover);
+  box-shadow:0 1px 4px rgba(0,0,0,.09) }
 .content-toggle[aria-expanded="true"] .summary-chevron { transform:rotate(225deg) }
+.content-toggle:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
+@media (hover:hover) {
+  .content-toggle:hover { border-color:var(--line-strong); background:var(--surface-hover) }
+}
 .content-panel { position:relative; z-index:2; margin:10px 0 1px; padding:12px 0;
   border-top:1px solid var(--line); color:var(--muted); font-size:.76rem;
   line-height:1.55; overflow-wrap:anywhere }
@@ -3478,7 +3485,7 @@ _SWIPE_CSS = """\
   transition:transform .28s ease, opacity .28s ease }
 .swipe-card-scroll { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch }
 .swipe-card .content-panel { margin:10px 0 0; padding:12px 0 0; pointer-events:auto }
-.swipe-card .content-toggle { margin:12px 0 0 }
+.swipe-card .content-toggle { margin:12px 0 0; width:100% }
 .swipe-summary { margin:14px 0 0; padding:12px 12px 11px; border:1px dashed var(--line-strong);
   border-radius:12px }
 .swipe-summary ul { margin:8px 0 0; padding-left:18px; color:var(--muted); font-size:.8rem }
