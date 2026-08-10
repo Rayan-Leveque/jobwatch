@@ -705,9 +705,10 @@ def test_markdown_to_html_drops_standalone_image() -> None:
 
 
 def test_markdown_to_html_renders_underlined_setext_heading() -> None:
-    """markdownify produit ce style par défaut pour les h1/h2 (pas de #)."""
+    """markdownify produit ce style par défaut pour les h1/h2 (pas de #) ; une
+    ligne de séparation visuelle marque la coupure de section sous le titre."""
     html_out = _markdown_to_html("Missions\n========\n\nTexte.")
-    assert html_out == '<p class="md-heading">Missions</p><p>Texte.</p>'
+    assert html_out == '<p class="md-heading">Missions</p><hr><p>Texte.</p>'
 
 
 def test_markdown_to_html_drops_bare_heading_marker() -> None:
@@ -732,9 +733,9 @@ def test_markdown_to_html_renders_long_horizontal_rule() -> None:
 
 def test_markdown_to_html_horizontal_rule_does_not_break_setext_heading() -> None:
     """--- juste après une ligne de texte (sans ligne blanche) reste un titre
-    souligné, pas une séparation : l'ambiguïté est déjà résolue en amont."""
+    souligné suivi de sa ligne, pas un --- littéral ni un titre sans ligne."""
     html_out = _markdown_to_html("Titre\n---\n\nTexte.")
-    assert html_out == '<p class="md-heading">Titre</p><p>Texte.</p>'
+    assert html_out == '<p class="md-heading">Titre</p><hr><p>Texte.</p>'
 
 
 def test_markdown_to_html_escapes_html_inside_formatting() -> None:

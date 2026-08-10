@@ -647,7 +647,7 @@ def _markdown_to_html(markdown: str) -> str:
         if not (ul_match or ol_match) and index < len(lines) and _MD_SETEXT_RE.match(lines[index].strip()):
             flush_paragraph()
             flush_list()
-            blocks.append(f'<p class="md-heading">{_format_inline(line)}</p>')
+            blocks.append(f'<p class="md-heading">{_format_inline(line)}</p><hr>')
             index += 1
             continue
         if ul_match or ol_match:
@@ -2628,6 +2628,7 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .content-panel strong { color:var(--fg) }
 .content-panel a { color:var(--accent) }
 .content-panel hr { margin:16px 0; border:0; border-top:1px solid var(--line) }
+.content-panel .md-heading + hr { margin-top:6px }
 .card-actions { position:relative; z-index:3; display:flex; flex-wrap:wrap; gap:8px;
   margin:12px 13px 0; pointer-events:auto }
 .card-action { min-height:38px; padding:0 14px; display:inline-flex; align-items:center;
