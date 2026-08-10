@@ -511,19 +511,97 @@ def _summary_panel(row: sqlite3.Row, summary: Summary, prefix: str) -> tuple[str
     return button, panel
 
 
-def _markdown_to_html(markdown: str) -> str:
-    """Rendu minimal et échappé : un <p> par paragraphe, <br> pour les retours à la ligne.
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+_MD_UL_RE = re.compile(r"^[-*]\s+(.+)$")
+_MD_OL_RE = re.compile(r"^\d+\.\s+(.+)$")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^()\s]+)\)")
+_MD_BOLD_RE = re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*")
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)")
 
-    Pas de bibliothèque Markdown supplémentaire pour le dashboard : la syntaxe
-    Markdown (titres, gras, listes...) apparaît telle quelle, échappée.
+
+def _format_inline(text: str) -> str:
+    """Échappe une ligne puis applique gras/italique/liens Markdown dessus.
+
+    L'échappement précède le formatage : les caractères Markdown (*, [, ], (,
+    )) traversent html.escape intacts, donc les regex ci-dessous opèrent en
+    toute sécurité sur du texte déjà échappé sans jamais réinjecter de HTML
+    fourni par l'offre.
     """
-    paragraphs = re.split(r"\n\s*\n", markdown.strip())
-    rendered = (
-        f"<p>{html.escape(paragraph).replace(chr(10), '<br>')}</p>"
-        for paragraph in paragraphs
-        if paragraph.strip()
-    )
-    return "".join(rendered)
+    escaped = html.escape(text)
+
+    def _replace_link(match: re.Match[str]) -> str:
+        label, url = match.group(1), match.group(2)
+        try:
+            scheme = urlsplit(url).scheme.lower()
+        except ValueError:
+            return match.group(0)
+        if scheme not in ("http", "https"):
+            return match.group(0)
+        return f'<a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a>'
+
+    escaped = _MD_LINK_RE.sub(_replace_link, escaped)
+    escaped = _MD_BOLD_RE.sub(r"<strong>\1</strong>", escaped)
+    escaped = _MD_ITALIC_RE.sub(r"<em>\1</em>", escaped)
+    return escaped
+
+
+def _markdown_to_html(markdown: str) -> str:
+    """Rendu minimal d'un sous-ensemble Markdown : titres, gras, italique, listes, liens.
+
+    Pas de bibliothèque Markdown supplémentaire pour le dashboard : toute
+    syntaxe non reconnue (tableaux, citations, code...) reste affichée telle
+    quelle, échappée. Les titres deviennent des paragraphes stylés (pas de
+    vraies balises <h1>-<h6>, pour ne pas percuter la hiérarchie de titres de
+    la carte) et les listes restent à plat, sans imbrication.
+    """
+    blocks: list[str] = []
+    paragraph: list[str] = []
+    list_items: list[str] = []
+    list_tag: str | None = None
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            content = "<br>".join(_format_inline(line) for line in paragraph)
+            blocks.append(f"<p>{content}</p>")
+            paragraph.clear()
+
+    def flush_list() -> None:
+        nonlocal list_tag
+        if list_items:
+            items = "".join(f"<li>{item}</li>" for item in list_items)
+            blocks.append(f"<{list_tag}>{items}</{list_tag}>")
+            list_items.clear()
+        list_tag = None
+
+    for raw_line in markdown.strip().splitlines():
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph()
+            flush_list()
+            continue
+        heading_match = _MD_HEADING_RE.match(line)
+        if heading_match:
+            flush_paragraph()
+            flush_list()
+            blocks.append(f'<p class="md-heading">{_format_inline(heading_match.group(2))}</p>')
+            continue
+        ul_match = _MD_UL_RE.match(line)
+        ol_match = _MD_OL_RE.match(line) if not ul_match else None
+        if ul_match or ol_match:
+            flush_paragraph()
+            tag = "ul" if ul_match else "ol"
+            if list_tag and list_tag != tag:
+                flush_list()
+            list_tag = tag
+            item_text = ul_match.group(1) if ul_match else ol_match.group(1)
+            list_items.append(_format_inline(item_text))
+            continue
+        flush_list()
+        paragraph.append(line)
+
+    flush_paragraph()
+    flush_list()
+    return "".join(blocks)
 
 
 def _content_panel(row: sqlite3.Row, markdown: str | None, prefix: str) -> tuple[str, str]:
@@ -2480,6 +2558,12 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .content-panel[hidden] { display:none }
 .content-panel p { margin:0 0 10px }
 .content-panel p:last-child { margin-bottom:0 }
+.content-panel .md-heading { margin:14px 0 6px; color:var(--fg); font-weight:800; font-size:.82rem }
+.content-panel .md-heading:first-child { margin-top:0 }
+.content-panel ul, .content-panel ol { margin:0 0 10px; padding-left:19px }
+.content-panel li + li { margin-top:4px }
+.content-panel strong { color:var(--fg) }
+.content-panel a { color:var(--accent) }
 .card-actions { position:relative; z-index:3; display:flex; flex-wrap:wrap; gap:8px;
   margin:12px 13px 0; pointer-events:auto }
 .card-action { min-height:38px; padding:0 14px; display:inline-flex; align-items:center;

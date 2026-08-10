@@ -18,7 +18,7 @@ from click.testing import CliRunner
 
 from jobwatch.cli import cli
 from jobwatch.db import connect, init_db
-from jobwatch.serve import make_handler, render_page
+from jobwatch.serve import _markdown_to_html, make_handler, render_page
 
 
 @pytest.fixture()
@@ -601,6 +601,59 @@ def test_content_panel_absent_when_fetch_failed(conn: sqlite3.Connection) -> Non
 
     assert '<button class="reader-tab offer-toggle"' not in page
     assert '<div class="content-panel"' not in page
+
+
+def test_markdown_to_html_renders_heading_as_styled_paragraph() -> None:
+    """Pas de vraie balise <h1>-<h6> : ça casserait la hiérarchie de titres de la carte."""
+    assert _markdown_to_html("## Missions") == '<p class="md-heading">Missions</p>'
+
+
+def test_markdown_to_html_ignores_hash_without_space() -> None:
+    assert _markdown_to_html("#recrutement2026") == "<p>#recrutement2026</p>"
+
+
+def test_markdown_to_html_renders_bold_and_italic() -> None:
+    assert _markdown_to_html("**Stack**: *Python*") == "<p><strong>Stack</strong>: <em>Python</em></p>"
+
+
+def test_markdown_to_html_leaves_lone_asterisk_untouched() -> None:
+    """Un astérisque isolé (ex: note de salaire '40-50k*') ne doit pas être avalé."""
+    assert _markdown_to_html("Salaire 40-50k*") == "<p>Salaire 40-50k*</p>"
+
+
+def test_markdown_to_html_renders_flat_unordered_list() -> None:
+    html_out = _markdown_to_html("- Python\n- SQL")
+    assert html_out == "<ul><li>Python</li><li>SQL</li></ul>"
+
+
+def test_markdown_to_html_renders_ordered_list() -> None:
+    html_out = _markdown_to_html("1. Entretien RH\n2. Entretien technique")
+    assert html_out == "<ol><li>Entretien RH</li><li>Entretien technique</li></ol>"
+
+
+def test_markdown_to_html_switches_list_type_without_blank_line() -> None:
+    html_out = _markdown_to_html("- Python\n1. Entretien RH")
+    assert html_out == "<ul><li>Python</li></ul><ol><li>Entretien RH</li></ol>"
+
+
+def test_markdown_to_html_renders_safe_link() -> None:
+    html_out = _markdown_to_html("Voir [le site](https://example.com/careers)")
+    assert (
+        '<a href="https://example.com/careers" target="_blank" '
+        'rel="noopener noreferrer">le site</a>' in html_out
+    )
+
+
+def test_markdown_to_html_leaves_unsafe_link_scheme_as_text() -> None:
+    html_out = _markdown_to_html("[cliquer](javascript:alert(1))")
+    assert "<a " not in html_out
+    assert "[cliquer](javascript:alert(1))" in html_out
+
+
+def test_markdown_to_html_escapes_html_inside_formatting() -> None:
+    html_out = _markdown_to_html("**<script>alert(1)</script>**")
+    assert "<script>" not in html_out
+    assert "<strong>&lt;script&gt;alert(1)&lt;/script&gt;</strong>" in html_out
 
 
 def test_content_panel_independent_from_summary_panel(conn: sqlite3.Connection) -> None:

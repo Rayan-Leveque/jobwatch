@@ -306,6 +306,39 @@ def test_card_reader_keeps_only_one_panel_open(browser, dashboard) -> None:
     page.close()
 
 
+def test_offer_markdown_renders_visually_not_as_raw_syntax(browser, dashboard) -> None:
+    """L'onglet Annonce affiche du HTML rendu, pas la syntaxe Markdown brute."""
+    url, db_path = dashboard
+    conn = connect(db_path)
+    offer_id = int(
+        conn.execute(
+            "SELECT o.id FROM offer o JOIN company c ON c.id = o.company_id "
+            "WHERE c.name = 'NewCo'"
+        ).fetchone()["id"]
+    )
+    _add_content(
+        conn,
+        offer_id,
+        "## Missions\n\n**Stack** : Python\n\n- Développement\n- Code review",
+    )
+    conn.close()
+    page = _open_page(browser, url)
+    card = _card(page, "NewCo")
+    content = card.locator(".content-panel")
+
+    card.locator(".offer-toggle").click()
+    assert content.is_visible()
+    assert content.locator(".md-heading", has_text="Missions").is_visible()
+    assert content.locator("strong", has_text="Stack").is_visible()
+    assert content.locator("li", has_text="Développement").is_visible()
+    assert content.locator("li", has_text="Code review").is_visible()
+    assert "##" not in content.inner_text()
+    assert "**" not in content.inner_text()
+    assert "- Développement" not in content.inner_text()
+    _assert_no_horizontal_overflow(page)
+    page.close()
+
+
 def test_invite_then_protected_action_in_browser(browser, protected_dashboard) -> None:
     url, invite = protected_dashboard
     page = browser.new_page()
