@@ -37,7 +37,6 @@ from urllib.parse import parse_qs, urlsplit
 import click
 
 from jobwatch import draft
-from jobwatch.applications import ApplicationError, record_application
 from jobwatch.auth import (
     AuthError,
     Session,
@@ -62,7 +61,12 @@ from jobwatch.auth_http import (
 )
 from jobwatch.config import DraftConfig
 from jobwatch.db import connect
-from jobwatch.library import LibraryError, list_library, resolve_path, save_upload
+from jobwatch.library import LibraryError, list_library, save_upload
+from jobwatch.match_actions import (
+    MatchActionResult,
+    apply_match_action,
+    parse_match_action,
+)
 from jobwatch.onboarding import (
     OnboardingError,
     analyze_cvs,
@@ -73,7 +77,6 @@ from jobwatch.onboarding import (
 )
 from jobwatch.onboarding_ui import render_onboarding
 
-RESTORE_STATES = ("new", "seen", "later")
 _MATCH_ACTION_RE = re.compile(r"^/match/(\d+)/(later|discard|restore|apply)$")
 _DRAFT_POST_RE = re.compile(r"^/match/(\d+)/draft$")
 _DRAFT_STATUS_RE = re.compile(r"^/match/(\d+)/draft/status$")
@@ -1792,91 +1795,23 @@ def make_handler(
                 return
             match_id = int(match.group(1))
             action = match.group(2)
-            target_state: str | None = None
-            cv_library_id: int | None = None
-            cover_letter_library_id: int | None = None
-            if action == "restore":
-                body = self._read_json_body()
-                target_state = body.get("state") if isinstance(body, dict) else None
-                if target_state not in RESTORE_STATES:
-                    self._send_json(400, {"error": "état de restauration invalide"})
-                    return
-            elif action == "apply":
-                body = self._read_json_body()
-                fields = body if isinstance(body, dict) else {}
-                library_ids: list[int | None] = []
-                for key in ("cv_library_id", "cover_letter_library_id"):
-                    value = fields.get(key)
-                    if value in (None, ""):
-                        library_ids.append(None)
-                    elif isinstance(value, int) and not isinstance(value, bool):
-                        library_ids.append(value)
-                    else:
-                        self._send_json(400, {"error": f"champ {key} invalide"})
-                        return
-                cv_library_id, cover_letter_library_id = library_ids
-            self._apply_match_action(
-                match_id, action, target_state, cv_library_id, cover_letter_library_id
-            )
+            self._handle_match_action(match_id, action)
 
         @_db_error_response()
-        def _apply_match_action(
-            self,
-            match_id: int,
-            action: str,
-            target_state: str | None,
-            cv_library_id: int | None,
-            cover_letter_library_id: int | None,
-        ) -> None:
+        def _handle_match_action(self, match_id: int, action: str) -> None:
+            body = self._read_json_body() if action in ("restore", "apply") else None
+            request = parse_match_action(action, body)
+            if isinstance(request, MatchActionResult):
+                self._send_json(400, {"error": request.error})
+                return
             with self._db() as conn:
-                match_row = conn.execute(
-                    "SELECT state FROM match WHERE id = ?", (match_id,)
-                ).fetchone()
-                if match_row is None:
-                    self._send_text(404, "404 Not Found\n")
-                    return
-                if action == "apply":
-                    if match_row["state"] == "discarded":
-                        self._send_json(
-                            409, {"error": "match écarté : restaurez-le d'abord"}
-                        )
-                        return
-                    cv_path = (
-                        resolve_path(conn, cv_library_id, "cv")
-                        if cv_library_id is not None
-                        else None
-                    )
-                    cover_letter_path = (
-                        resolve_path(conn, cover_letter_library_id, "cover_letter")
-                        if cover_letter_library_id is not None
-                        else None
-                    )
-                    try:
-                        record_application(
-                            conn, match_id,
-                            cv_path=cv_path, cover_letter_path=cover_letter_path,
-                        )
-                    except ApplicationError as exc:
-                        self._send_json(409, {"error": str(exc)})
-                        return
-                elif action == "later":
-                    conn.execute(
-                        "UPDATE match SET state = 'later', discarded_at = NULL WHERE id = ?",
-                        (match_id,),
-                    )
-                elif action == "discard":
-                    conn.execute(
-                        "UPDATE match SET state = 'discarded', "
-                        "discarded_at = datetime('now') WHERE id = ?",
-                        (match_id,),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE match SET state = ?, discarded_at = NULL WHERE id = ?",
-                        (target_state, match_id),
-                    )
-                conn.commit()
-            self._send_json(200, {"ok": True})
+                result = apply_match_action(conn, match_id, request)
+            if result.kind == "not_found":
+                self._send_text(404, "404 Not Found\n")
+            elif result.kind == "conflict":
+                self._send_json(409, {"error": result.error})
+            else:
+                self._send_json(200, {"ok": True})
 
         @_db_error_response()
         def _handle_bug_report(self, session: Session | None) -> None:
