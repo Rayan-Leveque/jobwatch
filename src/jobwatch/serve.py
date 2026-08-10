@@ -512,6 +512,10 @@ def _summary_panel(row: sqlite3.Row, summary: Summary, prefix: str) -> tuple[str
 
 
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+# Marqueur de titre sans texte (ex. "#### " suivi d'un logo image que markdownify
+# a réduit à rien) : rien à afficher, on l'ignore comme une ligne blanche plutôt
+# que de laisser "####" apparaître littéralement.
+_MD_BARE_HEADING_RE = re.compile(r"^#{1,6}$")
 # Titre "souligné" (markdownify produit ce style par défaut pour les h1/h2,
 # ex. "Titre\n===" ou "Titre\n---") : seulement reconnu juste après une ligne
 # de texte non vide, jamais après une ligne blanche (sinon ce serait plutôt
@@ -618,7 +622,7 @@ def _markdown_to_html(markdown: str) -> str:
     while index < len(lines):
         line = lines[index].strip()
         index += 1
-        if not line:
+        if not line or _MD_BARE_HEADING_RE.match(line):
             flush_paragraph()
             flush_list()
             continue
@@ -2436,7 +2440,7 @@ html[data-theme="light"] .ambient::after { background:radial-gradient(circle, rg
 .icon-moon { opacity:1; transform:rotate(0) scale(1) }
 html[data-theme="light"] .icon-sun { opacity:1; transform:rotate(0) scale(1) }
 html[data-theme="light"] .icon-moon { opacity:0; transform:rotate(70deg) scale(.6) }
-.theme-toggle:focus-visible, #q:focus-visible, .clear-search:focus-visible,
+.theme-toggle:focus-visible, .clear-search:focus-visible,
 summary:focus-visible, a:focus-visible { outline:3px solid var(--violet); outline-offset:3px }
 .card-toggle:focus-visible { outline:3px solid var(--violet); outline-offset:-4px }
 .hero { margin-bottom:22px }
