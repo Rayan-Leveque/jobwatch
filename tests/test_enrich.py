@@ -9,7 +9,7 @@ import pytest
 
 from jobwatch.config import EnrichConfig
 from jobwatch.db import connect, init_db
-from jobwatch.enrich import EnrichError, enrich
+from jobwatch.enrich import FIELD_UNKNOWN, EnrichError, enrich
 
 
 @pytest.fixture()
@@ -596,3 +596,41 @@ def test_summarize_opencode_denies_every_tool_by_name(monkeypatch) -> None:
     expected = {"*": "deny", **{tool: "deny" for tool in OPENCODE_TOOLS}}
     assert captured["file"]["permission"] == expected
     assert captured["env"] == expected
+
+
+def test_enrich_logs_one_line_per_offer_and_counts_the_run(
+    conn: sqlite3.Connection, monkeypatch, caplog
+) -> None:
+    """Un run doit laisser une trace : ligne par offre en -v, bilan chiffré toujours."""
+    import logging as logging_mod
+
+    _seed_offer(conn, url="https://example.com/log-1")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=LONG_HTML)
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: (
+            {"experience": "3 ans", "salary": FIELD_UNKNOWN},
+            {"experience": "Ingénieur IA Paris"},
+            ["Poste IA"],
+        ),
+    )
+    with caplog.at_level(logging_mod.INFO, logger="jobwatch.enrich"):
+        result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("https://example.com/log-1" in message for message in messages)
+    assert any("car." in message for message in messages)
+
+    assert sum(result.extract_methods.values()) == 1
+    assert result.raw_chars > 0
+    assert result.kept_chars > 0
+    assert result.quotes_verified == 1
+    # 'non précisé' n'est pas un champ sans citation : il n'y a rien à ancrer.
+    assert result.quotes_rejected == 0
+
+    line = result.summary_line()
+    assert "extraction" in line
+    assert "citation(s) vérifiée(s)" in line

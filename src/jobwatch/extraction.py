@@ -91,6 +91,10 @@ class Extraction:
     fields: dict[str, str] = field(default_factory=dict)
     #: Marqueurs présents dans le brut qu'une extraction candidate a perdus.
     lost_markers: tuple[str, ...] = ()
+    #: Taille de la page entière, pour chiffrer le bruit retiré dans les logs.
+    raw_chars: int = 0
+    #: Lignes repêchées hors du corps de l'annonce (salaires isolés, etc.).
+    salvaged_lines: int = 0
 
     @property
     def degraded(self) -> bool:
@@ -108,19 +112,34 @@ def extract(html: str) -> Extraction:
 
     jsonld = _jsonld_markdown(posting) if posting else ""
     if _accepted(raw, jsonld, "jsonld"):
-        return Extraction(markdown=_with_salvage(jsonld, raw), method="jsonld", fields=fields)
+        markdown, salvaged = _with_salvage(jsonld, raw)
+        return Extraction(
+            markdown=markdown,
+            method="jsonld",
+            fields=fields,
+            raw_chars=len(raw),
+            salvaged_lines=salvaged,
+        )
 
     # trafilatura est l'étape la plus coûteuse : elle n'est lancée que si
     # JSON-LD n'a pas gagné, et son résultat sert aussi au repli.
     readable = _readable_markdown(html)
     if _accepted(raw, readable, "readable"):
-        return Extraction(markdown=_with_salvage(readable, raw), method="readable", fields=fields)
+        markdown, salvaged = _with_salvage(readable, raw)
+        return Extraction(
+            markdown=markdown,
+            method="readable",
+            fields=fields,
+            raw_chars=len(raw),
+            salvaged_lines=salvaged,
+        )
 
     return Extraction(
         markdown=raw,
         method="raw",
         fields=fields,
         lost_markers=_lost_markers(raw, readable),
+        raw_chars=len(raw),
     )
 
 
@@ -154,11 +173,12 @@ def _lost_markers(raw: str, candidate: str) -> tuple[str, ...]:
     )
 
 
-def _with_salvage(candidate: str, raw: str) -> str:
+def _with_salvage(candidate: str, raw: str) -> tuple[str, int]:
     """Réinjecte les faits chiffrés du brut que l'extraction a laissés de côté.
 
     Quelques lignes courtes coûtent une poignée de tokens, là où garder la page
-    entière pour ne pas les perdre en coûterait des milliers.
+    entière pour ne pas les perdre en coûterait des milliers. Renvoie le texte
+    et le nombre de lignes repêchées, que les logs affichent.
     """
     salvaged: list[str] = []
     seen = {_squeeze(line) for line in candidate.splitlines()}
@@ -178,8 +198,9 @@ def _with_salvage(candidate: str, raw: str) -> str:
         if len(salvaged) >= MAX_SALVAGED_LINES:
             break
     if not salvaged:
-        return candidate
-    return candidate + SALVAGE_HEADING + "\n".join(f"- {line}" for line in salvaged)
+        return candidate, 0
+    lines = "\n".join(f"- {line}" for line in salvaged)
+    return candidate + SALVAGE_HEADING + lines, len(salvaged)
 
 
 def _squeeze(text: str) -> str:

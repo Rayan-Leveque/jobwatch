@@ -34,8 +34,10 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from dataclasses import field as dataclasses_field
 from pathlib import Path
 
 import httpx
@@ -110,6 +112,43 @@ class EnrichResult:
     fetched_failed: int = 0
     summaries_written: int = 0
     fields_written: int = 0
+    #: Nombre d'offres par méthode d'extraction retenue ('jsonld'/'readable'/'raw').
+    extract_methods: Counter[str] = dataclasses_field(default_factory=Counter)
+    #: Caractères de la page entière, et caractères réellement gardés.
+    raw_chars: int = 0
+    kept_chars: int = 0
+    quotes_verified: int = 0
+    quotes_rejected: int = 0
+
+    def summary_line(self) -> str:
+        """Bilan lisible d'un run, affiché même sans -v (donc visible en cron)."""
+        parts = [
+            f"{self.fetched_ok} offre(s) récupérée(s), {self.fetched_failed} échec(s)",
+            f"{self.summaries_written} résumé(s) généré(s)",
+            f"{self.fields_written} fiche(s) de champs écrite(s)",
+        ]
+        if self.extract_methods:
+            methods = ", ".join(
+                f"{name}:{count}" for name, count in sorted(self.extract_methods.items())
+            )
+            parts.append(f"extraction {methods}")
+        if self.raw_chars:
+            saved = 100 * (self.raw_chars - self.kept_chars) / self.raw_chars
+            parts.append(
+                f"{_thousands(self.raw_chars)} -> {_thousands(self.kept_chars)} caractères "
+                f"({saved:.0f} % de bruit retiré)"
+            )
+        if self.quotes_verified or self.quotes_rejected:
+            parts.append(
+                f"{self.quotes_verified} citation(s) vérifiée(s), "
+                f"{self.quotes_rejected} rejetée(s)"
+            )
+        return " ; ".join(parts)
+
+
+def _thousands(value: int) -> str:
+    """Sépare les milliers par une espace insécable, comme en français."""
+    return f"{value:,}".replace(",", " ")
 
 
 def _pending_offers(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -512,8 +551,25 @@ def enrich(
                 _store_content(conn, offer_id, extracted, fetch_method, html)
                 if extracted is None:
                     result.fetched_failed += 1
+                    log.info("enrich: offre %d ECHEC fetch %s", offer_id, url)
                     continue
                 result.fetched_ok += 1
+                result.extract_methods[extracted.method] += 1
+                result.raw_chars += extracted.raw_chars
+                result.kept_chars += len(extracted.markdown)
+                log.info(
+                    "enrich: offre %d %s/%s %d -> %d car.%s%s %s",
+                    offer_id,
+                    fetch_method,
+                    extracted.method,
+                    extracted.raw_chars,
+                    len(extracted.markdown),
+                    f" +{extracted.salvaged_lines} repêchée(s)" if extracted.salvaged_lines else "",
+                    f" marqueurs perdus: {','.join(extracted.lost_markers)}"
+                    if extracted.lost_markers
+                    else "",
+                    url,
+                )
                 if extracted.fields:
                     jsonld_fields[offer_id] = extracted.fields
                 markdown = extracted.markdown
@@ -544,6 +600,21 @@ def enrich(
             for key, value in jsonld_fields.get(offer_id, {}).items():
                 if fields.get(key, FIELD_UNKNOWN) == FIELD_UNKNOWN:
                     fields[key] = value
+            anchored = sum(
+                1 for key, value in fields.items() if value != FIELD_UNKNOWN and key in quotes
+            )
+            unanchored = sum(
+                1 for key, value in fields.items() if value != FIELD_UNKNOWN and key not in quotes
+            )
+            result.quotes_verified += anchored
+            result.quotes_rejected += unanchored
+            log.info(
+                "enrich: offre %d résumé %d puce(s), %d champ(s) ancré(s), %d sans citation",
+                offer_id,
+                len(bullets),
+                anchored,
+                unanchored,
+            )
             summary_written, fields_written = _write_summary(
                 conn, offer_id, fields, quotes, bullets
             )

@@ -99,9 +99,18 @@ def _open_db(config: Config) -> sqlite3.Connection:
     callback=_instance_option,
     help="instance isolée à utiliser (équivalent : JOBWATCH_INSTANCE)",
 )
+@click.option(
+    "-v",
+    "--verbose",
+    is_flag=True,
+    help="détaille chaque étape (une ligne par offre), utile en cron",
+)
 @click.version_option(version=__version__, message="jw, version %(version)s")
-def cli(instance: str | None) -> None:
+def cli(instance: str | None, verbose: bool) -> None:
     """jobwatch : observateur d'offres d'emploi auto-hébergé."""
+    if verbose:
+        # Seul le logger jobwatch monte : httpx et consorts resteraient bruyants.
+        logging.getLogger("jobwatch").setLevel(logging.INFO)
 
 
 @cli.command()
@@ -207,11 +216,7 @@ def enrich_cmd(config_path: Path | None) -> None:
             _fatal(str(exc))
     finally:
         conn.close()
-    click.echo(
-        f"{result.fetched_ok} offre(s) récupérée(s), {result.fetched_failed} échec(s), "
-        f"{result.summaries_written} résumé(s) généré(s), "
-        f"{result.fields_written} fiche(s) de champs écrite(s)"
-    )
+    click.echo(result.summary_line())
 
 
 @cli.command("ingest-daily")
