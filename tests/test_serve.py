@@ -973,6 +973,29 @@ def test_post_later_updates_match_state(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
+def test_database_error_returns_500_text(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    connection.close()
+
+    def _boom(*_args, **_kwargs):
+        raise sqlite3.OperationalError("boom")
+
+    monkeypatch.setattr("jobwatch.serve.render_page", _boom)
+    server, thread = _start_server(db_path)
+    try:
+        port = server.server_address[1]
+        status, headers, body = _get(port, "/")
+        assert status == 500
+        assert headers["Content-Type"] == "text/plain; charset=utf-8"
+        assert body == "erreur base de données : boom\n"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_post_discard_matches_cli_discard_db_state(tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     connection = connect(db_path)
