@@ -19,6 +19,15 @@ class LLMRunnerError(RuntimeError):
 
 
 def opencode_sandbox(tmp_dir: Path, allow: tuple[str, ...] = ()) -> dict[str, str]:
+    """Refuse à OpenCode tout outil hors `allow`, et renvoie l'environnement à utiliser.
+
+    Le texte fourni au modèle vient d'une page tierce. `--pure` ne coupe que les
+    plugins externes : la configuration globale de l'utilisateur reste fusionnée
+    avec le fichier de projet écrit ici, et une permission nommée qu'elle
+    accorderait l'emporterait sur un simple `*`. Chaque outil connu est donc
+    refusé nommément, dans le fichier et dans OPENCODE_PERMISSION, que OpenCode
+    applique après tous les fichiers de configuration.
+    """
     permission = {"*": "deny"}
     permission.update({tool: "deny" for tool in OPENCODE_TOOLS if tool not in allow})
     permission.update({tool: "allow" for tool in allow})
@@ -39,7 +48,14 @@ def run_codex(
     variant: str | None = None,
     output_schema: dict | None = None,
 ) -> str:
-    """Run read-only codex, returning its file-based final response."""
+    """Run read-only codex, returning its file-based final response.
+
+    L'attache passe par stdin (bloc <stdin> côté codex) et la réponse finale
+    est écrite par codex dans un fichier (-o) : pas de limite d'argument ni
+    de parsing de log. Les appelants passent du contenu tiers non fiable
+    (annonce, CV, candidats de recherche) : lecture seule, config
+    utilisateur ignorée et outils désactivés.
+    """
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -85,7 +101,13 @@ def run_opencode(
     allow: tuple[str, ...] = (),
     attachment_name: str = "attachment.txt",
 ) -> str:
-    """Run OpenCode with a file attachment, returning its JSON event stream."""
+    """Run OpenCode with a file attachment, returning its JSON event stream.
+
+    La pièce jointe est écrite dans un fichier et passée via --file plutôt
+    qu'en argument CLI : le noyau limite chaque argument à ~128 Ko
+    (MAX_ARG_STRLEN), qu'une offre, un CV ou des candidats de recherche
+    peuvent dépasser.
+    """
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
