@@ -19,12 +19,14 @@ ce cas, toutes les pages, actions et pièces jointes exigent une session.
 
 from __future__ import annotations
 
+import functools
 import html
 import json
 import re
 import sqlite3
 import threading
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclasses_field
 from datetime import UTC, datetime
@@ -1296,6 +1298,32 @@ def _spawn_draft_job(db_path: Path, config: DraftConfig, job_id: int) -> None:
     ).start()
 
 
+def _db_error_response(response_format: str = "text"):
+    """Traduit un `sqlite3.Error` levé par la méthode décorée en réponse 500 standard.
+
+    Ne gère ni l'ouverture ni la fermeture de la connexion (voir `Handler._db`) :
+    seule la traduction de l'erreur est mutualisée ici, pour rester composable
+    avec les méthodes qui commitent ou non selon leur propre logique.
+    """
+
+    def decorator(method):
+        @functools.wraps(method)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return method(self, *args, **kwargs)
+            except sqlite3.Error as exc:
+                message = f"erreur base de données : {exc}"
+                if response_format == "json":
+                    self._send_json(500, {"error": message})
+                else:
+                    self._send_text(500, message + "\n")
+                return None
+
+        return wrapper
+
+    return decorator
+
+
 def make_handler(
     db_path: Path,
     draft_config: DraftConfig | None = None,
@@ -1314,9 +1342,21 @@ def make_handler(
     class Handler(BaseHTTPRequestHandler):
         server_version = "jobwatch"
 
-        def _authentication(self) -> tuple[bool, Session | None, str | None]:
+        @contextmanager
+        def _db(self):
+            """Ouvre une connexion pour la requête et la ferme dans tous les cas.
+
+            Ne commite jamais : chaque appelant reste responsable de son
+            `conn.commit()` s'il mute des données.
+            """
             conn = connect(db_path)
             try:
+                yield conn
+            finally:
+                conn.close()
+
+        def _authentication(self) -> tuple[bool, Session | None, str | None]:
+            with self._db() as conn:
                 required = auth_required(conn)
                 token = session_token(self.headers.get("Cookie"))
                 session = resolve_session(conn, token) if required and token else None
@@ -1328,8 +1368,6 @@ def make_handler(
                     if workspace is None:
                         session = None
                 return required, session, token
-            finally:
-                conn.close()
 
         def _require_session(self, path: str) -> Session | None:
             required, session, _token = self._authentication()
@@ -1376,11 +1414,8 @@ def make_handler(
                 if workspace_slug is None:
                     self._send_text(503, "instance nommée requise pour l'authentification\n")
                     return
-                conn = connect(db_path)
-                try:
+                with self._db() as conn:
                     status = invite_status(conn, invite.group(1), workspace_slug)
-                finally:
-                    conn.close()
                 if status == "accepted":
                     self._redirect("/login")
                 elif status == "valid":
@@ -1401,12 +1436,9 @@ def make_handler(
                     self._redirect("/")
                     return
                 editing = parse_qs(parsed.query).get("edit") == ["1"]
-                conn = connect(db_path)
-                try:
+                with self._db() as conn:
                     intents = profile_intents(conn, session.account_id) if editing else None
                     cv_library_ids = profile_cv_library_ids(conn, session.account_id)
-                finally:
-                    conn.close()
                 initial_intents = (
                     [
                         {
@@ -1464,32 +1496,27 @@ def make_handler(
                 return
             swipe = path in ("/swipe", "/po/swipe")
             if session is not None and onboarding_enabled:
-                conn = connect(db_path)
-                try:
+                with self._db() as conn:
                     needs_onboarding = not profile_complete(conn, session.account_id)
-                finally:
-                    conn.close()
                 if needs_onboarding:
                     self._redirect("/onboarding")
                     return
                 track = "all"
-            try:
-                conn = connect(db_path)
-                try:
-                    render = render_swipe_page if swipe else render_page
-                    page = render(
-                        conn,
-                        track,
-                        draft_enabled=draft_config is not None,
-                        csrf_token=session.csrf_token if session is not None else "",
-                    )
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
+            self._render_track_page(track, swipe, session)
+
+        @_db_error_response()
+        def _render_track_page(self, track: str, swipe: bool, session: Session | None) -> None:
+            with self._db() as conn:
+                render = render_swipe_page if swipe else render_page
+                page = render(
+                    conn,
+                    track,
+                    draft_enabled=draft_config is not None,
+                    csrf_token=session.csrf_token if session is not None else "",
+                )
             self._send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
+        @_db_error_response()
         def _handle_batch_status(self) -> None:
             query = urlsplit(self.path).query
             track = "engineer"
@@ -1499,17 +1526,11 @@ def make_handler(
             if track not in TRACKS:
                 self._send_json(400, {"error": "champ track invalide"})
                 return
-            try:
-                conn = connect(db_path)
-                try:
-                    counts = _batch_status(conn, track)
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
+            with self._db() as conn:
+                counts = _batch_status(conn, track)
             self._send_json(200, counts)
 
+        @_db_error_response()
         def _handle_batch_post(self) -> None:
             if draft_config is None:
                 self._send_json(
@@ -1527,24 +1548,17 @@ def make_handler(
             if track not in TRACKS:
                 self._send_json(400, {"error": "champ track invalide"})
                 return
-            try:
-                conn = connect(db_path)
-                try:
-                    match_ids = _batch_eligible_ids(conn, track)
-                    job_ids = []
-                    for match_id in match_ids:
-                        cur = conn.execute(
-                            "INSERT INTO draft_job (match_id, track, cv_library_id, status) "
-                            "VALUES (?, ?, ?, 'queued')",
-                            (match_id, track, cv_library_id),
-                        )
-                        job_ids.append(int(cur.lastrowid))
-                    conn.commit()
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
+            with self._db() as conn:
+                match_ids = _batch_eligible_ids(conn, track)
+                job_ids = []
+                for match_id in match_ids:
+                    cur = conn.execute(
+                        "INSERT INTO draft_job (match_id, track, cv_library_id, status) "
+                        "VALUES (?, ?, ?, 'queued')",
+                        (match_id, track, cv_library_id),
+                    )
+                    job_ids.append(int(cur.lastrowid))
+                conn.commit()
             for job_id in job_ids:
                 _spawn_draft_job(db_path, draft_config, job_id)
             self._send_json(202, {"count": len(job_ids)})
@@ -1555,22 +1569,16 @@ def make_handler(
                 (match_id,),
             ).fetchone()
 
+        @_db_error_response()
         def _handle_draft_status(self, match_id: int) -> None:
-            try:
-                conn = connect(db_path)
-                try:
-                    job = self._latest_draft(conn, match_id)
-                    entry = None
-                    if job is not None and job["library_id"] is not None:
-                        entry = conn.execute(
-                            "SELECT id, label FROM document_library WHERE id = ?",
-                            (job["library_id"],),
-                        ).fetchone()
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
+            with self._db() as conn:
+                job = self._latest_draft(conn, match_id)
+                entry = None
+                if job is not None and job["library_id"] is not None:
+                    entry = conn.execute(
+                        "SELECT id, label FROM document_library WHERE id = ?",
+                        (job["library_id"],),
+                    ).fetchone()
             if job is None:
                 self._send_json(404, {"error": "aucune génération pour ce match"})
                 return
@@ -1581,41 +1589,29 @@ def make_handler(
                 payload["library_label"] = str(entry["label"])
             self._send_json(200, payload)
 
+        @_db_error_response()
         def _handle_letter_file(self, match_id: int, extension: str) -> None:
             column = "pdf_path" if extension == "pdf" else "tex_path"
-            try:
-                conn = connect(db_path)
-                try:
-                    row = conn.execute(
-                        f"SELECT {column} AS path FROM draft_job "
-                        f"WHERE match_id = ? AND {column} IS NOT NULL "
-                        "ORDER BY id DESC LIMIT 1",
-                        (match_id,),
-                    ).fetchone()
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
+            with self._db() as conn:
+                row = conn.execute(
+                    f"SELECT {column} AS path FROM draft_job "
+                    f"WHERE match_id = ? AND {column} IS NOT NULL "
+                    "ORDER BY id DESC LIMIT 1",
+                    (match_id,),
+                ).fetchone()
             content_type = (
                 "application/pdf" if extension == "pdf" else "text/plain; charset=utf-8"
             )
             self._send_draft_file(row["path"] if row else None, content_type)
 
+        @_db_error_response()
         def _handle_letter_page(self, match_id: int, page: int) -> None:
-            try:
-                conn = connect(db_path)
-                try:
-                    row = conn.execute(
-                        "SELECT pdf_path, png_pages FROM draft_job "
-                        "WHERE match_id = ? AND status = 'ok' ORDER BY id DESC LIMIT 1",
-                        (match_id,),
-                    ).fetchone()
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
+            with self._db() as conn:
+                row = conn.execute(
+                    "SELECT pdf_path, png_pages FROM draft_job "
+                    "WHERE match_id = ? AND status = 'ok' ORDER BY id DESC LIMIT 1",
+                    (match_id,),
+                ).fetchone()
             if row is None or not (1 <= page <= int(row["png_pages"] or 0)):
                 self._send_text(404, "404 Not Found\n")
                 return
@@ -1623,20 +1619,14 @@ def make_handler(
             png_path = pdf_path.parent / f"{pdf_path.stem}-{page}.png"
             self._send_draft_file(str(png_path), "image/png")
 
+        @_db_error_response()
         def _handle_document_file(self, library_id: int) -> None:
             """Sert un document de la bibliothèque pour prévisualisation (œil des menus)."""
-            try:
-                conn = connect(db_path)
-                try:
-                    row = conn.execute(
-                        "SELECT file_path FROM document_library WHERE id = ?",
-                        (library_id,),
-                    ).fetchone()
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
+            with self._db() as conn:
+                row = conn.execute(
+                    "SELECT file_path FROM document_library WHERE id = ?",
+                    (library_id,),
+                ).fetchone()
             if row is None:
                 self._send_text(404, "404 Not Found\n")
                 return
@@ -1656,6 +1646,7 @@ def make_handler(
                 return
             self._send_bytes(200, data, content_type)
 
+        @_db_error_response()
         def _handle_draft_post(self, match_id: int) -> None:
             if draft_config is None:
                 self._send_json(
@@ -1677,54 +1668,43 @@ def make_handler(
             if track not in TRACKS:
                 self._send_json(400, {"error": "champ track invalide"})
                 return
-            try:
-                conn = connect(db_path)
-                try:
-                    match_row = conn.execute(
-                        "SELECT id FROM match WHERE id = ?", (match_id,)
-                    ).fetchone()
-                    if match_row is None:
-                        self._send_text(404, "404 Not Found\n")
-                        return
-                    running = conn.execute(
-                        "SELECT id FROM draft_job WHERE match_id = ? "
-                        "AND status IN ('running', 'queued')",
-                        (match_id,),
-                    ).fetchone()
-                    if running is not None:
-                        self._send_json(409, {"error": "une génération est déjà en cours"})
-                        return
-                    cur = conn.execute(
-                        "INSERT INTO draft_job "
-                        "(match_id, track, cv_library_id, instruction, status) "
-                        "VALUES (?, ?, ?, ?, 'queued')",
-                        (match_id, track, cv_library_id, (instruction or "").strip() or None),
-                    )
-                    job_id = int(cur.lastrowid)
-                    conn.commit()
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
+            with self._db() as conn:
+                match_row = conn.execute(
+                    "SELECT id FROM match WHERE id = ?", (match_id,)
+                ).fetchone()
+                if match_row is None:
+                    self._send_text(404, "404 Not Found\n")
+                    return
+                running = conn.execute(
+                    "SELECT id FROM draft_job WHERE match_id = ? "
+                    "AND status IN ('running', 'queued')",
+                    (match_id,),
+                ).fetchone()
+                if running is not None:
+                    self._send_json(409, {"error": "une génération est déjà en cours"})
+                    return
+                cur = conn.execute(
+                    "INSERT INTO draft_job "
+                    "(match_id, track, cv_library_id, instruction, status) "
+                    "VALUES (?, ?, ?, ?, 'queued')",
+                    (match_id, track, cv_library_id, (instruction or "").strip() or None),
+                )
+                job_id = int(cur.lastrowid)
+                conn.commit()
             _spawn_draft_job(db_path, draft_config, job_id)
             self._send_json(202, {"ok": True, "job_id": job_id})
 
+        @_db_error_response()
         def _handle_letter_body_get(self, match_id: int) -> None:
             try:
-                conn = connect(db_path)
-                try:
+                with self._db() as conn:
                     body_text = draft.get_body_edit(conn, match_id)
-                finally:
-                    conn.close()
             except draft.DraftError as exc:
                 self._send_json(404, {"error": str(exc)})
                 return
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
             self._send_json(200, {"body": body_text})
 
+        @_db_error_response()
         def _handle_letter_body_post(self, match_id: int) -> None:
             if draft_config is None:
                 self._send_json(
@@ -1738,28 +1718,21 @@ def make_handler(
             if not isinstance(text, str) or not text.strip():
                 self._send_json(400, {"error": "le texte de la lettre ne peut pas être vide"})
                 return
-            try:
-                conn = connect(db_path)
+            with self._db() as conn:
                 try:
-                    try:
-                        job_id = draft.apply_body_edit(conn, db_path, match_id, text)
-                    except draft.DraftError as exc:
-                        self._send_json(422, {"error": str(exc)})
-                        return
-                    job = conn.execute(
-                        "SELECT * FROM draft_job WHERE id = ?", (job_id,)
+                    job_id = draft.apply_body_edit(conn, db_path, match_id, text)
+                except draft.DraftError as exc:
+                    self._send_json(422, {"error": str(exc)})
+                    return
+                job = conn.execute(
+                    "SELECT * FROM draft_job WHERE id = ?", (job_id,)
+                ).fetchone()
+                entry = None
+                if job is not None and job["library_id"] is not None:
+                    entry = conn.execute(
+                        "SELECT id, label FROM document_library WHERE id = ?",
+                        (job["library_id"],),
                     ).fetchone()
-                    entry = None
-                    if job is not None and job["library_id"] is not None:
-                        entry = conn.execute(
-                            "SELECT id, label FROM document_library WHERE id = ?",
-                            (job["library_id"],),
-                        ).fetchone()
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
             payload = {"status": str(job["status"]), "html": _draft_status_html(match_id, job)}
             if entry is not None:
                 payload["library_id"] = int(entry["id"])
@@ -1790,11 +1763,8 @@ def make_handler(
             if path == "/logout":
                 token = session_token(self.headers.get("Cookie"))
                 if token:
-                    conn = connect(db_path)
-                    try:
+                    with self._db() as conn:
                         delete_session(conn, token)
-                    finally:
-                        conn.close()
                 self._redirect(
                     "/login", headers={"Set-Cookie": expired_session_cookie(secure=secure_cookie)}
                 )
@@ -1845,63 +1815,70 @@ def make_handler(
                         self._send_json(400, {"error": f"champ {key} invalide"})
                         return
                 cv_library_id, cover_letter_library_id = library_ids
-            try:
-                conn = connect(db_path)
-                try:
-                    match_row = conn.execute(
-                        "SELECT state FROM match WHERE id = ?", (match_id,)
-                    ).fetchone()
-                    if match_row is None:
-                        self._send_text(404, "404 Not Found\n")
+            self._apply_match_action(
+                match_id, action, target_state, cv_library_id, cover_letter_library_id
+            )
+
+        @_db_error_response()
+        def _apply_match_action(
+            self,
+            match_id: int,
+            action: str,
+            target_state: str | None,
+            cv_library_id: int | None,
+            cover_letter_library_id: int | None,
+        ) -> None:
+            with self._db() as conn:
+                match_row = conn.execute(
+                    "SELECT state FROM match WHERE id = ?", (match_id,)
+                ).fetchone()
+                if match_row is None:
+                    self._send_text(404, "404 Not Found\n")
+                    return
+                if action == "apply":
+                    if match_row["state"] == "discarded":
+                        self._send_json(
+                            409, {"error": "match écarté : restaurez-le d'abord"}
+                        )
                         return
-                    if action == "apply":
-                        if match_row["state"] == "discarded":
-                            self._send_json(
-                                409, {"error": "match écarté : restaurez-le d'abord"}
-                            )
-                            return
-                        cv_path = (
-                            resolve_path(conn, cv_library_id, "cv")
-                            if cv_library_id is not None
-                            else None
+                    cv_path = (
+                        resolve_path(conn, cv_library_id, "cv")
+                        if cv_library_id is not None
+                        else None
+                    )
+                    cover_letter_path = (
+                        resolve_path(conn, cover_letter_library_id, "cover_letter")
+                        if cover_letter_library_id is not None
+                        else None
+                    )
+                    try:
+                        record_application(
+                            conn, match_id,
+                            cv_path=cv_path, cover_letter_path=cover_letter_path,
                         )
-                        cover_letter_path = (
-                            resolve_path(conn, cover_letter_library_id, "cover_letter")
-                            if cover_letter_library_id is not None
-                            else None
-                        )
-                        try:
-                            record_application(
-                                conn, match_id,
-                                cv_path=cv_path, cover_letter_path=cover_letter_path,
-                            )
-                        except ApplicationError as exc:
-                            self._send_json(409, {"error": str(exc)})
-                            return
-                    elif action == "later":
-                        conn.execute(
-                            "UPDATE match SET state = 'later', discarded_at = NULL WHERE id = ?",
-                            (match_id,),
-                        )
-                    elif action == "discard":
-                        conn.execute(
-                            "UPDATE match SET state = 'discarded', "
-                            "discarded_at = datetime('now') WHERE id = ?",
-                            (match_id,),
-                        )
-                    else:
-                        conn.execute(
-                            "UPDATE match SET state = ?, discarded_at = NULL WHERE id = ?",
-                            (target_state, match_id),
-                        )
-                    conn.commit()
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
+                    except ApplicationError as exc:
+                        self._send_json(409, {"error": str(exc)})
+                        return
+                elif action == "later":
+                    conn.execute(
+                        "UPDATE match SET state = 'later', discarded_at = NULL WHERE id = ?",
+                        (match_id,),
+                    )
+                elif action == "discard":
+                    conn.execute(
+                        "UPDATE match SET state = 'discarded', "
+                        "discarded_at = datetime('now') WHERE id = ?",
+                        (match_id,),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE match SET state = ?, discarded_at = NULL WHERE id = ?",
+                        (target_state, match_id),
+                    )
+                conn.commit()
             self._send_json(200, {"ok": True})
 
+        @_db_error_response()
         def _handle_bug_report(self, session: Session | None) -> None:
             body = self._read_json_body()
             fields = body if isinstance(body, dict) else {}
@@ -1921,30 +1898,24 @@ def make_handler(
                 page = "/"
             page = page[:MAX_BUG_CONTEXT_LENGTH]
             user_agent = (self.headers.get("User-Agent") or "")[:MAX_BUG_CONTEXT_LENGTH]
-            try:
-                conn = connect(db_path)
-                try:
-                    cur = conn.execute(
-                        "INSERT INTO bug_report "
-                        "(account_id, workspace_id, message, page, user_agent) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (
-                            session.account_id if session is not None else None,
-                            session.workspace_id if session is not None else None,
-                            message,
-                            page,
-                            user_agent or None,
-                        ),
-                    )
-                    report_id = int(cur.lastrowid)
-                    conn.commit()
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
+            with self._db() as conn:
+                cur = conn.execute(
+                    "INSERT INTO bug_report "
+                    "(account_id, workspace_id, message, page, user_agent) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        session.account_id if session is not None else None,
+                        session.workspace_id if session is not None else None,
+                        message,
+                        page,
+                        user_agent or None,
+                    ),
+                )
+                report_id = int(cur.lastrowid)
+                conn.commit()
             self._send_json(201, {"ok": True, "id": report_id})
 
+        @_db_error_response()
         def _handle_upload(self) -> None:
             body = self._read_json_body()
             fields = body if isinstance(body, dict) else {}
@@ -1960,18 +1931,12 @@ def make_handler(
             if label is not None and not isinstance(label, str):
                 self._send_json(400, {"error": "champ label invalide"})
                 return
-            try:
-                conn = connect(db_path)
+            with self._db() as conn:
                 try:
                     entry = save_upload(conn, db_path, doc_type, label, filename, content_base64)
                 except LibraryError as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
-                finally:
-                    conn.close()
-            except sqlite3.Error as exc:
-                self._send_text(500, f"erreur base de données : {exc}\n")
-                return
             self._send_json(
                 201, {"id": int(entry["id"]), "label": str(entry["label"]), "type": str(entry["type"])}
             )
@@ -1984,8 +1949,7 @@ def make_handler(
             ):
                 self._send_json(400, {"error": "CV invalide"})
                 return
-            conn = connect(db_path)
-            try:
+            with self._db() as conn:
                 try:
                     intents = analyze_cvs(
                         conn, onboarding_config or draft_config, cv_library_ids
@@ -1993,8 +1957,6 @@ def make_handler(
                 except OnboardingError as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
-            finally:
-                conn.close()
             self._send_json(
                 200,
                 {
@@ -2009,6 +1971,7 @@ def make_handler(
                 },
             )
 
+        @_db_error_response("json")
         def _handle_onboarding_complete(self, session: Session | None) -> None:
             if session is None:
                 self._send_json(401, {"error": "authentification requise"})
@@ -2021,8 +1984,7 @@ def make_handler(
             ):
                 self._send_json(400, {"error": "CV invalide"})
                 return
-            conn = connect(db_path)
-            try:
+            with self._db() as conn:
                 try:
                     intents = complete_profile(
                         conn,
@@ -2034,11 +1996,6 @@ def make_handler(
                 except OnboardingError as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
-                except sqlite3.Error as exc:
-                    self._send_json(500, {"error": f"erreur base de données : {exc}"})
-                    return
-            finally:
-                conn.close()
             self._send_json(200, {"ok": True, "count": len(intents)})
 
         def _handle_login(self) -> None:
@@ -2053,8 +2010,7 @@ def make_handler(
                     "Connexion", _login_form(email, "Instance nommée requise."), status=503
                 )
                 return
-            conn = connect(db_path)
-            try:
+            with self._db() as conn:
                 if not auth_required(conn):
                     self._redirect("/")
                     return
@@ -2076,8 +2032,6 @@ def make_handler(
                     )
                     return
                 clear_login_failures(conn, key)
-            finally:
-                conn.close()
             self._redirect(
                 "/", headers={"Set-Cookie": session_cookie(token, secure=secure_cookie)}
             )
@@ -2096,11 +2050,8 @@ def make_handler(
                     status=503,
                 )
                 return
-            conn = connect(db_path)
-            try:
+            with self._db() as conn:
                 status = invite_status(conn, token, workspace_slug)
-            finally:
-                conn.close()
             if status == "accepted":
                 self._redirect("/login")
                 return
@@ -2111,8 +2062,7 @@ def make_handler(
                     status=400,
                 )
                 return
-            conn = connect(db_path)
-            try:
+            with self._db() as conn:
                 try:
                     account_id = accept_invite(
                         conn, token, password, workspace_slug=workspace_slug
@@ -2130,8 +2080,6 @@ def make_handler(
                         "Créer votre compte", _invite_form(token, str(exc)), status=400
                     )
                     return
-            finally:
-                conn.close()
             self._redirect(
                 "/", headers={"Set-Cookie": session_cookie(session_value, secure=secure_cookie)}
             )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import sqlite3
 import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -306,6 +307,65 @@ def test_unknown_path_is_404_for_onboarded_session(tmp_path: Path) -> None:
         )
         assert status == 404
         assert "Nouveaux matchs" not in body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_onboarding_complete_database_error_returns_500_json(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "jobwatch.db"
+    conn = connect(db_path)
+    init_db(conn)
+    invite = create_invite(conn, "alice", "alice@example.com")
+    conn.close()
+    server, thread = _start_server(
+        db_path, workspace_slug="alice", secure_cookie=False, onboarding_enabled=True
+    )
+    port = server.server_address[1]
+    try:
+        password = "une très longue phrase secrète"
+        encoded = urlencode(
+            {"password": password, "password_confirmation": password}
+        ).encode()
+        _status, headers, _body = _request(
+            port,
+            "POST",
+            f"/invite/{invite}",
+            body=encoded,
+            headers=_form_headers(port),
+        )
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+
+        status, _headers, body = _request(
+            port, "GET", "/onboarding", headers={"Cookie": cookie}
+        )
+        assert status == 200
+        marker = 'name="csrf-token" content="'
+        csrf = body.split(marker, 1)[1].split('"', 1)[0]
+
+        def _boom(*_args, **_kwargs):
+            raise sqlite3.OperationalError("boom")
+
+        monkeypatch.setattr("jobwatch.serve.complete_profile", _boom)
+
+        payload = json.dumps({"cv_library_ids": []}).encode()
+        status, headers, body = _request(
+            port,
+            "POST",
+            "/onboarding/complete",
+            body=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Cookie": cookie,
+                "X-CSRF-Token": csrf,
+            },
+        )
+        assert status == 500
+        assert headers["Content-Type"] == "application/json"
+        assert json.loads(body) == {"error": "erreur base de données : boom"}
     finally:
         server.shutdown()
         server.server_close()

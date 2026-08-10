@@ -131,6 +131,7 @@ def validate_intents(rows: list[object], *, strict: bool = True) -> list[CareerI
     """
     if strict and len(rows) > MAX_INTENTS:
         raise OnboardingError(f"{MAX_INTENTS} catégories maximum")
+
     intents: list[CareerIntent] = []
     for row in rows[:MAX_INTENTS]:
         if not isinstance(row, dict):
