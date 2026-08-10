@@ -17,12 +17,20 @@ from jobwatch import draft, serve
 from jobwatch.config import ConfigError, DraftConfig, load_config
 from jobwatch.db import connect, init_db
 from jobwatch.draft import (
+    BODY_END_MARKER,
+    BODY_START_MARKER,
     DraftError,
+    apply_body_edit,
     compile_latex,
+    escape_latex_body,
+    extract_body,
     extract_latex,
     french_date,
+    get_body_edit,
     render_pngs,
     run_job,
+    splice_body,
+    unescape_latex_body,
 )
 from jobwatch.serve import make_handler, render_page, render_swipe_page
 
@@ -32,6 +40,18 @@ MINIMAL_TEX = (
     "\\documentclass{article}\n"
     "\\begin{document}\n"
     "Madame, Monsieur, je souhaite rejoindre votre équipe.\n"
+    "\\end{document}\n"
+)
+
+MINIMAL_TEX_WITH_BODY = (
+    "\\documentclass{article}\n"
+    "\\begin{document}\n"
+    "Jean Dupont\n\n"
+    f"{BODY_START_MARKER}\n"
+    "Madame, Monsieur,\n\n"
+    "Je souhaite rejoindre votre équipe.\n"
+    f"{BODY_END_MARKER}\n\n"
+    "Jean Dupont\n"
     "\\end{document}\n"
 )
 
@@ -106,6 +126,29 @@ def _seed_job(
         "INSERT INTO draft_job (match_id, track, cv_library_id, instruction) "
         "VALUES (?, 'engineer', ?, ?)",
         (match_id, cv_id, instruction),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def _seed_ok_job(
+    conn: sqlite3.Connection,
+    db_path: Path,
+    match_id: int,
+    cv_id: int,
+    tex_text: str = MINIMAL_TEX_WITH_BODY,
+) -> int:
+    """Insère un job 'ok' avec un .tex persisté, comme le laisserait une génération réussie."""
+    from jobwatch.library import documents_dir
+
+    target_dir = documents_dir(db_path)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    tex_path = target_dir / f"draft_{match_id}.tex"
+    tex_path.write_text(tex_text, encoding="utf-8")
+    cur = conn.execute(
+        "INSERT INTO draft_job (match_id, track, cv_library_id, status, tex_path) "
+        "VALUES (?, 'engineer', ?, 'ok', ?)",
+        (match_id, cv_id, str(tex_path)),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -189,6 +232,94 @@ def test_extract_latex_from_raw_response() -> None:
 def test_extract_latex_rejects_incomplete_document() -> None:
     with pytest.raises(DraftError, match="LaTeX"):
         extract_latex("Je ne peux pas rédiger cette lettre.")
+
+
+# ---------------------------------------------------------------- éditeur : marqueurs, échappement
+
+
+def test_escape_latex_body_escapes_every_special_character() -> None:
+    raw = "100% de $succès & aucun_doute #1 {vraiment} ~top~ \\o/"
+    escaped = escape_latex_body(raw)
+    assert escaped == (
+        "100\\% de \\$succès \\& aucun\\_doute \\#1 \\{vraiment\\} "
+        "\\textasciitilde{}top\\textasciitilde{} \\textbackslash{}o/"
+    )
+    assert unescape_latex_body(escaped) == raw
+
+
+def test_unescape_latex_body_reverses_escape_for_prose() -> None:
+    raw = "R&D chez Acme, budget de 20% et variable_name conservée."
+    assert unescape_latex_body(escape_latex_body(raw)) == raw
+
+
+def test_extract_body_returns_none_without_markers() -> None:
+    assert extract_body(MINIMAL_TEX) is None
+
+
+def test_extract_body_returns_unescaped_prose_between_markers() -> None:
+    tex = (
+        "\\documentclass{article}\\begin{document}\n"
+        f"{BODY_START_MARKER}\nBonjour \\& bienvenue, 50\\%.\n{BODY_END_MARKER}\n"
+        "\\end{document}\n"
+    )
+    assert extract_body(tex) == "Bonjour & bienvenue, 50%."
+
+
+def test_splice_body_raises_without_markers() -> None:
+    with pytest.raises(DraftError, match="modifiable"):
+        splice_body(MINIMAL_TEX, "nouveau texte")
+
+
+def test_splice_body_replaces_only_between_markers_and_escapes() -> None:
+    spliced = splice_body(MINIMAL_TEX_WITH_BODY, "Nouveau texte avec 50% et R&D.")
+    assert "Jean Dupont" in spliced
+    assert "Nouveau texte avec 50\\% et R\\&D." in spliced
+    assert extract_body(spliced) == "Nouveau texte avec 50% et R&D."
+
+
+# ---------------------------------------------------------------- résolution des lettres exemples
+
+
+def test_example_texts_prefers_config_examples(db_path: Path, tmp_path: Path) -> None:
+    conn = _conn(db_path)
+    library_tex = tmp_path / "library.tex"
+    library_tex.write_text("EXEMPLE BIBLIOTHEQUE", encoding="utf-8")
+    conn.execute(
+        "INSERT INTO document_library (type, label, file_path) VALUES "
+        "('letter_example', 'style', ?)",
+        (str(library_tex),),
+    )
+    conn.commit()
+    texts = draft._example_texts(conn, _config(tmp_path), "engineer")
+    conn.close()
+    assert texts == [MINIMAL_TEX]
+
+
+def test_example_texts_falls_back_to_library_when_config_empty(
+    db_path: Path, tmp_path: Path
+) -> None:
+    conn = _conn(db_path)
+    library_tex = tmp_path / "library.tex"
+    library_tex.write_text("EXEMPLE BIBLIOTHEQUE", encoding="utf-8")
+    conn.execute(
+        "INSERT INTO document_library (type, label, file_path) VALUES "
+        "('letter_example', 'style', ?)",
+        (str(library_tex),),
+    )
+    conn.commit()
+    config = DraftConfig(model="m", opencode_bin="opencode")
+    texts = draft._example_texts(conn, config, "engineer")
+    conn.close()
+    assert texts == ["EXEMPLE BIBLIOTHEQUE"]
+
+
+def test_example_texts_falls_back_to_generic_default(db_path: Path) -> None:
+    conn = _conn(db_path)
+    config = DraftConfig(model="m", opencode_bin="opencode")
+    texts = draft._example_texts(conn, config, "engineer")
+    conn.close()
+    assert len(texts) == 1
+    assert BODY_START_MARKER in texts[0]
 
 
 # ---------------------------------------------------------------- compilation réelle
@@ -318,6 +449,77 @@ def test_run_job_failure_lands_in_error(db_path: Path, tmp_path: Path, monkeypat
     assert job["status"] == "failed"
     assert "réponse vide" in job["error"]
     conn.close()
+
+
+# ---------------------------------------------------------------- corps éditable
+
+
+def test_get_body_edit_returns_unescaped_prose(db_path: Path, tmp_path: Path) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    _seed_ok_job(conn, db_path, match_id, cv_id)
+    body = get_body_edit(conn, match_id)
+    conn.close()
+    assert body == "Madame, Monsieur,\n\nJe souhaite rejoindre votre équipe."
+
+
+def test_get_body_edit_raises_without_markers(db_path: Path, tmp_path: Path) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    _seed_ok_job(conn, db_path, match_id, cv_id, tex_text=MINIMAL_TEX)
+    with pytest.raises(DraftError, match="modifiable"):
+        get_body_edit(conn, match_id)
+    conn.close()
+
+
+def test_get_body_edit_raises_without_generated_letter(db_path: Path) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    with pytest.raises(DraftError, match="aucune lettre"):
+        get_body_edit(conn, match_id)
+    conn.close()
+
+
+@pytest.mark.skipif(not HAS_TEX, reason="lualatex/pdftoppm absents")
+def test_apply_body_edit_recompiles_and_creates_new_job(db_path: Path, tmp_path: Path) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    first_job = _seed_ok_job(conn, db_path, match_id, cv_id)
+
+    new_job_id = apply_body_edit(conn, db_path, match_id, "Nouveau texte de lettre à 100%.")
+
+    assert new_job_id != first_job
+    job = conn.execute("SELECT * FROM draft_job WHERE id = ?", (new_job_id,)).fetchone()
+    assert job["status"] == "ok"
+    assert Path(job["pdf_path"]).exists()
+    assert "Nouveau texte de lettre" in Path(job["tex_path"]).read_text(encoding="utf-8")
+    assert job["library_id"] is not None
+    conn.close()
+
+
+@pytest.mark.skipif(not HAS_TEX, reason="lualatex/pdftoppm absents")
+def test_apply_body_edit_failure_does_not_persist(
+    db_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    _seed_ok_job(conn, db_path, match_id, cv_id)
+    monkeypatch.setattr(
+        draft, "compile_latex", lambda tex, work_dir: "erreur de compilation simulée"
+    )
+
+    with pytest.raises(DraftError, match="compilation"):
+        apply_body_edit(conn, db_path, match_id, "texte qui casse la compilation")
+
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM draft_job WHERE match_id = ?", (match_id,)
+    ).fetchone()["n"]
+    conn.close()
+    assert count == 1  # seulement le job initial : rien n'a été ajouté après l'échec
 
 
 # ---------------------------------------------------------------- rendu HTML
@@ -568,6 +770,87 @@ def test_http_letter_files_served_after_job(db_path: Path, tmp_path: Path, monke
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.skipif(not HAS_TEX, reason="lualatex/pdftoppm absents")
+def test_http_letter_body_get_and_post(db_path: Path, tmp_path: Path) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    _seed_ok_job(conn, db_path, match_id, cv_id)
+    conn.close()
+
+    server, thread = _start_server(db_path, _config(tmp_path))
+    try:
+        port = server.server_address[1]
+        status, body = _request(port, f"/match/{match_id}/letter/body")
+        assert status == 200
+        assert json.loads(body)["body"] == "Madame, Monsieur,\n\nJe souhaite rejoindre votre équipe."
+
+        status, body = _request(
+            port, f"/match/{match_id}/letter/body", {"body": "Texte édité à la main."}
+        )
+        assert status == 200, body
+        payload = json.loads(body)
+        assert payload["status"] == "ok"
+        assert "letter-page" in payload["html"]
+
+        status, body = _request(port, f"/match/{match_id}/letter/body")
+        assert json.loads(body)["body"] == "Texte édité à la main."
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_http_letter_body_post_requires_config(db_path: Path, tmp_path: Path) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    _seed_ok_job(conn, db_path, match_id, cv_id)
+    conn.close()
+    server, thread = _start_server(db_path, None)
+    try:
+        status, _ = _request(
+            server.server_address[1], f"/match/{match_id}/letter/body", {"body": "x"}
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert status == 503
+
+
+def test_http_letter_body_get_404_without_letter(db_path: Path) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    conn.close()
+    server, thread = _start_server(db_path, None)
+    try:
+        status, _ = _request(server.server_address[1], f"/match/{match_id}/letter/body")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert status == 404
+
+
+def test_http_letter_body_post_validates_body(db_path: Path, tmp_path: Path) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    _seed_ok_job(conn, db_path, match_id, cv_id)
+    conn.close()
+    server, thread = _start_server(db_path, _config(tmp_path))
+    try:
+        status, _ = _request(
+            server.server_address[1], f"/match/{match_id}/letter/body", {"body": "   "}
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert status == 400
 
 
 # ---------------------------------------------------------------- swipe & batch

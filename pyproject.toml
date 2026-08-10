@@ -37,7 +37,7 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-jobwatch = ["schema.sql", "config.example.yaml"]
+jobwatch = ["schema.sql", "config.example.yaml", "default_letter_example.tex"]
 
 [tool.ruff]
 line-length = 100

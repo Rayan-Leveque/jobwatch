@@ -33,7 +33,7 @@ def render_onboarding(
     )
     choice_hidden = " hidden" if editing else ""
     intent_hidden = "" if editing else " hidden"
-    eyebrow = "Vos catégories" if editing else "Étape 3 · Vos objectifs"
+    eyebrow = "Vos catégories" if editing else "Étape 4 · Vos objectifs"
     heading = "Gérez vos catégories" if editing else "Quels postes recherchez-vous ?"
     lead = (
         "Ajoutez, renommez ou retirez une catégorie. Les changements s’appliqueront à vos "
@@ -64,7 +64,7 @@ main {{ position:relative; width:min(100%,720px); margin:auto; padding:28px 18px
   font-weight:850; letter-spacing:.14em; text-transform:uppercase; }}
 .brand-mark {{ display:grid; place-items:center; width:34px; height:34px; border-radius:11px;
   color:#fff; background:var(--green); letter-spacing:0; }}
-.steps {{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin:34px 0 28px; }}
+.steps {{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin:34px 0 28px; }}
 .step {{ height:5px; border-radius:999px; background:rgba(29,31,35,.10); }}
 .step.active {{ background:var(--green); }}
 .eyebrow {{ margin:0 0 8px; color:var(--green); font-size:.78rem; font-weight:800;
@@ -130,7 +130,7 @@ input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-rad
 <div class="brand"><span class="brand-mark">JW</span>jobwatch</div>
 {back_link}
 <div class="steps"><span class="step active"></span><span class="step" id="step-2"></span>
-  <span class="step" id="step-3"></span></div>
+  <span class="step" id="step-3"></span><span class="step" id="step-4"></span></div>
 <section id="choice-step"{choice_hidden}>
   <p class="eyebrow">Étape 1 · Votre départ</p>
   <h1>Comment voulez-vous commencer ?</h1>
@@ -161,6 +161,30 @@ input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-rad
     <div class="file-list" id="file-list" hidden></div>
     <button class="wizard-action primary" id="analyze" type="button" disabled>Analyser mes CV</button>
     <p class="status" id="upload-status" aria-live="polite"></p>
+  </div>
+</section>
+<section id="example-step" hidden>
+  <p class="eyebrow">Étape 3 · Votre style (optionnel)</p>
+  <h1>Un exemple de lettre de motivation ?</h1>
+  <p class="lead">jobwatch peut générer des lettres de motivation à votre image. Partagez un
+  exemple - de préférence au format .tex - et le style de vos prochaines lettres s’en
+  inspirera. Vous pouvez aussi ignorer cette étape : un modèle générique sera utilisé par
+  défaut.</p>
+  <button class="wizard-action mode-back" id="back-to-choice-example" type="button"{mode_back_hidden}>← Modifier mon choix</button>
+  <div class="panel action-panel">
+    <label class="drop" id="example-drop-zone" for="example-file"><span class="drop-content">
+      <span class="drop-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3v12m-4-4 4 4 4-4"/><path d="M5 20h14"/></svg></span>
+      <span class="drop-copy"><strong>Déposez votre lettre ici</strong>
+      <span class="drop-hint">.tex de préférence · 10 Mo maximum</span></span></span></label>
+    <input id="example-file" type="file" accept=".tex,text/x-tex,application/x-tex" hidden>
+    <div class="file-list" id="example-file-list" hidden></div>
+    <div class="actions">
+      <button class="wizard-action secondary" id="skip-example" type="button">Passer cette étape</button>
+      <button class="wizard-action primary" id="continue-example" type="button" disabled>Continuer</button>
+    </div>
+    <p class="status" id="example-status" aria-live="polite"></p>
   </div>
 </section>
 <section id="intent-step"{intent_hidden}>
@@ -238,14 +262,23 @@ analyze.addEventListener('click', async () => {{
     }}
     uploadStatus.textContent = 'Analyse du profil en cours…';
     const result = await post('/onboarding/analyze', {{cv_library_ids:cvLibraryIds}});
-    showIntents(result.intents, true);
+    showExampleStep(result.intents);
   }} catch (error) {{ uploadStatus.textContent = error.message; uploadStatus.classList.add('error');
     analyze.disabled = false; }}
 }});
 
+let pendingIntents = [];
+const showExampleStep = intents => {{
+  pendingIntents = intents;
+  document.getElementById('upload-step').hidden = true;
+  document.getElementById('example-step').hidden = false;
+  document.getElementById('step-3').classList.add('active'); window.scrollTo(0,0);
+}};
+
 const showIntents = (intents, fromCv) => {{
   renderIntents(intents); document.getElementById('choice-step').hidden = true;
   document.getElementById('upload-step').hidden = true;
+  document.getElementById('example-step').hidden = true;
   document.getElementById('intent-step').hidden = false;
   document.getElementById('intent-lead').textContent = initialData.editing
     ? 'Ajoutez, renommez ou retirez une catégorie. Les changements s’appliqueront à vos prochaines découvertes.'
@@ -253,7 +286,8 @@ const showIntents = (intents, fromCv) => {{
       ? 'L’IA a lu vos CV, mais ces catégories ne sont que des propositions. Renommez-les, corrigez les mots-clés ou ajoutez une autre direction.'
       : 'Créez une ou plusieurs catégories, puis indiquez les intitulés et mots-clés à surveiller.';
   document.getElementById('step-2').classList.add('active');
-  document.getElementById('step-3').classList.add('active'); window.scrollTo(0,0);
+  document.getElementById('step-3').classList.add('active');
+  document.getElementById('step-4').classList.add('active'); window.scrollTo(0,0);
 }};
 document.getElementById('choose-cv').addEventListener('click', () => {{
   document.getElementById('choice-step').hidden = true;
@@ -263,15 +297,64 @@ document.getElementById('choose-cv').addEventListener('click', () => {{
 const returnToChoice = () => {{
   document.getElementById('choice-step').hidden = false;
   document.getElementById('upload-step').hidden = true;
+  document.getElementById('example-step').hidden = true;
   document.getElementById('intent-step').hidden = true;
   document.getElementById('step-2').classList.remove('active');
   document.getElementById('step-3').classList.remove('active');
+  document.getElementById('step-4').classList.remove('active');
   window.scrollTo(0,0);
 }};
 document.getElementById('back-to-choice-upload').addEventListener('click', returnToChoice);
+document.getElementById('back-to-choice-example').addEventListener('click', returnToChoice);
 document.getElementById('back-to-choice-intents').addEventListener('click', returnToChoice);
 document.getElementById('choose-manual').addEventListener('click', () =>
   showIntents([{{label:'',keywords:[],exclude:[]}}], false));
+
+const exampleFileInput = document.getElementById('example-file');
+const exampleFileList = document.getElementById('example-file-list');
+const exampleDrop = document.getElementById('example-drop-zone');
+const continueExample = document.getElementById('continue-example');
+const skipExample = document.getElementById('skip-example');
+const exampleStatus = document.getElementById('example-status');
+let selectedExampleFile = null;
+const setExampleFile = file => {{
+  if (!file) return;
+  exampleStatus.textContent = ''; exampleStatus.classList.remove('error');
+  if (!file.name.toLowerCase().endsWith('.tex')) {{
+    exampleStatus.textContent = 'Choisissez un fichier .tex.'; exampleStatus.classList.add('error');
+    return;
+  }}
+  if (file.size > 10 * 1024 * 1024) {{
+    exampleStatus.textContent = `${{file.name}} dépasse 10 Mo.`; exampleStatus.classList.add('error');
+    return;
+  }}
+  selectedExampleFile = file;
+  const item = document.createElement('span'); item.className = 'file-name'; item.textContent = file.name;
+  exampleFileList.replaceChildren(item); exampleFileList.hidden = false;
+  continueExample.disabled = false; continueExample.textContent = 'Ajouter et continuer';
+}};
+exampleFileInput.addEventListener('change', () => setExampleFile(exampleFileInput.files[0]));
+['dragenter','dragover'].forEach(name => exampleDrop.addEventListener(name, event => {{
+  event.preventDefault(); exampleDrop.classList.add('drag');
+}}));
+['dragleave','drop'].forEach(name => exampleDrop.addEventListener(name, event => {{
+  event.preventDefault(); exampleDrop.classList.remove('drag');
+}}));
+exampleDrop.addEventListener('drop', event => setExampleFile(event.dataTransfer.files[0]));
+skipExample.addEventListener('click', () => showIntents(pendingIntents, true));
+continueExample.addEventListener('click', async () => {{
+  if (!selectedExampleFile) {{ showIntents(pendingIntents, true); return; }}
+  continueExample.disabled = true; skipExample.disabled = true;
+  exampleStatus.textContent = 'Envoi de votre exemple…'; exampleStatus.classList.remove('error');
+  try {{
+    await post('/documents', {{filename:selectedExampleFile.name, label:selectedExampleFile.name,
+      type:'letter_example', content_base64:await base64(selectedExampleFile)}});
+    showIntents(pendingIntents, true);
+  }} catch (error) {{
+    exampleStatus.textContent = error.message; exampleStatus.classList.add('error');
+    continueExample.disabled = false; skipExample.disabled = false;
+  }}
+}});
 
 const intentCard = intent => {{
   const card = document.createElement('div'); card.className = 'intent';

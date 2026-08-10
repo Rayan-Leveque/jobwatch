@@ -24,6 +24,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+from importlib import resources
 from pathlib import Path
 
 import httpx
@@ -56,6 +57,20 @@ _MONTHS_FR = (
     "juillet", "août", "septembre", "octobre", "novembre", "décembre",
 )
 
+BODY_START_MARKER = "% JOBWATCH:BODY_START"
+BODY_END_MARKER = "% JOBWATCH:BODY_END"
+
+_BODY_MARKERS_INSTRUCTION = (
+    "Encadre le corps de la lettre - du paragraphe d'ouverture au paragraphe de "
+    "clôture inclus, hors date, en-tête destinataire/société et bloc de signature - "
+    "par deux lignes de commentaire LaTeX seules sur leur ligne : "
+    f"`{BODY_START_MARKER}` juste avant, `{BODY_END_MARKER}` juste après. Le texte "
+    "entre ces deux marqueurs doit être du texte brut (paragraphes séparés par une "
+    "ligne vide), sans aucune commande LaTeX de mise en forme (pas de \\textbf, "
+    "\\emph, \\begin{{itemize}}...) ; seuls les caractères spéciaux LaTeX "
+    "(% & _ # $ {{ }} ^ ~ \\) y sont échappés normalement."
+)
+
 PROMPT = (
     "Rédige une lettre de motivation en français pour l'offre d'emploi décrite dans la "
     "section OFFRE du document fourni, au nom du candidat décrit dans la section CV. "
@@ -64,7 +79,7 @@ PROMPT = (
     "signature) et leur ton. Réponds uniquement avec le document LaTeX complet, de "
     "\\documentclass à \\end{{document}}, sans texte autour. Contraintes strictes : "
     "une seule page ; aucune image ni \\includegraphics ; date : {date} ; "
-    "n'invente aucun fait absent du CV."
+    "n'invente aucun fait absent du CV. " + _BODY_MARKERS_INSTRUCTION
 )
 
 REGENERATE_PROMPT_SUFFIX = (
@@ -76,10 +91,35 @@ REPAIR_PROMPT = (
     "Le document LaTeX de la section LETTRE contient des erreurs : la compilation "
     "lualatex échoue avec le log de la section ERREUR. Corrige le document et réponds "
     "uniquement avec le document LaTeX complet corrigé, de \\documentclass à "
-    "\\end{document}, sans texte autour."
+    "\\end{document}, sans texte autour. Si les marqueurs "
+    f"{BODY_START_MARKER} / {BODY_END_MARKER} sont présents, conserve-les à leur "
+    "position autour du corps de la lettre."
 )
 
 _LATEX_FENCE_RE = re.compile(r"```(?:latex|tex)?\s*\n(.*?)```", re.DOTALL)
+
+_LATEX_ESCAPE_MAP = {
+    "\\": r"\textbackslash{}",
+    "{": r"\{",
+    "}": r"\}",
+    "$": r"\$",
+    "&": r"\&",
+    "#": r"\#",
+    "^": r"\textasciicircum{}",
+    "_": r"\_",
+    "~": r"\textasciitilde{}",
+    "%": r"\%",
+}
+_LATEX_UNESCAPE_MAP = {tex: char for char, tex in _LATEX_ESCAPE_MAP.items()}
+_LATEX_UNESCAPE_RE = re.compile(
+    "|".join(re.escape(tex) for tex in sorted(_LATEX_UNESCAPE_MAP, key=len, reverse=True))
+)
+
+_BODY_RE = re.compile(
+    re.escape(BODY_START_MARKER) + r"\n(.*?)\n" + re.escape(BODY_END_MARKER), re.DOTALL
+)
+
+_DEFAULT_EXAMPLE_FILE = "default_letter_example.tex"
 
 
 class DraftError(Exception):
@@ -184,7 +224,29 @@ def _cv_text(conn: sqlite3.Connection, cv_library_id: int) -> str:
     return text
 
 
-def _example_texts(config: DraftConfig, track: str) -> list[str]:
+def _default_example_text() -> str:
+    return resources.files("jobwatch").joinpath(_DEFAULT_EXAMPLE_FILE).read_text(
+        encoding="utf-8"
+    )
+
+
+def _library_example_texts(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        "SELECT file_path FROM document_library WHERE type = 'letter_example' "
+        "ORDER BY uploaded_at DESC, id DESC"
+    ).fetchall()
+    texts = []
+    for row in rows:
+        path = Path(str(row["file_path"]))
+        try:
+            texts.append(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            raise DraftError(f"lettre exemple illisible : {path} ({exc})") from exc
+    return texts
+
+
+def _example_texts(conn: sqlite3.Connection, config: DraftConfig, track: str) -> list[str]:
+    """Résout les lettres exemples : config.examples, puis bibliothèque, puis modèle générique."""
     paths = config.examples.get(track)
     if not paths and track == "all":
         paths = list(
@@ -192,13 +254,20 @@ def _example_texts(config: DraftConfig, track: str) -> list[str]:
                 path for key in DRAFT_TRACKS for path in config.examples.get(key, [])
             )
         )
-    texts = []
-    for path in paths or []:
-        try:
-            texts.append(path.read_text(encoding="utf-8"))
-        except OSError as exc:
-            raise DraftError(f"lettre exemple illisible : {path} ({exc})") from exc
-    return texts
+    if paths:
+        texts = []
+        for path in paths:
+            try:
+                texts.append(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as exc:
+                raise DraftError(f"lettre exemple illisible : {path} ({exc})") from exc
+        return texts
+
+    library_texts = _library_example_texts(conn)
+    if library_texts:
+        return library_texts
+
+    return [_default_example_text()]
 
 
 def _build_bundle(
@@ -326,6 +395,35 @@ def extract_latex(text: str) -> str:
     if start == -1 or end == -1:
         raise DraftError("la réponse du modèle ne contient pas de document LaTeX complet")
     return text[start : end + len("\\end{document}")].strip() + "\n"
+
+
+def escape_latex_body(text: str) -> str:
+    """Échappe les caractères spéciaux LaTeX d'un texte brut, hors accents (natifs en UTF-8)."""
+    return "".join(_LATEX_ESCAPE_MAP.get(char, char) for char in text)
+
+
+def unescape_latex_body(text: str) -> str:
+    """Inverse escape_latex_body pour afficher le corps d'une lettre en texte brut."""
+    return _LATEX_UNESCAPE_RE.sub(lambda m: _LATEX_UNESCAPE_MAP[m.group(0)], text)
+
+
+def extract_body(tex: str) -> str | None:
+    """Renvoie le corps éditable (texte brut) d'un .tex, ou None si les marqueurs sont absents."""
+    match = _BODY_RE.search(tex)
+    if match is None:
+        return None
+    return unescape_latex_body(match.group(1))
+
+
+def splice_body(tex: str, body_text: str) -> str:
+    """Remplace le corps entre les marqueurs par body_text (échappé), le reste inchangé."""
+    match = _BODY_RE.search(tex)
+    if match is None:
+        raise DraftError(
+            "cette lettre ne contient pas de section modifiable (générée avant l'éditeur)"
+        )
+    escaped = escape_latex_body(body_text)
+    return tex[: match.start(1)] + escaped + tex[match.end(1) :]
 
 
 def compile_latex(tex: str, work_dir: Path) -> Path | str:
@@ -507,7 +605,7 @@ def _run_job_inner(
         warning = WARNING_NO_CONTENT
 
     cv_text = _cv_text(conn, int(job["cv_library_id"]))
-    examples = _example_texts(config, track)
+    examples = _example_texts(conn, config, track)
 
     instruction = str(job["instruction"]).strip() if job["instruction"] else ""
     previous_tex = _previous_tex(conn, match_id) if instruction else None
@@ -542,3 +640,78 @@ def _run_job_inner(
         png_pages=pages,
         library_id=library_id,
     )
+
+
+def _latest_ok_job(conn: sqlite3.Connection, match_id: int) -> sqlite3.Row:
+    job = conn.execute(
+        "SELECT * FROM draft_job WHERE match_id = ? AND status = 'ok' AND tex_path IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (match_id,),
+    ).fetchone()
+    if job is None:
+        raise DraftError("aucune lettre générée pour ce match")
+    return job
+
+
+def get_body_edit(conn: sqlite3.Connection, match_id: int) -> str:
+    """Renvoie le corps éditable en texte brut de la dernière lettre générée avec succès."""
+    job = _latest_ok_job(conn, match_id)
+    path = Path(str(job["tex_path"]))
+    if not path.exists():
+        raise DraftError("fichier source .tex introuvable")
+    tex = path.read_text(encoding="utf-8", errors="replace")
+    body = extract_body(tex)
+    if body is None:
+        raise DraftError(
+            "cette lettre ne contient pas de section modifiable (générée avant l'éditeur)"
+        )
+    return body
+
+
+def apply_body_edit(conn: sqlite3.Connection, db_path: Path, match_id: int, body_text: str) -> int:
+    """Recompile la lettre existante avec un corps édité à la main ; renvoie l'id du nouveau job.
+
+    Aucun appel LLM : une compilation échouée lève DraftError sans rien persister, pour
+    laisser l'utilisateur corriger son texte plutôt que de retomber sur la boucle de
+    réparation du modèle (réservée aux brouillons générés).
+    """
+    job = _latest_ok_job(conn, match_id)
+    tex_path = Path(str(job["tex_path"]))
+    if not tex_path.exists():
+        raise DraftError("fichier source .tex introuvable")
+    tex = tex_path.read_text(encoding="utf-8", errors="replace")
+    new_tex = splice_body(tex, body_text)
+
+    match = _load_match(conn, match_id)
+    target_dir = documents_dir(db_path)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        work_dir = Path(tmp_dir)
+        result = compile_latex(new_tex, work_dir)
+        if not isinstance(result, Path):
+            raise DraftError(f"compilation LaTeX en échec : {result[-500:]}")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"draft_{match_id}"
+        final_tex = target_dir / f"{stem}.tex"
+        final_pdf = target_dir / f"{stem}.pdf"
+        final_tex.write_text(new_tex, encoding="utf-8")
+        shutil.copyfile(result, final_pdf)
+        pages = render_pngs(final_pdf, target_dir, stem)
+
+    library_id = _upsert_library_entry(conn, match_id, _label_for(match), final_pdf)
+    cur = conn.execute(
+        "INSERT INTO draft_job "
+        "(match_id, track, cv_library_id, status, tex_path, pdf_path, png_pages, "
+        "library_id, finished_at) "
+        "VALUES (?, ?, ?, 'ok', ?, ?, ?, ?, datetime('now'))",
+        (
+            match_id,
+            job["track"],
+            job["cv_library_id"],
+            str(final_tex),
+            str(final_pdf),
+            pages,
+            library_id,
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)

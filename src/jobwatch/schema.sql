@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS document (
 );
 CREATE TABLE IF NOT EXISTS document_library (
   id INTEGER PRIMARY KEY,
-  type TEXT NOT NULL,                -- 'cv' | 'cover_letter'
+  type TEXT NOT NULL,                -- 'cv' | 'cover_letter' | 'letter_example'
   label TEXT NOT NULL,
   file_path TEXT NOT NULL,
   uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
