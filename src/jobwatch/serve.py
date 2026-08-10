@@ -521,6 +521,11 @@ _MD_BARE_HEADING_RE = re.compile(r"^#{1,6}$")
 # de texte non vide, jamais après une ligne blanche (sinon ce serait plutôt
 # une séparation visuelle sans rapport avec un titre).
 _MD_SETEXT_RE = re.compile(r"^(?:=+|-{2,})$")
+# Séparateur horizontal (ligne de ---, *** ou ___ seule, comme sur Obsidian) :
+# reconnu seulement quand la boucle l'atteint comme ligne "courante", c'est-à-
+# dire quand elle n'a pas déjà été absorbée comme soulignement de titre par
+# le lookahead ci-dessus (qui la consomme avant qu'elle devienne "courante").
+_MD_HR_RE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
 _MD_UL_RE = re.compile(r"^[-*]\s+(.+)$")
 _MD_OL_RE = re.compile(r"^\d+\.\s+(.+)$")
 # Quotes du titre optionnel déjà html.escape()-ées (&quot;/&#x27;) au moment où
@@ -631,6 +636,11 @@ def _markdown_to_html(markdown: str) -> str:
             flush_paragraph()
             flush_list()
             blocks.append(f'<p class="md-heading">{_format_inline(heading_match.group(2))}</p>')
+            continue
+        if _MD_HR_RE.match(line):
+            flush_paragraph()
+            flush_list()
+            blocks.append("<hr>")
             continue
         ul_match = _MD_UL_RE.match(line)
         ol_match = _MD_OL_RE.match(line) if not ul_match else None
@@ -2617,6 +2627,7 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .content-panel li + li { margin-top:4px }
 .content-panel strong { color:var(--fg) }
 .content-panel a { color:var(--accent) }
+.content-panel hr { margin:16px 0; border:0; border-top:1px solid var(--line) }
 .card-actions { position:relative; z-index:3; display:flex; flex-wrap:wrap; gap:8px;
   margin:12px 13px 0; pointer-events:auto }
 .card-action { min-height:38px; padding:0 14px; display:inline-flex; align-items:center;

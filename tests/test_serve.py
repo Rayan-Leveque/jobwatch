@@ -718,6 +718,25 @@ def test_markdown_to_html_drops_bare_heading_marker() -> None:
     assert html_out == "<p>Valeo</p>"
 
 
+def test_markdown_to_html_renders_horizontal_rule() -> None:
+    """Une ligne de --- seule (pas de texte juste avant) devient une vraie
+    séparation visuelle, comme sur Obsidian, au lieu de tirets littéraux."""
+    html_out = _markdown_to_html("Texte 1.\n\n---\n\nTexte 2.")
+    assert html_out == "<p>Texte 1.</p><hr><p>Texte 2.</p>"
+
+
+def test_markdown_to_html_renders_long_horizontal_rule() -> None:
+    html_out = _markdown_to_html("Texte 1.\n\n----------------------------\n\nTexte 2.")
+    assert html_out == "<p>Texte 1.</p><hr><p>Texte 2.</p>"
+
+
+def test_markdown_to_html_horizontal_rule_does_not_break_setext_heading() -> None:
+    """--- juste après une ligne de texte (sans ligne blanche) reste un titre
+    souligné, pas une séparation : l'ambiguïté est déjà résolue en amont."""
+    html_out = _markdown_to_html("Titre\n---\n\nTexte.")
+    assert html_out == '<p class="md-heading">Titre</p><p>Texte.</p>'
+
+
 def test_markdown_to_html_escapes_html_inside_formatting() -> None:
     html_out = _markdown_to_html("**<script>alert(1)</script>**")
     assert "<script>" not in html_out
