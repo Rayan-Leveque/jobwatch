@@ -168,6 +168,19 @@ CREATE TABLE IF NOT EXISTS login_throttle (
   blocked_until TEXT
 );
 
+-- Signalements déposés depuis le dashboard. Ils restent dans l'instance afin
+-- qu'un utilisateur n'ait jamais besoin d'un compte GitHub ou d'un outil tiers.
+CREATE TABLE IF NOT EXISTS bug_report (
+  id INTEGER PRIMARY KEY,
+  account_id INTEGER REFERENCES account(id) ON DELETE SET NULL,
+  workspace_id INTEGER REFERENCES workspace(id) ON DELETE SET NULL,
+  message TEXT NOT NULL,
+  page TEXT NOT NULL,
+  user_agent TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bug_report_created ON bug_report(created_at, id);
+
 -- Profil candidat et pistes confirmées pendant l'onboarding. Le profil est lié
 -- au compte, pas à l'instance, afin de rester compatible avec le futur mode C.
 CREATE TABLE IF NOT EXISTS candidate_profile (

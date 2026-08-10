@@ -559,6 +559,37 @@ def log(
     click.echo(f"événement {event_type} consigné pour la candidature {application_id}")
 
 
+@cli.command("bugs")
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def bugs(config_path: Path | None) -> None:
+    """Liste les signalements envoyés depuis le dashboard."""
+    config = _require_config(config_path)
+    conn = _open_db(config)
+    try:
+        reports = conn.execute(
+            "SELECT br.id AS id, br.created_at AS created_at, br.page AS page, "
+            "       br.message AS message, br.user_agent AS user_agent, a.email AS email "
+            "FROM bug_report br "
+            "LEFT JOIN account a ON a.id = br.account_id "
+            "ORDER BY br.id DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    if not reports:
+        click.echo("Aucun signalement.")
+        return
+    for report in reports:
+        reporter = str(report["email"] or "instance locale")
+        click.echo(
+            f"#{int(report['id'])} · {report['created_at']!s} · "
+            f"{reporter} · {report['page']!s}"
+        )
+        for line in str(report["message"]).splitlines() or [""]:
+            click.echo(f"  {line}")
+        if report["user_agent"]:
+            click.echo(f"  Navigateur : {report['user_agent']}")
+
+
 @cli.command("apps")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def apps(config_path: Path | None) -> None:

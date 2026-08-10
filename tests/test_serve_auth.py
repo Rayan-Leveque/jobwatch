@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import json
 import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -68,6 +69,62 @@ def test_legacy_instance_remains_accessible_without_account(tmp_path: Path) -> N
         assert headers["Cache-Control"] == "no-store"
         assert "Nouveaux matchs" in body
         assert 'name="csrf-token"' not in body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_bug_report_is_stored_with_automatic_context(tmp_path: Path) -> None:
+    db_path = tmp_path / "jobwatch.db"
+    conn = connect(db_path)
+    init_db(conn)
+    conn.close()
+    server, thread = _start_server(db_path)
+    port = server.server_address[1]
+    try:
+        body = json.dumps(
+            {"message": "Le résumé ne s'affiche plus.", "page": "/swipe?track=all"}
+        ).encode()
+        status, _headers, response = _request(
+            port,
+            "POST",
+            "/bug-report",
+            body=body,
+            headers={"Content-Type": "application/json", "User-Agent": "Test Browser/1.0"},
+        )
+        assert status == 201
+        assert json.loads(response)["ok"] is True
+
+        conn = connect(db_path)
+        report = conn.execute("SELECT * FROM bug_report").fetchone()
+        conn.close()
+        assert report["message"] == "Le résumé ne s'affiche plus."
+        assert report["page"] == "/swipe?track=all"
+        assert report["user_agent"] == "Test Browser/1.0"
+        assert report["account_id"] is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_bug_report_rejects_an_empty_description(tmp_path: Path) -> None:
+    db_path = tmp_path / "jobwatch.db"
+    conn = connect(db_path)
+    init_db(conn)
+    conn.close()
+    server, thread = _start_server(db_path)
+    try:
+        status, _headers, response = _request(
+            server.server_address[1],
+            "POST",
+            "/bug-report",
+            body=b'{"message":"   ","page":"/"}',
+            headers={"Content-Type": "application/json"},
+        )
+        assert status == 400
+        assert "décrivez" in json.loads(response)["error"]
     finally:
         server.shutdown()
         server.server_close()

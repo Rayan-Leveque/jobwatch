@@ -471,6 +471,27 @@ def test_apply_flow_on_seeded_db(runner: CliRunner, tmp_path: Path) -> None:
     _apply_flow(runner, config)
 
 
+def test_bugs_lists_dashboard_reports(runner: CliRunner, tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    config = _write_config(tmp_path, db_path)
+    conn = connect(db_path)
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO bug_report (message, page, user_agent) VALUES (?, ?, ?)",
+        ("Le bouton ne répond pas.\nAprès le swipe.", "/swipe", "Test Browser/1.0"),
+    )
+    conn.commit()
+    conn.close()
+
+    result = runner.invoke(cli, ["bugs", "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    assert "instance locale · /swipe" in result.output
+    assert "Le bouton ne répond pas." in result.output
+    assert "Après le swipe." in result.output
+    assert "Navigateur : Test Browser/1.0" in result.output
+
+
 def test_discard_sets_state_and_discarded_at(runner: CliRunner, tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     _seed_match(db_path)

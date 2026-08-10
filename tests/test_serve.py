@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import socket
 import sqlite3
 import threading
@@ -86,6 +87,46 @@ def _seed_offer(
     match_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.commit()
     return match_id, offer_id
+
+
+def test_search_haystack_ignores_the_document_library_menus(
+    conn: sqlite3.Connection,
+) -> None:
+    """Régression : chercher une société ne doit pas matcher via les <option>.
+
+    Les menus « Candidater » et « Générer LM » listent toute la bibliothèque.
+    Le filtre lisait le textContent de la carte, donc une lettre nommée
+    « LM Wavestone - … » faisait ressortir toutes les cartes portant un
+    formulaire au lieu des seules offres Wavestone.
+    """
+    _seed_offer(conn, company="Valeo", title="Ingénieur IA", location="Créteil", state="later")
+    _seed_offer(conn, company="Wavestone", title="Consultant IA", location="Paris", state="later")
+    _seed_library(conn, "cover_letter", "LM Wavestone - Consultant IA", "/tmp/lm.pdf")
+
+    page = render_page(conn)
+
+    # Le nom de la lettre est bien présent dans la page (les menus le listent)...
+    assert "LM Wavestone - Consultant IA" in page
+    # ...mais il ne doit apparaître dans aucune zone cherchable.
+    haystacks = re.findall(r'data-search="([^"]*)"', page)
+    assert haystacks, "les cartes doivent exposer data-search"
+    valeo = [h for h in haystacks if "valeo" in h]
+    assert valeo, "la carte Valeo doit être cherchable"
+    assert all("wavestone" not in h for h in valeo)
+
+    wavestone = [h for h in haystacks if "wavestone" in h]
+    assert len(wavestone) == 1
+    assert "consultant ia" in wavestone[0]
+    assert "paris" in wavestone[0]
+
+
+def test_search_haystack_is_accent_and_case_folded(conn: sqlite3.Connection) -> None:
+    """La comparaison côté JS est un simple includes : le serveur normalise."""
+    _seed_offer(conn, company="Éloïse & Co", title="Développeur IA", location="Lyon")
+
+    haystacks = re.findall(r'data-search="([^"]*)"', render_page(conn))
+
+    assert any("eloise" in h and "developpeur" in h for h in haystacks)
 
 
 def _seed_library(

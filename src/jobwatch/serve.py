@@ -24,6 +24,7 @@ import json
 import re
 import sqlite3
 import threading
+import unicodedata
 from dataclasses import dataclass
 from dataclasses import field as dataclasses_field
 from datetime import UTC, datetime
@@ -78,7 +79,10 @@ _LETTER_FILE_RE = re.compile(r"^/match/(\d+)/letter\.(pdf|tex)$")
 _LETTER_PAGE_RE = re.compile(r"^/match/(\d+)/letter/(\d+)\.png$")
 _DOCUMENT_FILE_RE = re.compile(r"^/documents/(\d+)$")
 _UPLOAD_PATH = "/documents"
+_BUG_REPORT_PATH = "/bug-report"
 MAX_JSON_BODY_BYTES = 15 * 1024 * 1024
+MAX_BUG_REPORT_LENGTH = 4_000
+MAX_BUG_CONTEXT_LENGTH = 500
 
 _PREVIEW_CONTENT_TYPES = {
     ".pdf": "application/pdf",
@@ -776,7 +780,8 @@ def _match_card(
     )
     actions_html = _card_actions(row, library) if actions else ""
     return (
-        f'<article class="row row-{cls}"><div class="body">'
+        f'<article class="row row-{cls}" '
+        f'data-search="{html.escape(_search_haystack(row), quote=True)}"><div class="body">'
         f'<div class="card-topline"><div class="company">{company}</div>'
         f'<div class="card-badges">{pill}</div></div>'
         f'<div class="role">{title}</div>'
@@ -816,12 +821,37 @@ def _application_card(
         [summary_panel, content_panel, letter_panel],
     )
     return (
-        f'<article class="row row-applied"><div class="body">'
+        f'<article class="row row-applied" '
+        f'data-search="{html.escape(_search_haystack(row), quote=True)}"><div class="body">'
         f'<div class="card-topline"><div class="company">{company}</div>'
         f'<div class="card-badges">{pill}</div></div>'
         f'<div class="role">{title}</div>'
         f'<div class="meta">{meta}</div>{note}</div>{reader}</article>'
     )
+
+
+def _search_haystack(row: sqlite3.Row) -> str:
+    """Attribut data-search d'une carte : ce sur quoi la recherche doit porter.
+
+    Le filtre lisait le textContent de la carte entière, donc aussi les
+    <option> des menus « Candidater » et « Générer LM ». Ces menus listent
+    toute la bibliothèque : chercher une société dont on a déjà généré une
+    lettre faisait ressortir toutes les cartes portant un formulaire, et pas
+    l'offre voulue. On expose donc explicitement les quatre champs annoncés
+    par le placeholder : entreprise, poste, lieu, recherche.
+    """
+    parts = [
+        str(row["company"] or ""),
+        str(row["title"] or ""),
+        str(row["location"] or ""),
+        str(row["platform"] or ""),
+        str(row["search_name"] or ""),
+    ]
+    joined = " ".join(part for part in parts if part)
+    # Même normalisation que côté JS : minuscules sans accents, pour que la
+    # comparaison soit un simple includes().
+    folded = unicodedata.normalize("NFD", joined.casefold())
+    return "".join(c for c in folded if not unicodedata.combining(c))
 
 
 ACTIONABLE_SECTIONS = {"priority", "new", "seen", "later"}
@@ -1146,7 +1176,9 @@ def make_handler(
                 return None
             if session is not None:
                 return session
-            if path.startswith(("/draft/", "/match/", "/documents", "/onboarding/")):
+            if path.startswith(
+                ("/draft/", "/match/", "/documents", "/onboarding/", _BUG_REPORT_PATH)
+            ):
                 self._send_json(401, {"error": "authentification requise"})
             else:
                 self._redirect("/login")
@@ -1543,6 +1575,9 @@ def make_handler(
                     "/login", headers={"Set-Cookie": expired_session_cookie(secure=secure_cookie)}
                 )
                 return
+            if path == _BUG_REPORT_PATH:
+                self._handle_bug_report(session)
+                return
             if path == _UPLOAD_PATH:
                 self._handle_upload()
                 return
@@ -1638,6 +1673,49 @@ def make_handler(
                 self._send_text(500, f"erreur base de données : {exc}\n")
                 return
             self._send_json(200, {"ok": True})
+
+        def _handle_bug_report(self, session: Session | None) -> None:
+            body = self._read_json_body()
+            fields = body if isinstance(body, dict) else {}
+            message = fields.get("message")
+            page = fields.get("page")
+            if not isinstance(message, str) or not message.strip():
+                self._send_json(400, {"error": "décrivez le problème rencontré"})
+                return
+            message = message.strip()
+            if len(message) > MAX_BUG_REPORT_LENGTH:
+                self._send_json(
+                    400,
+                    {"error": f"description trop longue ({MAX_BUG_REPORT_LENGTH} caractères maximum)"},
+                )
+                return
+            if not isinstance(page, str) or not page.startswith("/"):
+                page = "/"
+            page = page[:MAX_BUG_CONTEXT_LENGTH]
+            user_agent = (self.headers.get("User-Agent") or "")[:MAX_BUG_CONTEXT_LENGTH]
+            try:
+                conn = connect(db_path)
+                try:
+                    cur = conn.execute(
+                        "INSERT INTO bug_report "
+                        "(account_id, workspace_id, message, page, user_agent) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            session.account_id if session is not None else None,
+                            session.workspace_id if session is not None else None,
+                            message,
+                            page,
+                            user_agent or None,
+                        ),
+                    )
+                    report_id = int(cur.lastrowid)
+                    conn.commit()
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            self._send_json(201, {"ok": True, "id": report_id})
 
         def _handle_upload(self) -> None:
             body = self._read_json_body()
@@ -1975,6 +2053,101 @@ def _csrf_head(token: str) -> str:
   }};
 }})();
 </script>"""
+
+
+_BUG_REPORT_DIALOG = """\
+<div class="bug-report-overlay" id="bug-report-overlay" hidden>
+  <section class="bug-report-dialog" role="dialog" aria-modal="true"
+    aria-labelledby="bug-report-title">
+    <button class="bug-report-close" type="button" data-bug-report-close
+      aria-label="Fermer">×</button>
+    <p class="eyebrow">Un problème ?</p>
+    <h2 id="bug-report-title">Signaler un bug</h2>
+    <p class="bug-report-intro">Décrivez simplement ce qui s'est passé. La page et le
+      navigateur seront joints automatiquement.</p>
+    <form id="bug-report-form">
+      <label class="doc-label" for="bug-report-message">Que s'est-il passé ?</label>
+      <textarea class="apply-input bug-report-message" id="bug-report-message"
+        maxlength="4000" required placeholder="Ex. J'ai appuyé sur… et rien ne s'est passé."></textarea>
+      <div class="bug-report-actions">
+        <button class="card-action" type="button" data-bug-report-close>Annuler</button>
+        <button class="card-action bug-report-submit" type="submit">Envoyer</button>
+      </div>
+      <p class="bug-report-status" id="bug-report-status" aria-live="polite"></p>
+    </form>
+  </section>
+</div>"""
+
+
+_BUG_REPORT_JS = """\
+(function () {
+  const overlay = document.getElementById('bug-report-overlay');
+  const form = document.getElementById('bug-report-form');
+  if (!overlay || !form) return;
+  const message = document.getElementById('bug-report-message');
+  const status = document.getElementById('bug-report-status');
+  const submit = form.querySelector('.bug-report-submit');
+  let previousFocus = null;
+  const open = trigger => {
+    previousFocus = trigger;
+    status.textContent = '';
+    status.classList.remove('is-error', 'is-success');
+    overlay.hidden = false;
+    document.body.classList.add('modal-open');
+    requestAnimationFrame(() => message.focus());
+  };
+  const close = () => {
+    overlay.hidden = true;
+    document.body.classList.remove('modal-open');
+    if (previousFocus) previousFocus.focus();
+  };
+  document.querySelectorAll('[data-bug-report-open]').forEach(button => {
+    button.addEventListener('click', () => open(button));
+  });
+  overlay.querySelectorAll('[data-bug-report-close]').forEach(button => {
+    button.addEventListener('click', close);
+  });
+  overlay.addEventListener('click', event => {
+    if (event.target === overlay) close();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !overlay.hidden) close();
+  });
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const text = message.value.trim();
+    if (!text) {
+      status.textContent = 'Décrivez le problème rencontré.';
+      status.classList.add('is-error');
+      return;
+    }
+    submit.disabled = true;
+    status.textContent = 'Envoi…';
+    status.classList.remove('is-error', 'is-success');
+    try {
+      const response = await fetch('/bug-report', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          message: text,
+          page: location.pathname + location.search,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || 'Envoi impossible.');
+      message.value = '';
+      status.textContent = 'Merci, le signalement a bien été envoyé.';
+      status.classList.add('is-success');
+      setTimeout(close, 1200);
+    } catch (error) {
+      status.textContent = error.message || 'Envoi impossible.';
+      status.classList.add('is-error');
+    } finally {
+      submit.disabled = false;
+    }
+  });
+})();
+"""
 
 
 def _login_form(email: str = "", error: str = "") -> str:
@@ -2456,7 +2629,40 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .no-results { margin:0 0 14px; padding:26px 18px; border:1px dashed var(--line-strong);
   border-radius:var(--radius-lg); color:var(--muted); text-align:center }
 .no-results strong { display:block; margin-bottom:3px; color:var(--fg) }
-.footer { margin-top:24px; color:var(--muted-2); font-size:.68rem; text-align:center }
+.footer { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:7px;
+  margin-top:24px; color:var(--muted-2); font-size:.68rem; text-align:center }
+.bug-report-button { display:inline-flex; align-items:center; justify-content:center; min-height:34px;
+  padding:0 10px; border:1px solid var(--line); border-radius:10px; color:var(--muted);
+  background:var(--surface); font:inherit; font-weight:720; cursor:pointer;
+  transition:color .15s ease, background .15s ease, border-color .15s ease }
+.bug-report-button:hover { color:var(--fg); background:var(--surface-hover) }
+.bug-report-button:focus-visible, .bug-report-close:focus-visible {
+  outline:3px solid var(--violet); outline-offset:2px }
+.bug-report-overlay { position:fixed; inset:0; z-index:100; display:flex; align-items:flex-end;
+  justify-content:center; padding:16px; background:rgba(10,12,16,.5);
+  -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px) }
+.bug-report-overlay[hidden] { display:none }
+.bug-report-dialog { position:relative; width:min(100%, 520px); padding:22px;
+  border:1px solid var(--line-strong); border-radius:var(--radius-xl); color:var(--fg);
+  background:var(--surface); box-shadow:var(--shadow) }
+.bug-report-dialog h2 { margin:4px 34px 7px 0; font-size:1.35rem; letter-spacing:-.025em }
+.bug-report-close { position:absolute; top:12px; right:12px; width:38px; height:38px;
+  border:0; border-radius:10px; color:var(--muted); background:transparent;
+  font-size:1.45rem; line-height:1; cursor:pointer }
+.bug-report-close:hover { color:var(--fg); background:var(--surface-hover) }
+.bug-report-intro { margin:0 0 16px; color:var(--muted); font-size:.78rem; line-height:1.5 }
+#bug-report-form { display:grid; grid-template-columns:minmax(0, 1fr) }
+.bug-report-message { width:100%; min-height:130px; margin-top:7px; resize:vertical;
+  line-height:1.45 }
+.bug-report-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px }
+.bug-report-submit { color:var(--blue) }
+.bug-report-submit:disabled { opacity:.5; cursor:default }
+.bug-report-status { min-height:18px; margin:10px 0 0; color:var(--muted);
+  font-size:.72rem; text-align:right }
+.bug-report-status.is-error { color:var(--danger) }
+.bug-report-status.is-success { color:var(--accent) }
+body.modal-open { overflow:hidden }
+@media (min-width:620px) { .bug-report-overlay { align-items:center } }
 a { color:var(--blue) }
 @media (hover:hover) {
   .theme-toggle:hover, .clear-search:hover { background:var(--surface-hover) }
@@ -2626,7 +2832,10 @@ _JS = """\
     const needle = normalize(rawNeedle);
     let shownTotal = 0;
     rows.forEach(r => {
-      const visible = !needle || normalize(r.textContent).includes(needle);
+      // data-search est rendu côté serveur et déjà normalisé : il ne contient
+      // que société, poste, lieu, plateforme et recherche. Lire textContent
+      // ferait entrer les <option> des menus de documents dans le filtre.
+      const visible = !needle || (r.dataset.search || '').includes(needle);
       r.hidden = !visible;
       if (visible) shownTotal += 1;
     });
@@ -3083,11 +3292,15 @@ def _page_template(
     <div class="no-results" id="no-results" hidden><strong>Aucune offre trouvée</strong>
       Essayez un autre mot-clé.</div>
   </main>
-  <footer class="footer">Lecture seule · données locales · base SQLite jobwatch</footer>
+  <footer class="footer"><span>Données locales · base SQLite jobwatch</span>
+    <button class="bug-report-button" type="button" data-bug-report-open>Signaler un bug</button>
+  </footer>
 </div>
 {swipe_popup}
+{_BUG_REPORT_DIALOG}
 <script>
 {_JS}
+{_BUG_REPORT_JS}
 {_BATCH_BADGE_JS}</script></body></html>
 """
 
@@ -3153,6 +3366,7 @@ _SWIPE_CSS = """\
 .batch-btn { justify-self:start; gap:5px; color:var(--violet) }
 .batch-btn:disabled { opacity:.45; cursor:default }
 .done-back { display:inline-flex; margin-top:18px; text-decoration:none }
+.swipe-support { display:flex; justify-content:center; padding-top:8px }
 """
 
 _SWIPE_JS = """\
@@ -3164,6 +3378,7 @@ _SWIPE_JS = """\
   const done = document.getElementById('swipe-done');
   const undoBtn = document.getElementById('swipe-undo');
   const track = document.body.dataset.track;
+  const backHref = document.body.dataset.backHref || '/';
   const pendingInitial = Number(document.body.dataset.pending || '0');
   const total = cards.length;
   let index = 0;
@@ -3310,7 +3525,11 @@ _SWIPE_JS = """\
       }).then(resp => {
         if (!resp.ok) { batchBtn.disabled = false; delete batchBtn.dataset.started; return; }
         if (window.jwBatchBadge) window.jwBatchBadge.start();
-      }).catch(() => {});
+        window.location.assign(backHref);
+      }).catch(() => {
+        batchBtn.disabled = false;
+        delete batchBtn.dataset.started;
+      });
     });
   }
 
@@ -3341,7 +3560,7 @@ def _swipe_page_template(
 </script>
 <style>
 {_CSS}{_SWIPE_CSS}</style></head>
-<body data-track="{track}" data-pending="{pending}">
+<body data-track="{track}" data-pending="{pending}" data-back-href="{back_href}">
 <div class="ambient" aria-hidden="true"></div>
 <div class="swipe-shell">
   <div class="swipe-top">
@@ -3369,8 +3588,13 @@ def _swipe_page_template(
     {batch}
     <a class="card-action done-back" href="{back_href}">← Retour au tableau de bord</a>
   </section>
+  <div class="swipe-support">
+    <button class="bug-report-button" type="button" data-bug-report-open>Signaler un bug</button>
+  </div>
 </div>
+{_BUG_REPORT_DIALOG}
 <script>
 {_SWIPE_JS}
+{_BUG_REPORT_JS}
 {_BATCH_BADGE_JS}</script></body></html>
 """

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from test_serve import _add_content, _add_summary, _seed_offer
 
+import jobwatch.serve as serve_module
 from jobwatch.auth import create_invite
 from jobwatch.config import DraftConfig
 from jobwatch.db import connect, init_db
@@ -26,7 +27,7 @@ from jobwatch.serve import make_handler
 
 pytest.importorskip("playwright.sync_api")
 from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 NO_TRANSITIONS_CSS = "*, *::before, *::after { transition: none !important }"
 
@@ -52,6 +53,34 @@ def dashboard(tmp_path: Path):
     _seed_offer(conn, company="LaterCo", title="Later Role", state="later")
     conn.close()
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", db_path
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+@pytest.fixture()
+def swipe_batch_dashboard(tmp_path: Path, monkeypatch):
+    """Une offre, un CV et une génération neutralisée pour tester la sortie du swipe."""
+    db_path = tmp_path / "jw.db"
+    conn = connect(db_path)
+    init_db(conn)
+    _seed_offer(conn, company="BatchCo", title="Batch Role", state="new")
+    cv_path = tmp_path / "cv.pdf"
+    cv_path.write_bytes(b"%PDF-1.4 test")
+    conn.execute(
+        "INSERT INTO document_library (type, label, file_path) VALUES ('cv', 'CV test', ?)",
+        (str(cv_path),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(serve_module, "_spawn_draft_job", lambda *_args: None)
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        make_handler(db_path, DraftConfig(model="test-model")),
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}", db_path
@@ -431,6 +460,53 @@ def test_swipe_popup_shows_once_per_session(browser, dashboard) -> None:
     page.reload()
     page.wait_for_selector(".swipe-fab")
     assert not page.locator("#swipe-popup").is_visible()
+    page.close()
+
+
+def test_bug_report_form_is_for_regular_users(browser, dashboard) -> None:
+    url, db_path = dashboard
+    page = _open_page(browser, url)
+
+    page.get_by_role("button", name="Signaler un bug").click()
+    dialog = page.get_by_role("dialog", name="Signaler un bug")
+    expect(dialog).to_be_visible()
+    dialog.get_by_label("Que s'est-il passé ?").fill(
+        "Le résumé de la première offre ne s'affiche pas."
+    )
+    dialog.get_by_role("button", name="Envoyer").click()
+
+    expect(dialog.locator("#bug-report-status")).to_contain_text(
+        "le signalement a bien été envoyé"
+    )
+    conn = connect(db_path)
+    report = conn.execute("SELECT message, page, user_agent FROM bug_report").fetchone()
+    conn.close()
+    assert report["message"] == "Le résumé de la première offre ne s'affiche pas."
+    assert report["page"] == "/"
+    assert "Chrome" in report["user_agent"]
+    page.close()
+
+
+def test_batch_generation_returns_to_dashboard(browser, swipe_batch_dashboard) -> None:
+    url, db_path = swipe_batch_dashboard
+    page = browser.new_page()
+    page.goto(f"{url}/swipe")
+
+    with page.expect_response(re.compile(r"/match/\d+/later$")) as later_response:
+        page.locator("#swipe-yes").click()
+    assert later_response.value.ok
+    expect(page.locator("#swipe-done")).to_be_visible()
+
+    with page.expect_response(re.compile(r"/draft/batch$")) as batch_response:
+        page.locator("#batch-btn").click()
+    assert batch_response.value.status == 202
+    page.wait_for_url(f"{url}/")
+
+    conn = connect(db_path)
+    job = conn.execute("SELECT status FROM draft_job").fetchone()
+    conn.close()
+    assert job["status"] == "queued"
+    assert page.locator(".hero").is_visible()
     page.close()
 
 

@@ -604,6 +604,9 @@ def test_swipe_done_offers_a_way_out(db_path: Path, tmp_path: Path) -> None:
     page = render_swipe_page(conn, draft_enabled=True)
     conn.close()
     assert 'class="card-action done-back" href="/"' in page
+    assert 'data-back-href="/"' in page
+    assert "window.location.assign(backHref)" in page
+    assert "Signaler un bug" in page
     assert 'id="batch-badge"' in page
     assert 'id="batch-progress"' not in page
 

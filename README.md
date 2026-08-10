@@ -31,6 +31,7 @@ python3 -m venv .venv
 .venv/bin/jw apply 1 --note "cv envoyé"
 .venv/bin/jw log 1 interview -m "entretien téléphonique"
 .venv/bin/jw apps               # candidatures avec leur statut actuel
+.venv/bin/jw bugs               # signalements envoyés depuis le dashboard
 ```
 
 `jw init` refuse d'écraser un `config.yaml` existant. `jw init --db PATH` écrit ce chemin
@@ -217,6 +218,11 @@ sessions expirent après 24 heures et cinq échecs de connexion bloquent la pair
 pendant 15 minutes. Préférez HTTPS avec le cookie sécurisé par défaut. `--no-secure-cookie` existe
 uniquement pour un accès HTTP local ou sur un réseau privé chiffré comme Tailscale.
 
+Le bouton « Signaler un bug », disponible sur le tableau de bord et dans le swipe, ouvre un
+formulaire destiné aux utilisateurs de l'application. Le message, la page courante et le
+navigateur sont stockés dans la base SQLite de l'instance, sans créer de compte ni d'issue sur
+un service tiers. L'administrateur de l'instance les consulte avec `jw bugs`.
+
 ## Tri des offres (swipe)
 
 Quand un onglet contient de nouvelles offres, un popup d'accueil « N nouvelles offres -
@@ -236,7 +242,8 @@ de la piste qui n'en ont pas encore (les échecs précédents sont réessayés, 
 existantes ne sont pas régénérées) avec un CV choisi pour tout le lot. Les jobs partent en file
 (`status='queued'`, deux générations simultanées au plus) et la génération continue côté serveur
 même si la page est fermée. Le bilan est une page de sortie : une fois le lot lancé, l'avancement
-se suit dans un badge de la barre du haut (anneau de progression, puis panneau « x prête(s) ·
+continue en arrière-plan, l'interface revient automatiquement au tableau de bord et le suivi se
+fait dans un badge de la barre du haut (anneau de progression, puis panneau « x prête(s) ·
 z échec(s) » au clic), présent aussi bien sur le tableau de bord que sur `/swipe`, et rechargé
 depuis le serveur à chaque chargement de page. Ouvrir `/swipe` avec un paquet vide mène
 directement à ce bilan, ce qui permet de lancer la génération groupée à tout moment.
