@@ -2574,8 +2574,8 @@ h1 span { color:var(--muted-2); font-weight:620 }
   color:var(--muted); font-size:.72rem; line-height:1.4; overflow-wrap:anywhere }
 .platform { min-height:24px; display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px;
   color:var(--blue); background:var(--blue-soft); font-size:.64rem; font-weight:760; letter-spacing:.015em }
-.meta a { position:relative; z-index:3; min-height:44px; display:inline-flex; align-items:center;
-  padding:0 10px; border:1px solid var(--line); pointer-events:auto;
+.meta a { position:relative; z-index:3; min-height:38px; display:inline-flex; align-items:center;
+  padding:0 12px; border:1px solid var(--line); pointer-events:auto;
   border-radius:11px; color:var(--fg); background:var(--surface); font-size:.69rem; font-weight:680;
   text-decoration:none; transition:border-color .15s ease, background .15s ease }
 .note { margin:12px 0 0; padding:11px 12px; border:1px dashed var(--line-strong);
