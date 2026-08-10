@@ -738,6 +738,14 @@ def test_markdown_to_html_horizontal_rule_does_not_break_setext_heading() -> Non
     assert html_out == '<p class="md-heading">Titre</p><hr><p>Texte.</p>'
 
 
+def test_markdown_to_html_drops_bare_heading_marker() -> None:
+    """Motif réel (offre Valeo) : '#### ' sans texte (logo d'entreprise réduit
+    à rien par markdownify) ne doit pas laisser '####' apparaître littéralement."""
+    html_out = _markdown_to_html("#### \n\nValeo")
+    assert "#" not in html_out
+    assert html_out == "<p>Valeo</p>"
+
+
 def test_markdown_to_html_escapes_html_inside_formatting() -> None:
     html_out = _markdown_to_html("**<script>alert(1)</script>**")
     assert "<script>" not in html_out
