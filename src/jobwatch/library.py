@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-DOCUMENT_TYPES = ("cv", "cover_letter")
+DOCUMENT_TYPES = ("cv", "cover_letter", "letter_example")
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_UPLOAD_BASE64_CHARS = ((MAX_UPLOAD_BYTES + 2) // 3) * 4
 
@@ -291,6 +291,8 @@ def save_upload(
         raise LibraryError("document trop volumineux (10 Mo maximum)")
     if doc_type == "cv" and not content.startswith(b"%PDF-"):
         raise LibraryError("un CV doit être un fichier PDF")
+    if doc_type == "letter_example" and not filename.lower().endswith(".tex"):
+        raise LibraryError("un exemple de lettre doit être un fichier .tex")
 
     safe_name = _sanitize_filename(filename)
     target_dir = documents_dir(db_path)

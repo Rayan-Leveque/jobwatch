@@ -105,6 +105,24 @@ def test_save_upload_rejects_non_pdf_cv(conn: sqlite3.Connection, tmp_path: Path
         save_upload(conn, tmp_path / "jw.db", "cv", None, "cv.pdf", _b64(b"not pdf"))
 
 
+def test_save_upload_accepts_tex_letter_example(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    entry = save_upload(
+        conn, tmp_path / "jw.db", "letter_example", "Mon style",
+        "lettre.tex", _b64(b"\\documentclass{article}"),
+    )
+    assert entry["type"] == "letter_example"
+    assert Path(entry["file_path"]).name.endswith("_lettre.tex")
+
+
+def test_save_upload_rejects_non_tex_letter_example(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    with pytest.raises(LibraryError, match="\\.tex"):
+        save_upload(
+            conn, tmp_path / "jw.db", "letter_example", None, "lettre.pdf", _b64(b"%PDF-1.4\nx")
+        )
+
+
 def test_save_upload_rejects_oversized_base64_before_decoding(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:

@@ -69,11 +69,15 @@ explicitement `jw --instance alice serve --no-secure-cookie`; ne publiez jamais 
 
 À la première connexion d'une instance nommée, jobwatch ouvre un parcours de démarrage : importez
 un ou plusieurs CV PDF pour obtenir des catégories proposées ensemble, ou créez-les manuellement.
-Avant confirmation, chaque catégorie peut être renommée, ajoutée ou supprimée et ses mots-clés
-modifiés. La confirmation enregistre les catégories comme recherches SQLite actives et relance le
-matching ; le lien « Modifier mes catégories » reste ensuite disponible depuis le tableau de bord.
-Le bloc `draft` doit être configuré pour l'analyse des CV par IA ; le parcours manuel reste toujours
-disponible. Chaque fichier est vérifié côté serveur comme un PDF et limité à 10 Mio.
+Dans le parcours CV, une étape optionnelle propose ensuite de partager une lettre de motivation
+(de préférence au format `.tex`) comme exemple de style personnel (`document_library`, type
+`letter_example`) ; sans envoi, la génération de lettres retombe sur un modèle générique fourni
+avec jobwatch. Avant confirmation, chaque catégorie peut être renommée, ajoutée ou supprimée et
+ses mots-clés modifiés. La confirmation enregistre les catégories comme recherches SQLite actives
+et relance le matching ; le lien « Modifier mes catégories » reste ensuite disponible depuis le
+tableau de bord. Le bloc `draft` doit être configuré pour l'analyse des CV par IA ; le parcours
+manuel reste toujours disponible. Chaque fichier CV est vérifié côté serveur comme un PDF et
+limité à 10 Mio ; l'exemple de lettre est limité à 10 Mio et doit porter l'extension `.tex`.
 
 ### Cron
 
@@ -259,8 +263,13 @@ lance un job en arrière-plan (table `draft_job`) :
    de `jw enrich` (HTTP puis Playwright). Si la page est irrécupérable, la lettre est générée à
    partir du titre, de la société et du résumé, avec un avertissement affiché sur la carte.
 2. Le LLM (bloc `draft` : runner `opencode` ou `codex`, comme pour `enrich`) reçoit l'offre, le texte du CV choisi (extrait via
-   `pdftotext` pour un PDF) et les lettres exemples `.tex` de la piste métier de l'onglet, puis
-   rédige le document LaTeX complet, sans image, daté du jour.
+   `pdftotext` pour un PDF) et des lettres exemples `.tex`, puis rédige le document LaTeX complet,
+   sans image, daté du jour, en encadrant le corps de la lettre (de la formule d'ouverture à la
+   formule de clôture, hors date, en-tête et signature) par les marqueurs de commentaire LaTeX
+   `% JOBWATCH:BODY_START` / `% JOBWATCH:BODY_END`. Les lettres exemples sont résolues dans cet
+   ordre : `examples` de la piste métier dans `config.yaml` si présent, sinon les lettres
+   `letter_example` de la bibliothèque de documents (import onboarding ou upload manuel), sinon
+   le modèle générique fourni avec jobwatch.
 3. Le `.tex` est compilé avec `lualatex` ; en cas d'erreur, le log est renvoyé au LLM pour
    réparation (deux tentatives), sinon l'erreur est affichée avec un lien vers le `.tex`.
 4. Le PDF est rendu page par page en PNG (`pdftoppm`) pour l'aperçu intégré au tableau de bord
@@ -274,6 +283,18 @@ verrouillage du téléphone. Régénérer avec une consigne (« plus court », �
 RAG »...) transmet la lettre précédente au modèle et remplace la même entrée de bibliothèque.
 `lualatex` (TeX Live), `pdftotext` et `pdftoppm` (poppler-utils) doivent être installés.
 
+Le bouton « Modifier le texte » de l'onglet « Lettre » ouvre un éditeur qui n'expose que le corps
+de la lettre en texte brut (le texte entre les marqueurs ci-dessus) : jamais le `.tex` complet, ni
+la date, l'en-tête destinataire/société ou la signature, qui restent dérivés par le LLM.
+L'enregistrement échappe les caractères spéciaux LaTeX du texte édité, le réinjecte entre les
+marqueurs du `.tex` existant et recompile directement (`lualatex` + rendu PNG), sans nouvel appel
+LLM. La contrainte d'une page tient toujours : un hand-edit qui déborde sur une deuxième page, ou
+qui échoue à la compilation, est signalé à l'utilisateur sans rien écraser - la lettre précédente
+reste intacte et l'utilisateur ajuste son texte puis réessaie, plutôt que de retomber sur la
+boucle de réparation LLM (réservée aux brouillons générés). Ce flux d'édition directe et la
+régénération avec consigne sont deux leviers de révision indépendants et cohabitent sans se
+remplacer.
+
 ## Référence de configuration
 
 `config.yaml` (une copie de `config.example.yaml`) comporte sept sections.
@@ -286,7 +307,7 @@ RAG »...) transmet la lettre précédente au modèle et remplace la même entr�
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
 | `research` | Recherche web large facultative après les collecteurs directs : runner `codex` ou `opencode`, modèle, fenêtre `recency_days`, plafond `max_results` (appliqué après validation et déduplication) et instructions de profil. C'est le seul runner à qui `websearch` et `webfetch` restent autorisés. Les catégories confirmées dans SQLite sont utilisées en priorité. |
 | `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, ou `codex` pour passer par le CLI `codex exec` couvert par un abonnement ChatGPT), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (ex. `opencode/deepseek-v4-flash-free` ou `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). |
-| `draft` | Génération de lettre de motivation depuis le tableau de bord : `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. |
+| `draft` | Génération de lettre de motivation depuis le tableau de bord : `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. Si `examples` ne couvre pas la piste, jobwatch utilise les lettres `letter_example` de la bibliothèque de documents, puis un modèle générique fourni avec le projet. |
 
 Le filtre `locations` est une correspondance par sous-chaîne sur la localisation de l'offre :
 une offre située à « Puteaux » ou « Levallois-Perret » ne matche PAS une recherche avec
@@ -340,7 +361,7 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `application` | Votre candidature pour une offre |
 | `event` | Historique d'une candidature (applied, interview, rejected, offer, ...) |
 | `document` | Fichiers CV et lettre de motivation attachés à une candidature |
-| `document_library` | Bibliothèque de documents réutilisables (CV, lettres) du tableau de bord |
+| `document_library` | Bibliothèque de documents réutilisables du tableau de bord : `cv`, `cover_letter` et `letter_example` (exemple de style pour la génération de lettres) |
 | `draft_job` | Jobs de génération de lettre de motivation (état, fichiers produits, avertissements) |
 | `workspace`, `account`, `membership` | Instance, compte propriétaire unique et droits, préparant le passage au multi-utilisateur |
 | `account_invite`, `web_session` | Invitations à durée limitée et sessions web opaques |

@@ -77,6 +77,7 @@ _DRAFT_POST_RE = re.compile(r"^/match/(\d+)/draft$")
 _DRAFT_STATUS_RE = re.compile(r"^/match/(\d+)/draft/status$")
 _LETTER_FILE_RE = re.compile(r"^/match/(\d+)/letter\.(pdf|tex)$")
 _LETTER_PAGE_RE = re.compile(r"^/match/(\d+)/letter/(\d+)\.png$")
+_LETTER_BODY_RE = re.compile(r"^/match/(\d+)/letter/body$")
 _DOCUMENT_FILE_RE = re.compile(r"^/documents/(\d+)$")
 _UPLOAD_PATH = "/documents"
 _BUG_REPORT_PATH = "/bug-report"
@@ -842,6 +843,27 @@ def _draft_status_html(match_id: int, job: sqlite3.Row | None) -> str:
     )
 
 
+def _edit_body_button(match_id: int, *, hidden: bool) -> str:
+    hidden_attr = " hidden" if hidden else ""
+    return (
+        f'<button class="card-action action-edit-body" type="button" '
+        f'data-match-id="{match_id}"{hidden_attr}>Modifier le texte</button>'
+    )
+
+
+def _body_editor(match_id: int) -> str:
+    return (
+        f'<div class="body-editor" id="body-editor-{match_id}" hidden>'
+        '<textarea class="apply-input body-editor-textarea" rows="10" '
+        'aria-label="Texte de la lettre"></textarea>'
+        '<p class="body-editor-status" aria-live="polite"></p>'
+        '<div class="body-editor-actions">'
+        '<button class="card-action body-editor-save" type="button">Enregistrer</button>'
+        '<button class="card-action body-editor-cancel" type="button">Annuler</button>'
+        "</div></div>"
+    )
+
+
 def _letter_reader(
     match_id: int,
     job: sqlite3.Row | None,
@@ -875,8 +897,9 @@ def _letter_reader(
         hidden=status in ("queued", "running"),
     )
     panel = (
-        f'<div class="letter-panel" id="{panel_id}" hidden>{area}{compose}'
-        f'{_draft_form(match_id, track, cv_rows)}</div>'
+        f'<div class="letter-panel" id="{panel_id}" hidden>{area}'
+        f'{_edit_body_button(match_id, hidden=status != "ok")}{_body_editor(match_id)}'
+        f'{compose}{_draft_form(match_id, track, cv_rows)}</div>'
     )
     return button, panel
 
@@ -1421,6 +1444,10 @@ def make_handler(
                     int(letter_page.group(1)), int(letter_page.group(2))
                 )
                 return
+            letter_body = _LETTER_BODY_RE.match(path)
+            if letter_body:
+                self._handle_letter_body_get(int(letter_body.group(1)))
+                return
             document = _DOCUMENT_FILE_RE.match(path)
             if document:
                 self._handle_document_file(int(document.group(1)))
@@ -1683,6 +1710,62 @@ def make_handler(
             _spawn_draft_job(db_path, draft_config, job_id)
             self._send_json(202, {"ok": True, "job_id": job_id})
 
+        def _handle_letter_body_get(self, match_id: int) -> None:
+            try:
+                conn = connect(db_path)
+                try:
+                    body_text = draft.get_body_edit(conn, match_id)
+                finally:
+                    conn.close()
+            except draft.DraftError as exc:
+                self._send_json(404, {"error": str(exc)})
+                return
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            self._send_json(200, {"body": body_text})
+
+        def _handle_letter_body_post(self, match_id: int) -> None:
+            if draft_config is None:
+                self._send_json(
+                    503,
+                    {"error": "génération non configurée : renseignez le bloc 'draft' de config.yaml"},
+                )
+                return
+            body = self._read_json_body()
+            fields = body if isinstance(body, dict) else {}
+            text = fields.get("body")
+            if not isinstance(text, str) or not text.strip():
+                self._send_json(400, {"error": "le texte de la lettre ne peut pas être vide"})
+                return
+            try:
+                conn = connect(db_path)
+                try:
+                    try:
+                        job_id = draft.apply_body_edit(conn, db_path, match_id, text)
+                    except draft.DraftError as exc:
+                        self._send_json(422, {"error": str(exc)})
+                        return
+                    job = conn.execute(
+                        "SELECT * FROM draft_job WHERE id = ?", (job_id,)
+                    ).fetchone()
+                    entry = None
+                    if job is not None and job["library_id"] is not None:
+                        entry = conn.execute(
+                            "SELECT id, label FROM document_library WHERE id = ?",
+                            (job["library_id"],),
+                        ).fetchone()
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            payload = {"status": str(job["status"]), "html": _draft_status_html(match_id, job)}
+            if entry is not None:
+                payload["library_id"] = int(entry["id"])
+                payload["library_label"] = str(entry["label"])
+            self._send_json(200, payload)
+
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
             if path == "/login":
@@ -1728,6 +1811,10 @@ def make_handler(
             draft_post = _DRAFT_POST_RE.match(path)
             if draft_post:
                 self._handle_draft_post(int(draft_post.group(1)))
+                return
+            letter_body_post = _LETTER_BODY_RE.match(path)
+            if letter_body_post:
+                self._handle_letter_body_post(int(letter_body_post.group(1)))
                 return
             match = _MATCH_ACTION_RE.match(path)
             if not match:
@@ -2688,6 +2775,15 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .letter-panel { margin:10px 0 1px; padding:12px 0 2px; border-top:1px solid var(--line) }
 .letter-panel[hidden] { display:none }
 .letter-panel > .action-draft { margin-top:2px }
+.action-edit-body { color:var(--violet); margin-bottom:8px }
+.action-edit-body[hidden] { display:none }
+.body-editor { position:relative; z-index:3; display:grid; gap:8px; margin:0 0 10px }
+.body-editor[hidden] { display:none }
+.body-editor-textarea { width:100%; min-height:180px; resize:vertical;
+  font-family:inherit; line-height:1.5 }
+.body-editor-actions { display:flex; gap:8px }
+.body-editor-status { margin:0; color:var(--muted); font-size:.75rem }
+.body-editor-status.error { color:var(--danger) }
 /* avancement des lettres : ancré dans la barre du haut, jamais posé sur le
    contenu - un panneau flottant paraissait perdu à droite sur grand écran et
    mordait la carte dès que la fenêtre rétrécissait */
@@ -3156,6 +3252,8 @@ _JS = """\
       compose.textContent = status === 'ok' ? 'Régénérer la lettre'
         : status === 'failed' ? 'Réessayer' : 'Générer la lettre';
     }
+    const editBtn = document.querySelector(`.action-edit-body[data-match-id="${matchId}"]`);
+    if (editBtn) editBtn.hidden = status !== 'ok';
   };
   const registerCoverLetter = (matchId, libraryId, label) => {
     const value = String(libraryId);
@@ -3239,6 +3337,76 @@ _JS = """\
           area.append(p);
         }
       }).catch(() => {});
+    });
+  });
+
+  [...document.querySelectorAll('.action-edit-body')].forEach(button => {
+    button.addEventListener('click', () => {
+      const matchId = button.dataset.matchId;
+      const editor = document.getElementById(`body-editor-${matchId}`);
+      if (!editor) return;
+      const textarea = editor.querySelector('.body-editor-textarea');
+      const status = editor.querySelector('.body-editor-status');
+      status.textContent = ''; status.classList.remove('error');
+      editor.hidden = false; button.hidden = true;
+      textarea.disabled = true; textarea.value = 'Chargement…';
+      fetch(`/match/${matchId}/letter/body`)
+        .then(resp => resp.json().then(data => ({ok: resp.ok, data})))
+        .then(({ok, data}) => {
+          textarea.disabled = false;
+          if (!ok) {
+            textarea.value = '';
+            status.textContent = data.error || 'Erreur';
+            status.classList.add('error');
+            return;
+          }
+          textarea.value = data.body;
+        })
+        .catch(() => {
+          textarea.disabled = false; textarea.value = '';
+          status.textContent = 'Erreur réseau';
+          status.classList.add('error');
+        });
+    });
+  });
+  const closeBodyEditor = editor => {
+    editor.hidden = true;
+    const matchId = editor.id.replace('body-editor-', '');
+    const openBtn = document.querySelector(`.action-edit-body[data-match-id="${matchId}"]`);
+    if (openBtn) openBtn.hidden = false;
+  };
+  [...document.querySelectorAll('.body-editor-cancel')].forEach(button => {
+    button.addEventListener('click', () => closeBodyEditor(button.closest('.body-editor')));
+  });
+  [...document.querySelectorAll('.body-editor-save')].forEach(button => {
+    button.addEventListener('click', () => {
+      const editor = button.closest('.body-editor');
+      const matchId = editor.id.replace('body-editor-', '');
+      const textarea = editor.querySelector('.body-editor-textarea');
+      const status = editor.querySelector('.body-editor-status');
+      button.disabled = true;
+      status.textContent = 'Enregistrement…'; status.classList.remove('error');
+      fetch(`/match/${matchId}/letter/body`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({body: textarea.value}),
+      }).then(resp => resp.json().then(data => ({ok: resp.ok, data})))
+        .then(({ok, data}) => {
+          button.disabled = false;
+          if (!ok) {
+            status.textContent = data.error || 'Échec de la compilation.';
+            status.classList.add('error');
+            return;
+          }
+          setDraftArea(matchId, data.html, data.status);
+          closeBodyEditor(editor);
+          if (data.library_id) registerCoverLetter(matchId, data.library_id, data.library_label);
+        })
+        .catch(() => {
+          button.disabled = false;
+          status.textContent = 'Erreur réseau';
+          status.classList.add('error');
+        });
     });
   });
 
