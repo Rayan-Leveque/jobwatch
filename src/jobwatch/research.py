@@ -5,16 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-import subprocess
-import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from jobwatch.collectors.base import RawOffer
 from jobwatch.config import ResearchConfig, SearchConfig
-from jobwatch.enrich import opencode_sandbox
+from jobwatch.llm_runner import LLMRunnerError, run_codex, run_opencode
 
 log = logging.getLogger(__name__)
 
@@ -142,93 +139,26 @@ def _extract_opencode_text(stdout: str) -> str:
 
 
 def _run_codex(config: ResearchConfig, prompt: str, candidates: str) -> str | None:
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        out_path = Path(tmp_dir) / "response.json"
-        schema_path = Path(tmp_dir) / "schema.json"
-        schema_path.write_text(json.dumps(OUTPUT_SCHEMA), encoding="utf-8")
-        command = [
-            config.codex_bin,
-            "exec",
-            "--ignore-user-config",
-            "--disable",
-            "shell_tool",
-            "--disable",
-            "code_mode_host",
-            "--disable",
-            "apps",
-            "--disable",
-            "plugins",
-            "--model",
-            config.model,
-            "-s",
-            "read-only",
-            "--skip-git-repo-check",
-            "--ephemeral",
-            "--output-schema",
-            str(schema_path),
-            "-o",
-            str(out_path),
-        ]
-        if config.variant:
-            command += ["-c", f"model_reasoning_effort={config.variant}"]
-        command.append(prompt)
-        try:
-            completed = subprocess.run(
-                command,
-                input=candidates,
-                capture_output=True,
-                text=True,
-                timeout=RESEARCH_TIMEOUT_SECONDS,
-                check=False,
-                cwd=tmp_dir,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log.warning("research: appel codex échoué : %s", exc)
-            return None
-        if completed.returncode != 0:
-            log.warning("research: codex a quitté avec le code %s", completed.returncode)
-            return None
-        try:
-            return out_path.read_text(encoding="utf-8")
-        except OSError:
-            log.warning("research: codex n'a pas écrit sa réponse finale")
-            return None
+    try:
+        return run_codex(binary=config.codex_bin, model=config.model, prompt=prompt,
+                          attachment=candidates, timeout=RESEARCH_TIMEOUT_SECONDS,
+                          variant=config.variant, output_schema=OUTPUT_SCHEMA)
+    except LLMRunnerError as exc:
+        log.warning("research: %s", exc)
+        return None
 
 
 def _run_opencode(config: ResearchConfig, prompt: str, candidates: str) -> str | None:
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        candidates_path = Path(tmp_dir) / "candidates.json"
-        candidates_path.write_text(candidates, encoding="utf-8")
-        env = opencode_sandbox(Path(tmp_dir), allow=("webfetch", "websearch"))
-        command = [
-            config.opencode_bin,
-            "run",
-            "--pure",
-            "--auto",
-            "--model",
-            config.model,
-        ]
-        if config.variant:
-            command += ["--variant", config.variant]
-        command += ["--format", "json", f"--file={candidates_path}", "--", prompt]
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=RESEARCH_TIMEOUT_SECONDS,
-                check=False,
-                cwd=tmp_dir,
-                env=env,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log.warning("research: appel OpenCode échoué : %s", exc)
-            return None
-        if completed.returncode != 0:
-            log.warning("research: OpenCode a quitté avec le code %s", completed.returncode)
-            return None
-        return _extract_opencode_text(completed.stdout)
-
+    try:
+        stdout = run_opencode(binary=config.opencode_bin, model=config.model,
+                              prompt=prompt, attachment=candidates,
+                              timeout=RESEARCH_TIMEOUT_SECONDS, variant=config.variant,
+                              pass_variant=True, auto=True, allow=("webfetch", "websearch"),
+                              attachment_name="candidates.json")
+    except LLMRunnerError as exc:
+        log.warning("research: %s", exc)
+        return None
+    return _extract_opencode_text(stdout)
 
 def _parse_result(text: str, max_results: int) -> ResearchResult:
     try:
