@@ -63,13 +63,13 @@ def run_codex(
                 timeout=timeout, check=False, cwd=tmp_dir,
             )
             if completed.returncode != 0:
-                raise LLMRunnerError(f"codex exited with status {completed.returncode}")
+                raise LLMRunnerError(f"codex a quitté avec le code {completed.returncode}")
             try:
                 return output_path.read_text(encoding="utf-8")
             except OSError as exc:
-                raise LLMRunnerError("codex did not write its final response") from exc
+                raise LLMRunnerError("codex n'a pas écrit sa réponse finale") from exc
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise LLMRunnerError(f"codex subprocess failed: {exc}") from exc
+        raise LLMRunnerError(f"appel codex échoué : {exc}") from exc
 
 
 def run_opencode(
@@ -104,7 +104,7 @@ def run_opencode(
                 check=False, cwd=tmp_dir, env=env,
             )
             if completed.returncode != 0:
-                raise LLMRunnerError(f"OpenCode exited with status {completed.returncode}")
+                raise LLMRunnerError(f"OpenCode a quitté avec le code {completed.returncode}")
             return completed.stdout
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise LLMRunnerError(f"OpenCode subprocess failed: {exc}") from exc
+        raise LLMRunnerError(f"appel OpenCode échoué : {exc}") from exc

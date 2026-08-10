@@ -282,7 +282,8 @@ def _summarize_opencode(config: EnrichConfig, markdown: str) -> SummaryParts | N
     try:
         stdout = run_opencode(binary=config.opencode_bin, model=config.model,
                               prompt=SUMMARY_PROMPT, attachment=markdown,
-                              timeout=120, variant=config.variant, pass_variant=True)
+                              timeout=120, variant=config.variant, pass_variant=True,
+                              attachment_name="offer.md")
     except LLMRunnerError as exc:
         log.warning("enrich: %s", exc)
         return None
