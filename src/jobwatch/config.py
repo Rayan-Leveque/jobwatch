@@ -40,9 +40,39 @@ class SmartRecruitersSource:
 
 
 @dataclass
+class LinkedInQuery:
+    keywords: str
+    location: str
+
+
+@dataclass
+class LinkedInSource:
+    queries: list[LinkedInQuery]
+    hours: int = 48
+
+
+@dataclass
+class WttjAlgoliaConfig:
+    app_id: str
+    api_key: str
+    index: str
+
+
+@dataclass
+class WttjSource:
+    queries: list[str]
+    countries: list[str]
+    cities: dict[str, list[str]]
+    algolia: WttjAlgoliaConfig
+    hours: int = 48
+
+
+@dataclass
 class SourcesConfig:
     france_travail: FranceTravailSource | None = None
     smartrecruiters: SmartRecruitersSource | None = None
+    linkedin: LinkedInSource | None = None
+    wttj: WttjSource | None = None
 
     def configured(self) -> list[tuple[str, object]]:
         """Renvoie les paires (source_type, config) pour chaque source configurée."""
@@ -51,6 +81,10 @@ class SourcesConfig:
             pairs.append(("france_travail", self.france_travail))
         if self.smartrecruiters is not None:
             pairs.append(("smartrecruiters", self.smartrecruiters))
+        if self.linkedin is not None:
+            pairs.append(("linkedin", self.linkedin))
+        if self.wttj is not None:
+            pairs.append(("wttj", self.wttj))
         return pairs
 
 
@@ -72,26 +106,58 @@ class SmtpConfig:
 class NotifyConfig:
     ntfy: NtfyConfig | None = None
     smtp: SmtpConfig | None = None
+    heartbeat: bool = False
 
     def enabled(self) -> bool:
         return self.ntfy is not None or self.smtp is not None
 
 
+ENRICH_RUNNERS = ("opencode", "codex")
+
+
 @dataclass
 class EnrichConfig:
-    opencode_bin: str
     model: str
+    # Exécuteur LLM : 'opencode' (API, facturé à l'appel) ou 'codex' (CLI codex exec,
+    # couvert par l'abonnement ChatGPT).
+    runner: str = "opencode"
+    opencode_bin: str = "opencode"
+    codex_bin: str = "codex"
+    # Effort de raisonnement : --variant OpenCode ou model_reasoning_effort codex.
+    variant: str | None = None
+    # Appels LLM de résumé simultanés (les fetchs web restent séquentiels et espacés).
+    concurrency: int = 4
 
 
-DRAFT_TRACKS = ("engineer", "project")
+@dataclass
+class ResearchConfig:
+    model: str
+    runner: str = "codex"
+    opencode_bin: str = "opencode"
+    codex_bin: str = "codex"
+    variant: str | None = None
+    instructions: str = ""
+    recency_days: int = 7
+    max_results: int = 50
+
+
+DRAFT_TRACKS = ("engineer", "project", "all")
 
 
 @dataclass
 class DraftConfig:
-    opencode_bin: str
     model: str
-    # Lettres exemples .tex par piste métier ('engineer' | 'project') : elles
-    # donnent au LLM le format LaTeX et le ton des vraies lettres du candidat.
+    # Exécuteur LLM : 'opencode' (API, facturé à l'appel) ou 'codex' (CLI codex exec,
+    # couvert par l'abonnement ChatGPT).
+    runner: str = "opencode"
+    opencode_bin: str = "opencode"
+    codex_bin: str = "codex"
+    # Effort de raisonnement : --variant OpenCode ou model_reasoning_effort codex.
+    variant: str | None = None
+    # Lettres exemples .tex par piste métier ('engineer' | 'project' | 'all') : elles
+    # donnent au LLM le format LaTeX et le ton des vraies lettres du candidat. Une
+    # instance personnalisée utilise la piste unifiée 'all', qui retombe sur la
+    # réunion des autres pistes quand elle n'est pas renseignée.
     examples: dict[str, list[Path]] = field(default_factory=dict)
 
 
@@ -101,6 +167,7 @@ class Config:
     searches: list[SearchConfig]
     sources: SourcesConfig
     notify: NotifyConfig
+    research: ResearchConfig | None = None
     enrich: EnrichConfig | None = None
     draft: DraftConfig | None = None
 
@@ -174,12 +241,76 @@ def _smartrecruiters_from_dict(raw: object) -> SmartRecruitersSource:
     return SmartRecruitersSource(companies=list(companies))
 
 
+def _positive_hours(value: object, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ConfigError(f"{field_name} doit être un entier >= 1")
+    return value
+
+
+def _linkedin_from_dict(raw: object) -> LinkedInSource:
+    if not isinstance(raw, dict):
+        raise ConfigError("sources.linkedin doit être un mapping")
+    queries_raw = raw.get("queries")
+    if not isinstance(queries_raw, list) or not queries_raw:
+        raise ConfigError("sources.linkedin.queries doit être une liste non vide")
+    queries: list[LinkedInQuery] = []
+    for index, query in enumerate(queries_raw):
+        if not isinstance(query, dict):
+            raise ConfigError(f"sources.linkedin.queries[{index}] doit être un mapping")
+        keywords = query.get("keywords")
+        location = query.get("location")
+        if not isinstance(keywords, str) or not keywords:
+            raise ConfigError(f"sources.linkedin.queries[{index}].keywords est requis")
+        if not isinstance(location, str) or not location:
+            raise ConfigError(f"sources.linkedin.queries[{index}].location est requis")
+        queries.append(LinkedInQuery(keywords=keywords, location=location))
+    return LinkedInSource(
+        queries=queries,
+        hours=_positive_hours(raw.get("hours", 48), "sources.linkedin.hours"),
+    )
+
+
+def _wttj_from_dict(raw: object) -> WttjSource:
+    if not isinstance(raw, dict):
+        raise ConfigError("sources.wttj doit être un mapping")
+    queries = _string_list(raw.get("queries"), "sources.wttj.queries")
+    if not queries or not all(queries):
+        raise ConfigError("sources.wttj.queries doit être une liste non vide")
+    countries = _string_list(raw.get("countries", ["FR"]), "sources.wttj.countries")
+    if not countries or any(len(country) != 2 or country.upper() != country for country in countries):
+        raise ConfigError("sources.wttj.countries doit contenir des codes pays ISO en majuscules")
+    cities_raw = raw.get("cities", {})
+    if not isinstance(cities_raw, dict):
+        raise ConfigError("sources.wttj.cities doit être un mapping pays -> liste de villes")
+    cities: dict[str, list[str]] = {}
+    for country, values in cities_raw.items():
+        if not isinstance(country, str) or country not in countries:
+            raise ConfigError(f"sources.wttj.cities : pays inconnu {country!r}")
+        cities[country] = _string_list(values, f"sources.wttj.cities.{country}")
+    algolia_raw = raw.get("algolia")
+    if not isinstance(algolia_raw, dict):
+        raise ConfigError("sources.wttj.algolia doit être un mapping")
+    algolia_values = {}
+    for key in ("app_id", "api_key", "index"):
+        value = algolia_raw.get(key)
+        if not isinstance(value, str) or not value:
+            raise ConfigError(f"sources.wttj.algolia.{key} est requis")
+        algolia_values[key] = value
+    return WttjSource(
+        queries=queries,
+        countries=countries,
+        cities=cities,
+        algolia=WttjAlgoliaConfig(**algolia_values),
+        hours=_positive_hours(raw.get("hours", 48), "sources.wttj.hours"),
+    )
+
+
 def _sources_from_dict(raw: object) -> SourcesConfig:
     if raw is None:
         return SourcesConfig()
     if not isinstance(raw, dict):
         raise ConfigError("'sources' doit être un mapping")
-    known = {"france_travail", "smartrecruiters"}
+    known = {"france_travail", "smartrecruiters", "linkedin", "wttj"}
     unknown = set(raw) - known
     if unknown:
         raise ConfigError(f"type(s) de source inconnu(s) : {sorted(unknown)}")
@@ -190,6 +321,8 @@ def _sources_from_dict(raw: object) -> SourcesConfig:
         smartrecruiters=_smartrecruiters_from_dict(raw.get("smartrecruiters"))
         if "smartrecruiters" in raw
         else None,
+        linkedin=_linkedin_from_dict(raw.get("linkedin")) if "linkedin" in raw else None,
+        wttj=_wttj_from_dict(raw.get("wttj")) if "wttj" in raw else None,
     )
 
 
@@ -232,8 +365,54 @@ def _notify_from_dict(raw: object) -> NotifyConfig:
         return NotifyConfig()
     if not isinstance(raw, dict):
         raise ConfigError("'notify' doit être un mapping")
+    heartbeat = raw.get("heartbeat", False)
+    if not isinstance(heartbeat, bool):
+        raise ConfigError("notify.heartbeat doit être un booléen")
     return NotifyConfig(
-        ntfy=_ntfy_from_dict(raw.get("ntfy")), smtp=_smtp_from_dict(raw.get("smtp"))
+        ntfy=_ntfy_from_dict(raw.get("ntfy")),
+        smtp=_smtp_from_dict(raw.get("smtp")),
+        heartbeat=heartbeat,
+    )
+
+
+def _research_from_dict(raw: object) -> ResearchConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'research' doit être un mapping")
+    if not raw:
+        return None
+    model = raw.get("model")
+    if not isinstance(model, str) or not model:
+        raise ConfigError("research.model est requis quand research est présent")
+    runner = raw.get("runner", "codex")
+    if runner not in ENRICH_RUNNERS:
+        raise ConfigError(
+            f"research.runner doit être l'un de {list(ENRICH_RUNNERS)}, reçu : {runner!r}"
+        )
+    opencode_bin = raw.get("opencode_bin", "opencode")
+    if not isinstance(opencode_bin, str) or not opencode_bin:
+        raise ConfigError("research.opencode_bin doit être une chaîne non vide")
+    codex_bin = raw.get("codex_bin", "codex")
+    if not isinstance(codex_bin, str) or not codex_bin:
+        raise ConfigError("research.codex_bin doit être une chaîne non vide")
+    variant = raw.get("variant")
+    if variant is not None and (not isinstance(variant, str) or not variant):
+        raise ConfigError("research.variant doit être une chaîne non vide")
+    instructions = raw.get("instructions", "")
+    if not isinstance(instructions, str):
+        raise ConfigError("research.instructions doit être une chaîne")
+    recency_days = _positive_hours(raw.get("recency_days", 7), "research.recency_days")
+    max_results = _positive_hours(raw.get("max_results", 50), "research.max_results")
+    return ResearchConfig(
+        model=model,
+        runner=runner,
+        opencode_bin=opencode_bin,
+        codex_bin=codex_bin,
+        variant=variant,
+        instructions=instructions.strip(),
+        recency_days=recency_days,
+        max_results=max_results,
     )
 
 
@@ -244,13 +423,32 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
         raise ConfigError("'enrich' doit être un mapping")
     if not raw:
         return None
-    opencode_bin = raw.get("opencode_bin")
     model = raw.get("model")
-    if not isinstance(opencode_bin, str) or not opencode_bin:
-        raise ConfigError("enrich.opencode_bin est requis quand enrich est présent")
     if not isinstance(model, str) or not model:
         raise ConfigError("enrich.model est requis quand enrich est présent")
-    return EnrichConfig(opencode_bin=opencode_bin, model=model)
+    runner = raw.get("runner", "opencode")
+    if runner not in ENRICH_RUNNERS:
+        raise ConfigError(
+            f"enrich.runner doit être l'un de {list(ENRICH_RUNNERS)}, reçu : {runner!r}"
+        )
+    opencode_bin = raw.get("opencode_bin", "opencode")
+    if not isinstance(opencode_bin, str) or not opencode_bin:
+        raise ConfigError("enrich.opencode_bin doit être une chaîne non vide")
+    if runner == "opencode" and "opencode_bin" not in raw:
+        raise ConfigError("enrich.opencode_bin est requis avec le runner opencode")
+    codex_bin = raw.get("codex_bin", "codex")
+    if not isinstance(codex_bin, str) or not codex_bin:
+        raise ConfigError("enrich.codex_bin doit être une chaîne non vide")
+    variant = raw.get("variant")
+    if variant is not None and (not isinstance(variant, str) or not variant):
+        raise ConfigError("enrich.variant doit être une chaîne non vide")
+    concurrency = raw.get("concurrency", 4)
+    if not isinstance(concurrency, int) or isinstance(concurrency, bool) or concurrency < 1:
+        raise ConfigError("enrich.concurrency doit être un entier >= 1")
+    return EnrichConfig(
+        model=model, runner=runner, opencode_bin=opencode_bin, codex_bin=codex_bin,
+        variant=variant, concurrency=concurrency,
+    )
 
 
 def _draft_from_dict(raw: object) -> DraftConfig | None:
@@ -260,12 +458,25 @@ def _draft_from_dict(raw: object) -> DraftConfig | None:
         raise ConfigError("'draft' doit être un mapping")
     if not raw:
         return None
-    opencode_bin = raw.get("opencode_bin")
     model = raw.get("model")
-    if not isinstance(opencode_bin, str) or not opencode_bin:
-        raise ConfigError("draft.opencode_bin est requis quand draft est présent")
     if not isinstance(model, str) or not model:
         raise ConfigError("draft.model est requis quand draft est présent")
+    runner = raw.get("runner", "opencode")
+    if runner not in ENRICH_RUNNERS:
+        raise ConfigError(
+            f"draft.runner doit être l'un de {list(ENRICH_RUNNERS)}, reçu : {runner!r}"
+        )
+    opencode_bin = raw.get("opencode_bin", "opencode")
+    if not isinstance(opencode_bin, str) or not opencode_bin:
+        raise ConfigError("draft.opencode_bin doit être une chaîne non vide")
+    if runner == "opencode" and "opencode_bin" not in raw:
+        raise ConfigError("draft.opencode_bin est requis avec le runner opencode")
+    codex_bin = raw.get("codex_bin", "codex")
+    if not isinstance(codex_bin, str) or not codex_bin:
+        raise ConfigError("draft.codex_bin doit être une chaîne non vide")
+    variant = raw.get("variant")
+    if variant is not None and (not isinstance(variant, str) or not variant):
+        raise ConfigError("draft.variant doit être une chaîne non vide")
     examples_raw = raw.get("examples", {})
     if not isinstance(examples_raw, dict):
         raise ConfigError("draft.examples doit être un mapping piste -> liste de chemins .tex")
@@ -279,7 +490,10 @@ def _draft_from_dict(raw: object) -> DraftConfig | None:
     for track, paths in examples_raw.items():
         entries = _string_list(paths, f"draft.examples.{track}")
         examples[track] = [Path(os.path.expanduser(p)) for p in entries]
-    return DraftConfig(opencode_bin=opencode_bin, model=model, examples=examples)
+    return DraftConfig(
+        model=model, runner=runner, opencode_bin=opencode_bin, codex_bin=codex_bin,
+        variant=variant, examples=examples,
+    )
 
 
 def load_config(path: Path) -> Config:
@@ -314,6 +528,7 @@ def load_config(path: Path) -> Config:
         searches=searches,
         sources=_sources_from_dict(raw.get("sources")),
         notify=_notify_from_dict(raw.get("notify")),
+        research=_research_from_dict(raw.get("research")),
         enrich=_enrich_from_dict(raw.get("enrich")),
         draft=_draft_from_dict(raw.get("draft")),
     )

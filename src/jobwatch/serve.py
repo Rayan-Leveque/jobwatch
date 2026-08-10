@@ -13,8 +13,8 @@ mutation de match. POST /match/<id>/draft lance une génération de lettre de
 motivation en arrière-plan (voir jobwatch.draft) quand le bloc 'draft' de la
 config est renseigné ; GET /match/<id>/draft/status la sonde, et
 GET /match/<id>/letter.pdf|.tex|/letter/<n>.png servent les fichiers produits.
-Aucune authentification n'est ajoutée, le périmètre Tailscale est la
-frontière de confiance.
+Une instance nommée peut activer un compte propriétaire par invitation. Dans
+ce cas, toutes les pages, actions et pièces jointes exigent une session.
 """
 
 from __future__ import annotations
@@ -24,18 +24,52 @@ import json
 import re
 import sqlite3
 import threading
+import unicodedata
+from dataclasses import dataclass
+from dataclasses import field as dataclasses_field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import click
 
 from jobwatch import draft
 from jobwatch.applications import ApplicationError, record_application
+from jobwatch.auth import (
+    AuthError,
+    Session,
+    accept_invite,
+    auth_required,
+    clear_login_failures,
+    create_session,
+    delete_session,
+    invite_status,
+    login_allowed,
+    login_throttle_key,
+    record_login_failure,
+    resolve_session,
+)
+from jobwatch.auth_http import (
+    CSRF_HEADER,
+    csrf_valid,
+    expired_session_cookie,
+    security_headers,
+    session_cookie,
+    session_token,
+)
 from jobwatch.config import DraftConfig
 from jobwatch.db import connect
 from jobwatch.library import LibraryError, list_library, resolve_path, save_upload
+from jobwatch.onboarding import (
+    OnboardingError,
+    analyze_cvs,
+    complete_profile,
+    profile_complete,
+    profile_cv_library_ids,
+    profile_intents,
+)
+from jobwatch.onboarding_ui import render_onboarding
 
 RESTORE_STATES = ("new", "seen", "later")
 _MATCH_ACTION_RE = re.compile(r"^/match/(\d+)/(later|discard|restore|apply)$")
@@ -45,6 +79,10 @@ _LETTER_FILE_RE = re.compile(r"^/match/(\d+)/letter\.(pdf|tex)$")
 _LETTER_PAGE_RE = re.compile(r"^/match/(\d+)/letter/(\d+)\.png$")
 _DOCUMENT_FILE_RE = re.compile(r"^/documents/(\d+)$")
 _UPLOAD_PATH = "/documents"
+_BUG_REPORT_PATH = "/bug-report"
+MAX_JSON_BODY_BYTES = 15 * 1024 * 1024
+MAX_BUG_REPORT_LENGTH = 4_000
+MAX_BUG_CONTEXT_LENGTH = 500
 
 _PREVIEW_CONTENT_TYPES = {
     ".pdf": "application/pdf",
@@ -98,14 +136,20 @@ PROJECT_TITLE_PATTERNS = (
     "%product manager%",
 )
 _PROJECT_TITLE_SQL = "(" + " OR ".join("o.title LIKE ?" for _ in PROJECT_TITLE_PATTERNS) + ")"
-TRACKS = ("engineer", "project")
+TRACKS = ("engineer", "project", "all")
 
 
 def _track_filter(track: str) -> str:
     """Clause SQL restreignant une requête (alias offre `o`) à la piste demandée."""
+    if track == "all":
+        return ""
     if track == "project":
         return f"AND {_PROJECT_TITLE_SQL} "
     return f"AND NOT {_PROJECT_TITLE_SQL} "
+
+
+def _track_params(track: str) -> tuple[str, ...]:
+    return PROJECT_TITLE_PATTERNS if track in ("engineer", "project") else ()
 
 
 def _matches(conn: sqlite3.Connection, state: str, track: str) -> list[sqlite3.Row]:
@@ -116,7 +160,7 @@ def _matches(conn: sqlite3.Connection, state: str, track: str) -> list[sqlite3.R
         "       o.contract AS contract, o.platform AS platform, o.url AS url, "
         "       o.collected_at AS collected_at, o.deadline AS deadline "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = ? AND (m.fit IS NULL OR m.fit != 'high') AND NOT EXISTS "
@@ -125,7 +169,7 @@ def _matches(conn: sqlite3.Connection, state: str, track: str) -> list[sqlite3.R
         "ORDER BY CASE m.fit WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
         "         WHEN 'low' THEN 2 ELSE 3 END, "
         "         o.collected_at DESC, m.id DESC",
-        (state, *PROJECT_TITLE_PATTERNS),
+        (state, *_track_params(track)),
     ).fetchall()
 
 
@@ -137,14 +181,14 @@ def _priority_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]
         "       o.contract AS contract, o.platform AS platform, o.url AS url, "
         "       o.collected_at AS collected_at, o.deadline AS deadline "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.fit = 'high' AND m.state IN ('new', 'seen') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
         f"{_track_filter(track)}"
         "ORDER BY o.collected_at DESC, m.id DESC",
-        PROJECT_TITLE_PATTERNS,
+        _track_params(track),
     ).fetchall()
 
 
@@ -156,7 +200,7 @@ def _later_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
         "       o.contract AS contract, o.platform AS platform, o.url AS url, "
         "       o.collected_at AS collected_at, o.deadline AS deadline "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = 'later' AND NOT EXISTS "
@@ -165,7 +209,7 @@ def _later_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
         "ORDER BY CASE m.fit WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
         "         WHEN 'low' THEN 2 ELSE 3 END, "
         "         o.collected_at DESC, m.id DESC",
-        PROJECT_TITLE_PATTERNS,
+        _track_params(track),
     ).fetchall()
 
 
@@ -178,13 +222,13 @@ def _discarded_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row
         "       o.contract AS contract, o.platform AS platform, o.url AS url, "
         "       o.collected_at AS collected_at, o.deadline AS deadline "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = 'discarded' AND m.discarded_at > datetime('now', '-30 days') "
         f"{_track_filter(track)}"
         "ORDER BY m.discarded_at DESC, m.id DESC",
-        PROJECT_TITLE_PATTERNS,
+        _track_params(track),
     ).fetchall()
 
 
@@ -204,19 +248,38 @@ def _applications(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
         "JOIN offer o ON o.id = a.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "LEFT JOIN match m ON m.id = a.match_id "
-        "LEFT JOIN search s ON s.id = m.search_id "
+        "LEFT JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         f"WHERE 1=1 {_track_filter(track)}"
         "ORDER BY a.created_at DESC, a.id DESC",
-        PROJECT_TITLE_PATTERNS,
+        _track_params(track),
     ).fetchall()
+
+
+FIELD_LABELS = {
+    "experience": "Expérience souhaitée",
+    "salary": "Salaire",
+    "remote": "Télétravail",
+    "stack": "Stack",
+}
+
+
+@dataclass
+class Summary:
+    """Résumé affichable d'une offre : champs structurés + puces mission."""
+
+    bullets: list[str] = dataclasses_field(default_factory=list)
+    fields: list[tuple[str, str]] = dataclasses_field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.bullets or self.fields)
 
 
 def _summary_bullets(
     conn: sqlite3.Connection, offer_ids: list[int]
-) -> dict[int, list[str]]:
+) -> dict[int, Summary]:
     if not offer_ids:
         return {}
-    summaries: dict[int, list[str]] = {}
+    summaries: dict[int, Summary] = {}
     for start in range(0, len(offer_ids), 500):
         chunk = offer_ids[start : start + 500]
         placeholders = ",".join("?" * len(chunk))
@@ -229,7 +292,23 @@ def _summary_bullets(
             chunk,
         ).fetchall()
         for row in rows:
-            summaries.setdefault(int(row["offer_id"]), []).append(str(row["text"]))
+            summaries.setdefault(int(row["offer_id"]), Summary()).bullets.append(
+                str(row["text"])
+            )
+        field_rows = conn.execute(
+            "SELECT os.offer_id AS offer_id, sf.key AS key, sf.value AS value "
+            "FROM offer_summary os "
+            "JOIN summary_field sf ON sf.summary_id = os.id "
+            f"WHERE os.offer_id IN ({placeholders})",
+            chunk,
+        ).fetchall()
+        by_offer: dict[int, dict[str, str]] = {}
+        for row in field_rows:
+            by_offer.setdefault(int(row["offer_id"]), {})[str(row["key"])] = str(row["value"])
+        for offer_id, values in by_offer.items():
+            summaries.setdefault(offer_id, Summary()).fields = [
+                (key, values[key]) for key in FIELD_LABELS if key in values
+            ]
     return summaries
 
 
@@ -276,7 +355,7 @@ def _swipe_deck(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
         "       o.location AS location, o.contract AS contract, o.platform AS platform, "
         "       o.url AS url, o.collected_at AS collected_at, o.deadline AS deadline "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = 'new' AND NOT EXISTS "
@@ -284,7 +363,7 @@ def _swipe_deck(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
         f"{_track_filter(track)}"
         "ORDER BY CASE WHEN m.fit = 'high' THEN 0 ELSE 1 END, "
         "         o.collected_at DESC, m.id DESC",
-        PROJECT_TITLE_PATTERNS,
+        _track_params(track),
     ).fetchall()
 
 
@@ -292,6 +371,7 @@ def _swipe_deck(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
 # ni génération en cours (les échecs précédents sont réessayés).
 _BATCH_ELIGIBLE_SQL = (
     "FROM match m "
+    "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
     "JOIN offer o ON o.id = m.offer_id "
     "WHERE m.state = 'later' AND NOT EXISTS "
     "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
@@ -300,10 +380,23 @@ _BATCH_ELIGIBLE_SQL = (
 )
 
 
+_BATCH_BADGE_HTML = (
+    '<div class="batch-badge-wrap" id="batch-badge-wrap" hidden>'
+    '<button class="batch-badge" id="batch-badge" type="button" aria-expanded="false" '
+    'aria-controls="batch-panel" aria-label="Avancement des lettres">'
+    '<span class="batch-ring" id="batch-ring" aria-hidden="true"></span>'
+    '<span class="batch-badge-count" id="batch-badge-count"></span>'
+    "</button>"
+    '<div class="batch-panel" id="batch-panel" hidden aria-live="polite">'
+    '<p class="batch-panel-title" id="batch-panel-line1"></p>'
+    '<p class="batch-panel-note" id="batch-panel-line2"></p></div></div>'
+)
+
+
 def _batch_eligible_ids(conn: sqlite3.Connection, track: str) -> list[int]:
     rows = conn.execute(
         f"SELECT m.id AS id {_BATCH_ELIGIBLE_SQL}{_track_filter(track)}ORDER BY m.id",
-        PROJECT_TITLE_PATTERNS,
+        _track_params(track),
     ).fetchall()
     return [int(row["id"]) for row in rows]
 
@@ -314,11 +407,12 @@ def _batch_status(conn: sqlite3.Connection, track: str) -> dict[str, int]:
         "SELECT (SELECT dj.status FROM draft_job dj WHERE dj.match_id = m.id "
         "        ORDER BY dj.id DESC LIMIT 1) AS status "
         "FROM match m "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "WHERE m.state = 'later' AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
         f"{_track_filter(track)}",
-        PROJECT_TITLE_PATTERNS,
+        _track_params(track),
     ).fetchall()
     counts = {"queued": 0, "running": 0, "ok": 0, "failed": 0, "none": 0}
     for row in rows:
@@ -383,36 +477,194 @@ def _fit_pill(fit: object) -> str:
     return f'<span class="pill fit {value}">{html.escape(value)}</span>'
 
 
-def _summary_panel(row: sqlite3.Row, bullets: list[str], prefix: str) -> tuple[str, str]:
-    if row["fit"] != "high" or not bullets:
+def _summary_fields_html(fields: list[tuple[str, str]]) -> str:
+    if not fields:
+        return ""
+    rows = []
+    for key, value in fields:
+        label = FIELD_LABELS.get(key, key)
+        empty = " sf-empty" if value.strip().lower() == "non précisé" else ""
+        rows.append(
+            f'<div class="summary-field{empty}">'
+            f'<span class="sf-label">{html.escape(label)}</span>'
+            f'<span class="sf-value">{html.escape(value)}</span></div>'
+        )
+    return f'<div class="summary-fields">{"".join(rows)}</div>'
+
+
+def _summary_panel(row: sqlite3.Row, summary: Summary, prefix: str) -> tuple[str, str]:
+    if not summary:
         return "", ""
     panel_id = f"summary-{prefix}-{int(row['id'])}"
     label = html.escape(f"Afficher le résumé de {row['title'] or 'cette offre'}", quote=True)
     button = (
-        f'<button class="card-toggle" type="button" aria-expanded="false" '
-        f'aria-controls="{panel_id}" aria-label="{label}"></button>'
+        f'<button class="reader-tab summary-toggle" type="button" aria-expanded="false" '
+        f'aria-controls="{panel_id}" aria-label="{label}">En bref</button>'
     )
-    items = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in bullets)
+    items = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in summary.bullets)
+    bullets_html = f"<ul>{items}</ul>" if items else ""
     panel = (
         f'<div class="summary-panel" id="{panel_id}" hidden>'
-        f'<div class="summary-title">En bref</div><ul>{items}</ul></div>'
+        f'<div class="summary-title">En bref</div>'
+        f"{_summary_fields_html(summary.fields)}{bullets_html}</div>"
     )
     return button, panel
 
 
-def _markdown_to_html(markdown: str) -> str:
-    """Rendu minimal et échappé : un <p> par paragraphe, <br> pour les retours à la ligne.
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+# Marqueur de titre sans texte (ex. "#### " suivi d'un logo image que markdownify
+# a réduit à rien) : rien à afficher, on l'ignore comme une ligne blanche plutôt
+# que de laisser "####" apparaître littéralement.
+_MD_BARE_HEADING_RE = re.compile(r"^#{1,6}$")
+# Titre "souligné" (markdownify produit ce style par défaut pour les h1/h2,
+# ex. "Titre\n===" ou "Titre\n---") : seulement reconnu juste après une ligne
+# de texte non vide, jamais après une ligne blanche (sinon ce serait plutôt
+# une séparation visuelle sans rapport avec un titre).
+_MD_SETEXT_RE = re.compile(r"^(?:=+|-{2,})$")
+# Séparateur horizontal (ligne de ---, *** ou ___ seule, comme sur Obsidian) :
+# reconnu seulement quand la boucle l'atteint comme ligne "courante", c'est-à-
+# dire quand elle n'a pas déjà été absorbée comme soulignement de titre par
+# le lookahead ci-dessus (qui la consomme avant qu'elle devienne "courante").
+_MD_HR_RE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
+_MD_UL_RE = re.compile(r"^[-*]\s+(.+)$")
+_MD_OL_RE = re.compile(r"^\d+\.\s+(.+)$")
+# Quotes du titre optionnel déjà html.escape()-ées (&quot;/&#x27;) au moment où
+# ce motif s'applique : le texte est échappé avant tout formatage (voir plus bas).
+_MD_TITLE = r"(?:&quot;.*?&quot;|&#x27;.*?&#x27;)"
+_MD_TITLE_SUFFIX = r"(?:\s+" + _MD_TITLE + r")?"
+# Une URL réelle peut contenir une paire de parenthèses (ex. une page
+# gouvernementale ".../ingenieur(e)") ou des espaces bruts (ex. un lien
+# mailto:?subject=... non encodé) : on tolère un niveau de parenthèses
+# imbriquées et les espaces, la sécurité venant du filtre de schéma
+# http(s) dans _render_anchor, pas de la forme de l'URL elle-même. Un espace
+# n'est consommé dans l'URL que s'il n'amorce pas un titre optionnel (sinon
+# l'URL gloutonne avalerait le titre avant que _MD_TITLE_SUFFIX ne le voie).
+_MD_URL = r"(?:[^()\s]|\([^()]*\)|\s(?!" + _MD_TITLE + r"\)))*"
+# Logo/illustration cliquable : [![alt](image)](lien) -> lien texté avec l'alt.
+_MD_LINKED_IMAGE_RE = re.compile(
+    r"\[!\[([^\]]*)\]\(" + _MD_URL + r"\)\]\((" + _MD_URL + r")" + _MD_TITLE_SUFFIX + r"\)"
+)
+# Image seule, jamais affichée (pas de support image) : on ne garde que l'alt.
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(" + _MD_URL + _MD_TITLE_SUFFIX + r"\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((" + _MD_URL + r")" + _MD_TITLE_SUFFIX + r"\)")
+_MD_BOLD_RE = re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*")
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)")
 
-    Pas de bibliothèque Markdown supplémentaire pour le dashboard : la syntaxe
-    Markdown (titres, gras, listes...) apparaît telle quelle, échappée.
+
+def _render_anchor(label: str, url: str) -> str:
+    """Lien réel seulement en http(s) ; sinon juste le texte, sans crochets/URL.
+
+    Le contenu réel des offres regorge de liens de navigation relatifs ou en
+    ancre (`#main-content`, `/fr/companies`...) issus de la page complète
+    scrapée : les garder cliquables serait inutile (URL relative à nulle
+    part) et les laisser en syntaxe Markdown littérale ([texte](url)) donne
+    une impression de rendu cassé. Le texte seul est le repli le plus propre.
     """
-    paragraphs = re.split(r"\n\s*\n", markdown.strip())
-    rendered = (
-        f"<p>{html.escape(paragraph).replace(chr(10), '<br>')}</p>"
-        for paragraph in paragraphs
-        if paragraph.strip()
+    try:
+        scheme = urlsplit(url).scheme.lower()
+    except ValueError:
+        return label
+    if scheme not in ("http", "https"):
+        return label
+    return f'<a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a>'
+
+
+def _format_inline(text: str) -> str:
+    """Échappe une ligne puis applique gras/italique/liens Markdown dessus.
+
+    L'échappement précède le formatage : les caractères Markdown (*, [, ], (,
+    )) traversent html.escape intacts, donc les regex ci-dessous opèrent en
+    toute sécurité sur du texte déjà échappé sans jamais réinjecter de HTML
+    fourni par l'offre. Les images (seules ou cliquables, ex. logo d'entreprise
+    lié à son site) ne sont jamais affichées, faute de support image : un logo
+    cliquable devient un lien texté avec son alt, une image isolée devient son
+    alt en texte brut. Doit tourner avant _MD_LINK_RE, qui matcherait sinon
+    à l'intérieur des crochets imbriqués et laisserait des fragments cassés.
+    """
+    escaped = html.escape(text)
+    escaped = _MD_LINKED_IMAGE_RE.sub(
+        lambda match: _render_anchor(match.group(1), match.group(2)), escaped
     )
-    return "".join(rendered)
+    escaped = _MD_IMAGE_RE.sub(lambda match: match.group(1), escaped)
+    escaped = _MD_LINK_RE.sub(
+        lambda match: _render_anchor(match.group(1), match.group(2)), escaped
+    )
+    escaped = _MD_BOLD_RE.sub(r"<strong>\1</strong>", escaped)
+    escaped = _MD_ITALIC_RE.sub(r"<em>\1</em>", escaped)
+    return escaped
+
+
+def _markdown_to_html(markdown: str) -> str:
+    """Rendu minimal d'un sous-ensemble Markdown : titres, gras, italique, listes, liens.
+
+    Pas de bibliothèque Markdown supplémentaire pour le dashboard : toute
+    syntaxe non reconnue (tableaux, citations, code...) reste affichée telle
+    quelle, échappée. Les titres deviennent des paragraphes stylés (pas de
+    vraies balises <h1>-<h6>, pour ne pas percuter la hiérarchie de titres de
+    la carte) et les listes restent à plat, sans imbrication.
+    """
+    blocks: list[str] = []
+    paragraph: list[str] = []
+    list_items: list[str] = []
+    list_tag: str | None = None
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            content = "<br>".join(_format_inline(line) for line in paragraph)
+            blocks.append(f"<p>{content}</p>")
+            paragraph.clear()
+
+    def flush_list() -> None:
+        nonlocal list_tag
+        if list_items:
+            items = "".join(f"<li>{item}</li>" for item in list_items)
+            blocks.append(f"<{list_tag}>{items}</{list_tag}>")
+            list_items.clear()
+        list_tag = None
+
+    lines = markdown.strip().splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        index += 1
+        if not line or _MD_BARE_HEADING_RE.match(line):
+            flush_paragraph()
+            flush_list()
+            continue
+        heading_match = _MD_HEADING_RE.match(line)
+        if heading_match:
+            flush_paragraph()
+            flush_list()
+            blocks.append(f'<p class="md-heading">{_format_inline(heading_match.group(2))}</p>')
+            continue
+        if _MD_HR_RE.match(line):
+            flush_paragraph()
+            flush_list()
+            blocks.append("<hr>")
+            continue
+        ul_match = _MD_UL_RE.match(line)
+        ol_match = _MD_OL_RE.match(line) if not ul_match else None
+        if not (ul_match or ol_match) and index < len(lines) and _MD_SETEXT_RE.match(lines[index].strip()):
+            flush_paragraph()
+            flush_list()
+            blocks.append(f'<p class="md-heading">{_format_inline(line)}</p><hr>')
+            index += 1
+            continue
+        if ul_match or ol_match:
+            flush_paragraph()
+            tag = "ul" if ul_match else "ol"
+            if list_tag and list_tag != tag:
+                flush_list()
+            list_tag = tag
+            item_text = ul_match.group(1) if ul_match else ol_match.group(1)
+            list_items.append(_format_inline(item_text))
+            continue
+        flush_list()
+        paragraph.append(line)
+
+    flush_paragraph()
+    flush_list()
+    return "".join(blocks)
 
 
 def _content_panel(row: sqlite3.Row, markdown: str | None, prefix: str) -> tuple[str, str]:
@@ -421,9 +673,8 @@ def _content_panel(row: sqlite3.Row, markdown: str | None, prefix: str) -> tuple
     panel_id = f"content-{prefix}-{int(row['id'])}"
     label = html.escape(f"Afficher l'annonce complète de {row['title'] or 'cette offre'}", quote=True)
     button = (
-        f'<button class="content-toggle" type="button" aria-expanded="false" '
-        f'aria-controls="{panel_id}" aria-label="{label}">Annonce complète'
-        f'<span class="summary-chevron" aria-hidden="true"></span></button>'
+        f'<button class="reader-tab offer-toggle" type="button" aria-expanded="false" '
+        f'aria-controls="{panel_id}" aria-label="{label}">Annonce</button>'
     )
     panel = f'<div class="content-panel" id="{panel_id}" hidden>{_markdown_to_html(markdown)}</div>'
     return button, panel
@@ -490,21 +741,16 @@ def _document_field(match_id: int, doc_type: str, name: str, label: str, rows: l
 def _card_actions(
     row: sqlite3.Row,
     library: dict[str, list[sqlite3.Row]],
-    track: str,
-    draft_enabled: bool,
 ) -> str:
     match_id = int(row["id"])
     prev_state = html.escape(str(row["state"]), quote=True)
     form_id = f"apply-form-{match_id}"
-    draft_button = _draft_button(match_id) if draft_enabled else ""
-    draft_form = _draft_form(match_id, track, library["cv"]) if draft_enabled else ""
     return (
         '<div class="card-actions">'
         f'<button class="card-action action-later" type="button" data-match-id="{match_id}" '
         f'data-prev-state="{prev_state}" data-action="later">Plus tard</button>'
         f'<button class="card-action action-apply" type="button" aria-expanded="false" '
         f'aria-controls="{form_id}">Candidater</button>'
-        f"{draft_button}"
         f'<button class="card-action action-discard" type="button" data-match-id="{match_id}" '
         f'data-prev-state="{prev_state}" data-action="discard">Écarter</button>'
         "</div>"
@@ -513,14 +759,14 @@ def _card_actions(
         f'{_document_field(match_id, "cover_letter", "cover_letter_library_id", "Lettre de motivation", library["cover_letter"])}'
         '<button class="card-action apply-submit" type="submit">Enregistrer la candidature</button>'
         "</form>"
-        f"{draft_form}"
     )
 
 
-def _draft_button(match_id: int) -> str:
+def _draft_button(match_id: int, label: str, *, hidden: bool = False) -> str:
+    hidden_attr = " hidden" if hidden else ""
     return (
         f'<button class="card-action action-draft" type="button" aria-expanded="false" '
-        f'aria-controls="draft-form-{match_id}">Générer LM</button>'
+        f'aria-controls="draft-form-{match_id}"{hidden_attr}>{html.escape(label)}</button>'
     )
 
 
@@ -589,28 +835,66 @@ def _draft_status_html(match_id: int, job: sqlite3.Row | None) -> str:
         if job["warning"]
         else ""
     )
-    panel_id = f"letter-panel-{match_id}"
     return (
-        f'<button class="content-toggle letter-toggle" type="button" aria-expanded="false" '
-        f'aria-controls="{panel_id}">Lettre générée'
-        '<span class="summary-chevron" aria-hidden="true"></span></button>'
-        f'<div class="letter-panel" id="{panel_id}" hidden>{warning}{images}'
+        f"{warning}{images}"
         f'<p class="letter-links"><a href="/match/{match_id}/letter.pdf">Télécharger le PDF</a>'
-        f' · <a href="/match/{match_id}/letter.tex">Source .tex</a></p></div>'
+        f' · <a href="/match/{match_id}/letter.tex">Source .tex</a></p>'
     )
 
 
-def _draft_area(match_id: int, job: sqlite3.Row | None) -> str:
+def _letter_reader(
+    match_id: int,
+    job: sqlite3.Row | None,
+    track: str,
+    cv_rows: list[sqlite3.Row],
+) -> tuple[str, str]:
     status = str(job["status"]) if job is not None else ""
-    return (
+    labels = {
+        "queued": "Lettre · en cours",
+        "running": "Lettre · en cours",
+        "failed": "Lettre · échec",
+        "ok": "Lettre · prête",
+    }
+    compose_labels = {
+        "failed": "Réessayer",
+        "ok": "Régénérer la lettre",
+    }
+    panel_id = f"letter-panel-{match_id}"
+    button = (
+        f'<button class="reader-tab letter-toggle letter-{html.escape(status or "empty", quote=True)}" '
+        f'type="button" aria-expanded="false" aria-controls="{panel_id}">'
+        f'<span class="reader-tab-label">{html.escape(labels.get(status, "Lettre"))}</span></button>'
+    )
+    area = (
         f'<div class="draft-area" id="draft-area-{match_id}" data-match-id="{match_id}" '
         f'data-status="{status}">{_draft_status_html(match_id, job)}</div>'
+    )
+    compose = _draft_button(
+        match_id,
+        compose_labels.get(status, "Générer la lettre"),
+        hidden=status in ("queued", "running"),
+    )
+    panel = (
+        f'<div class="letter-panel" id="{panel_id}" hidden>{area}{compose}'
+        f'{_draft_form(match_id, track, cv_rows)}</div>'
+    )
+    return button, panel
+
+
+def _card_reader(buttons: list[str], panels: list[str]) -> str:
+    available_buttons = "".join(button for button in buttons if button)
+    if not available_buttons:
+        return ""
+    return (
+        '<div class="card-reader"><div class="reader-tabs" role="tablist" '
+        f'aria-label="Contenu de l’offre">{available_buttons}</div>'
+        f'{"".join(panel for panel in panels if panel)}</div>'
     )
 
 
 def _match_card(
     row: sqlite3.Row,
-    bullets: list[str],
+    summary: Summary,
     content: str | None,
     library: dict[str, list[sqlite3.Row]],
     job: sqlite3.Row | None,
@@ -623,26 +907,33 @@ def _match_card(
     title = html.escape(str(row["title"] or ""))
     pill = _fit_pill(row["fit"])
     meta = _meta(row, "collecté le", row["collected_at"], row["search_name"], row["deadline"])
-    button, summary = _summary_panel(row, bullets, "match")
-    summary_class = " has-summary" if summary else ""
-    chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
+    summary_button, summary_panel = _summary_panel(row, summary, "match")
     content_button, content_panel = _content_panel(row, content, "match")
-    actions_html = _card_actions(row, library, track, draft_enabled) if actions else ""
-    draft_area = _draft_area(int(row["id"]), job) if actions and draft_enabled else ""
+    letter_button = ""
+    letter_panel = ""
+    if actions and draft_enabled:
+        letter_button, letter_panel = _letter_reader(
+            int(row["id"]), job, track, library["cv"]
+        )
+    reader = _card_reader(
+        [summary_button, content_button, letter_button],
+        [summary_panel, content_panel, letter_panel],
+    )
+    actions_html = _card_actions(row, library) if actions else ""
     return (
-        f'<article class="row row-{cls}{summary_class}">{button}<div class="body">'
+        f'<article class="row row-{cls}" '
+        f'data-search="{html.escape(_search_haystack(row), quote=True)}"><div class="body">'
         f'<div class="card-topline"><div class="company">{company}</div>'
-        f'<div class="card-badges">{pill}{chevron}</div></div>'
+        f'<div class="card-badges">{pill}</div></div>'
         f'<div class="role">{title}</div>'
-        f'<div class="meta">{meta}</div></div>{actions_html}{draft_area}'
-        f"{summary}{content_button}{content_panel}"
+        f'<div class="meta">{meta}</div></div>{actions_html}{reader}'
         "</article>"
     )
 
 
 def _application_card(
     row: sqlite3.Row,
-    bullets: list[str],
+    summary: Summary,
     content: str | None,
     library: dict[str, list[sqlite3.Row]],
     job: sqlite3.Row | None,
@@ -657,25 +948,51 @@ def _application_card(
     pill = f'<span class="pill {cls}">{html.escape(label)}</span>'
     meta = _meta(row, "candidature le", row["created_at"], row["search_name"])
     note = f'<p class="note">{html.escape(str(row["note"]))}</p>' if row["note"] else ""
-    button, summary = _summary_panel(row, bullets, "application")
-    summary_class = " has-summary" if summary else ""
-    chevron = '<span class="summary-chevron" aria-hidden="true"></span>' if summary else ""
+    summary_button, summary_panel = _summary_panel(row, summary, "application")
     content_button, content_panel = _content_panel(row, content, "application")
-    draft_html = ""
+    letter_button = ""
+    letter_panel = ""
     if draft_enabled and row["match_id"] is not None:
         match_id = int(row["match_id"])
-        draft_html = (
-            f'<div class="card-actions">{_draft_button(match_id)}</div>'
-            f"{_draft_form(match_id, track, library['cv'])}"
-            f"{_draft_area(match_id, job)}"
+        letter_button, letter_panel = _letter_reader(
+            match_id, job, track, library["cv"]
         )
-    return (
-        f'<article class="row row-applied{summary_class}">{button}<div class="body">'
-        f'<div class="card-topline"><div class="company">{company}</div>'
-        f'<div class="card-badges">{pill}{chevron}</div></div>'
-        f'<div class="role">{title}</div>'
-        f'<div class="meta">{meta}</div>{note}</div>{draft_html}{summary}{content_button}{content_panel}</article>'
+    reader = _card_reader(
+        [summary_button, content_button, letter_button],
+        [summary_panel, content_panel, letter_panel],
     )
+    return (
+        f'<article class="row row-applied" '
+        f'data-search="{html.escape(_search_haystack(row), quote=True)}"><div class="body">'
+        f'<div class="card-topline"><div class="company">{company}</div>'
+        f'<div class="card-badges">{pill}</div></div>'
+        f'<div class="role">{title}</div>'
+        f'<div class="meta">{meta}</div>{note}</div>{reader}</article>'
+    )
+
+
+def _search_haystack(row: sqlite3.Row) -> str:
+    """Attribut data-search d'une carte : ce sur quoi la recherche doit porter.
+
+    Le filtre lisait le textContent de la carte entière, donc aussi les
+    <option> des menus « Candidater » et « Générer LM ». Ces menus listent
+    toute la bibliothèque : chercher une société dont on a déjà généré une
+    lettre faisait ressortir toutes les cartes portant un formulaire, et pas
+    l'offre voulue. On expose donc explicitement les quatre champs annoncés
+    par le placeholder : entreprise, poste, lieu, recherche.
+    """
+    parts = [
+        str(row["company"] or ""),
+        str(row["title"] or ""),
+        str(row["location"] or ""),
+        str(row["platform"] or ""),
+        str(row["search_name"] or ""),
+    ]
+    joined = " ".join(part for part in parts if part)
+    # Même normalisation que côté JS : minuscules sans accents, pour que la
+    # comparaison soit un simple includes().
+    folded = unicodedata.normalize("NFD", joined.casefold())
+    return "".join(c for c in folded if not unicodedata.combining(c))
 
 
 ACTIONABLE_SECTIONS = {"priority", "new", "seen", "later"}
@@ -684,21 +1001,21 @@ ACTIONABLE_SECTIONS = {"priority", "new", "seen", "later"}
 def _card(
     row: sqlite3.Row,
     key: str,
-    summaries: dict[int, list[str]],
+    summaries: dict[int, Summary],
     contents: dict[int, str],
     library: dict[str, list[sqlite3.Row]],
     drafts: dict[int, sqlite3.Row],
     track: str,
     draft_enabled: bool,
 ) -> str:
-    bullets = summaries.get(int(row["offer_id"]), [])
+    summary = summaries.get(int(row["offer_id"])) or Summary()
     content = contents.get(int(row["offer_id"]))
     if key == "applied":
         job = drafts.get(int(row["match_id"])) if row["match_id"] is not None else None
-        return _application_card(row, bullets, content, library, job, track, draft_enabled)
+        return _application_card(row, summary, content, library, job, track, draft_enabled)
     job = drafts.get(int(row["id"]))
     return _match_card(
-        row, bullets, content, library, job, track, draft_enabled,
+        row, summary, content, library, job, track, draft_enabled,
         actions=key in ACTIONABLE_SECTIONS,
     )
 
@@ -710,7 +1027,7 @@ def _section(
     rows,
     empty_text: str,
     open_default: bool,
-    summaries: dict[int, list[str]],
+    summaries: dict[int, Summary],
     contents: dict[int, str],
     library: dict[str, list[sqlite3.Row]],
     drafts: dict[int, sqlite3.Row],
@@ -739,7 +1056,10 @@ def _section(
 
 
 def render_page(
-    conn: sqlite3.Connection, track: str = "engineer", draft_enabled: bool = False
+    conn: sqlite3.Connection,
+    track: str = "engineer",
+    draft_enabled: bool = False,
+    csrf_token: str = "",
 ) -> str:
     """Rend la page HTML complète d'un onglet depuis l'état actuel de la base."""
     priority = _priority_matches(conn, track)
@@ -801,8 +1121,16 @@ def render_page(
         applied_count=len(applied),
         stamp=stamp,
         track=track,
+        category_link=(
+            '<a class="manage-link" href="/onboarding?edit=1">'
+            "Modifier mes catégories →</a>"
+            if track == "all"
+            else ""
+        ),
         swipe_fab=swipe_fab,
         swipe_popup=swipe_popup,
+        batch_badge=_BATCH_BADGE_HTML if draft_enabled else "",
+        csrf_token=csrf_token,
     )
 
 
@@ -817,17 +1145,22 @@ _CARDS_SVG = (
 
 def _swipe_invites(track: str, deck_count: int) -> tuple[str, str]:
     """Bouton badge de la barre du haut + popup d'accueil « c'est le moment de swiper »."""
-    if not deck_count:
-        return "", ""
-    href = "/swipe" if track == "engineer" else "/po/swipe"
+    href = "/swipe" if track in ("engineer", "all") else "/po/swipe"
     plural = "s" if deck_count > 1 else ""
     label = html.escape(
-        f"Trier {deck_count} nouvelle{plural} offre{plural}", quote=True
+        f"Trier {deck_count} nouvelle{plural} offre{plural}" if deck_count else "Ouvrir le tri des offres",
+        quote=True,
+    )
+    count_html = (
+        f'<span class="swipe-fab-count">{deck_count}</span>' if deck_count else ""
     )
     fab = (
         f'<a class="swipe-fab" href="{href}" aria-label="{label}">{_CARDS_SVG}'
-        f'<span class="swipe-fab-count">{deck_count}</span></a>'
+        f'<span class="swipe-fab-label">Swiper</span>'
+        f"{count_html}</a>"
     )
+    if not deck_count:
+        return fab, ""
     popup = (
         f'<div class="swipe-popup" id="swipe-popup" data-track="{track}" hidden>'
         '<div class="swipe-popup-card" role="dialog" aria-modal="true" '
@@ -843,17 +1176,18 @@ def _swipe_invites(track: str, deck_count: int) -> tuple[str, str]:
     return fab, popup
 
 
-def _swipe_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> str:
+def _swipe_card(row: sqlite3.Row, summary: Summary, content: str | None) -> str:
     company = html.escape(str(row["company"] or "Société inconnue"))
     title = html.escape(str(row["title"] or ""))
     pill = _fit_pill(row["fit"])
     meta = _meta(row, "collecté le", row["collected_at"], row["search_name"], row["deadline"])
-    summary = ""
-    if bullets:
-        items = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in bullets)
-        summary = (
+    summary_html = ""
+    if summary:
+        items = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in summary.bullets)
+        bullets_html = f"<ul>{items}</ul>" if items else ""
+        summary_html = (
             '<div class="swipe-summary"><div class="summary-title">En bref</div>'
-            f"<ul>{items}</ul></div>"
+            f"{_summary_fields_html(summary.fields)}{bullets_html}</div>"
         )
     content_html = ""
     if content:
@@ -871,7 +1205,7 @@ def _swipe_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> st
         f'<div class="card-badges">{pill}</div></div>'
         f'<div class="role">{title}</div>'
         f'<div class="meta">{meta}</div>'
-        f"{summary}{content_html}"
+        f"{summary_html}{content_html}"
         "</div>"
         '<div class="swipe-stamp stamp-right" aria-hidden="true">À candidater</div>'
         '<div class="swipe-stamp stamp-left" aria-hidden="true">Écartée</div>'
@@ -880,7 +1214,10 @@ def _swipe_card(row: sqlite3.Row, bullets: list[str], content: str | None) -> st
 
 
 def render_swipe_page(
-    conn: sqlite3.Connection, track: str = "engineer", draft_enabled: bool = False
+    conn: sqlite3.Connection,
+    track: str = "engineer",
+    draft_enabled: bool = False,
+    csrf_token: str = "",
 ) -> str:
     """Rend la page de tri type swipe : une carte 'new' à la fois, bilan à la fin."""
     deck = _swipe_deck(conn, track)
@@ -890,7 +1227,7 @@ def render_swipe_page(
     cards = "\n".join(
         _swipe_card(
             row,
-            summaries.get(int(row["offer_id"]), []),
+            summaries.get(int(row["offer_id"])) or Summary(),
             contents.get(int(row["offer_id"])),
         )
         for row in deck
@@ -909,8 +1246,6 @@ def render_swipe_page(
             '<button class="card-action batch-btn" id="batch-btn" type="button">'
             f'Générer <span id="batch-count">{pending}</span> lettre(s)</button>'
             "</div>"
-            '<div class="batch-progress" id="batch-progress" hidden>'
-            '<span class="draft-spinner" aria-hidden="true"></span><span></span></div>'
         )
     elif draft_enabled:
         batch = (
@@ -922,10 +1257,12 @@ def render_swipe_page(
             '<p class="empty-note">Génération de lettres non configurée '
             "(bloc 'draft' de config.yaml).</p>"
         )
-    back_href = "/" if track == "engineer" else "/po"
+    back_href = "/" if track in ("engineer", "all") else "/po"
     return _swipe_page_template(
         track=track, cards=cards, total=len(deck), pending=pending,
         batch=batch, back_href=back_href,
+        batch_badge=_BATCH_BADGE_HTML if draft_enabled else "",
+        csrf_token=csrf_token,
     )
 
 
@@ -937,7 +1274,13 @@ def _spawn_draft_job(db_path: Path, config: DraftConfig, job_id: int) -> None:
 
 
 def make_handler(
-    db_path: Path, draft_config: DraftConfig | None = None
+    db_path: Path,
+    draft_config: DraftConfig | None = None,
+    *,
+    workspace_slug: str | None = None,
+    secure_cookie: bool = True,
+    onboarding_config: DraftConfig | None = None,
+    onboarding_enabled: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
     """Fabrique une classe de gestionnaire HTTP branchée sur render_page.
 
@@ -948,8 +1291,122 @@ def make_handler(
     class Handler(BaseHTTPRequestHandler):
         server_version = "jobwatch"
 
+        def _authentication(self) -> tuple[bool, Session | None, str | None]:
+            conn = connect(db_path)
+            try:
+                required = auth_required(conn)
+                token = session_token(self.headers.get("Cookie"))
+                session = resolve_session(conn, token) if required and token else None
+                if session is not None and workspace_slug is not None:
+                    workspace = conn.execute(
+                        "SELECT 1 FROM workspace WHERE id = ? AND slug = ?",
+                        (session.workspace_id, workspace_slug),
+                    ).fetchone()
+                    if workspace is None:
+                        session = None
+                return required, session, token
+            finally:
+                conn.close()
+
+        def _require_session(self, path: str) -> Session | None:
+            required, session, _token = self._authentication()
+            if not required:
+                return None
+            if workspace_slug is None:
+                self._send_text(503, "instance nommée requise pour l'authentification\n")
+                return None
+            if session is not None:
+                return session
+            if path.startswith(
+                ("/draft/", "/match/", "/documents", "/onboarding/", _BUG_REPORT_PATH)
+            ):
+                self._send_json(401, {"error": "authentification requise"})
+            else:
+                self._redirect("/login")
+            return None
+
+        def _auth_enabled_without_session(self, path: str) -> tuple[bool, Session | None]:
+            required, session, _token = self._authentication()
+            if required and session is None and path not in ("/login",) and not path.startswith(
+                "/invite/"
+            ):
+                self._require_session(path)
+                return True, None
+            return required, session
+
         def do_GET(self) -> None:
-            path = urlsplit(self.path).path
+            parsed = urlsplit(self.path)
+            path = parsed.path
+            if path == "/login":
+                required, session, _token = self._authentication()
+                if not required or session is not None:
+                    self._redirect("/")
+                else:
+                    self._send_auth_page("Connexion", _login_form())
+                return
+            invite = re.fullmatch(r"/invite/([^/]+)", path)
+            if invite:
+                required, session, _token = self._authentication()
+                if required and session is not None:
+                    self._redirect("/")
+                    return
+                if workspace_slug is None:
+                    self._send_text(503, "instance nommée requise pour l'authentification\n")
+                    return
+                conn = connect(db_path)
+                try:
+                    status = invite_status(conn, invite.group(1), workspace_slug)
+                finally:
+                    conn.close()
+                if status == "accepted":
+                    self._redirect("/login")
+                elif status == "valid":
+                    self._send_auth_page("Créer votre compte", _invite_form(invite.group(1)))
+                else:
+                    self._send_auth_page(
+                        "Invitation indisponible",
+                        '<p class="auth-intro">Ce lien est invalide ou expiré.</p>'
+                        '<a class="auth-link" href="/login">Aller à la connexion</a>',
+                        status=410,
+                    )
+                return
+            required, session = self._auth_enabled_without_session(path)
+            if required and session is None:
+                return
+            if path == "/onboarding":
+                if session is None:
+                    self._redirect("/")
+                    return
+                editing = parse_qs(parsed.query).get("edit") == ["1"]
+                conn = connect(db_path)
+                try:
+                    intents = profile_intents(conn, session.account_id) if editing else None
+                    cv_library_ids = profile_cv_library_ids(conn, session.account_id)
+                finally:
+                    conn.close()
+                initial_intents = (
+                    [
+                        {
+                            "id": intent.intent_id,
+                            "label": intent.label,
+                            "keywords": intent.keywords,
+                            "exclude": intent.exclude,
+                        }
+                        for intent in intents
+                    ]
+                    if intents is not None
+                    else None
+                )
+                self._send_bytes(
+                    200,
+                    render_onboarding(
+                        session.csrf_token,
+                        initial_intents=initial_intents,
+                        cv_library_ids=cv_library_ids,
+                    ).encode("utf-8"),
+                    "text/html; charset=utf-8",
+                )
+                return
             status = _DRAFT_STATUS_RE.match(path)
             if status:
                 self._handle_draft_status(int(status.group(1)))
@@ -971,7 +1428,6 @@ def make_handler(
             if path == "/draft/batch/status":
                 self._handle_batch_status()
                 return
-            swipe = path in ("/swipe", "/po/swipe")
             if path in ("/", "/swipe"):
                 track = "engineer"
             elif path in ("/po", "/po/swipe"):
@@ -979,11 +1435,27 @@ def make_handler(
             else:
                 self._send_text(404, "404 Not Found\n")
                 return
+            swipe = path in ("/swipe", "/po/swipe")
+            if session is not None and onboarding_enabled:
+                conn = connect(db_path)
+                try:
+                    needs_onboarding = not profile_complete(conn, session.account_id)
+                finally:
+                    conn.close()
+                if needs_onboarding:
+                    self._redirect("/onboarding")
+                    return
+                track = "all"
             try:
                 conn = connect(db_path)
                 try:
                     render = render_swipe_page if swipe else render_page
-                    page = render(conn, track, draft_enabled=draft_config is not None)
+                    page = render(
+                        conn,
+                        track,
+                        draft_enabled=draft_config is not None,
+                        csrf_token=session.csrf_token if session is not None else "",
+                    )
                 finally:
                     conn.close()
             except sqlite3.Error as exc:
@@ -1213,6 +1685,40 @@ def make_handler(
 
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
+            if path == "/login":
+                self._handle_login()
+                return
+            invite = re.fullmatch(r"/invite/([^/]+)", path)
+            if invite:
+                self._handle_invite(invite.group(1))
+                return
+            required, session = self._auth_enabled_without_session(path)
+            if required and session is None:
+                return
+            if required and not csrf_valid(session, self.headers.get(CSRF_HEADER)):
+                self._send_json(403, {"error": "jeton CSRF invalide"})
+                return
+            if path == "/onboarding/analyze":
+                self._handle_onboarding_analyze()
+                return
+            if path == "/onboarding/complete":
+                self._handle_onboarding_complete(session)
+                return
+            if path == "/logout":
+                token = session_token(self.headers.get("Cookie"))
+                if token:
+                    conn = connect(db_path)
+                    try:
+                        delete_session(conn, token)
+                    finally:
+                        conn.close()
+                self._redirect(
+                    "/login", headers={"Set-Cookie": expired_session_cookie(secure=secure_cookie)}
+                )
+                return
+            if path == _BUG_REPORT_PATH:
+                self._handle_bug_report(session)
+                return
             if path == _UPLOAD_PATH:
                 self._handle_upload()
                 return
@@ -1309,6 +1815,49 @@ def make_handler(
                 return
             self._send_json(200, {"ok": True})
 
+        def _handle_bug_report(self, session: Session | None) -> None:
+            body = self._read_json_body()
+            fields = body if isinstance(body, dict) else {}
+            message = fields.get("message")
+            page = fields.get("page")
+            if not isinstance(message, str) or not message.strip():
+                self._send_json(400, {"error": "décrivez le problème rencontré"})
+                return
+            message = message.strip()
+            if len(message) > MAX_BUG_REPORT_LENGTH:
+                self._send_json(
+                    400,
+                    {"error": f"description trop longue ({MAX_BUG_REPORT_LENGTH} caractères maximum)"},
+                )
+                return
+            if not isinstance(page, str) or not page.startswith("/"):
+                page = "/"
+            page = page[:MAX_BUG_CONTEXT_LENGTH]
+            user_agent = (self.headers.get("User-Agent") or "")[:MAX_BUG_CONTEXT_LENGTH]
+            try:
+                conn = connect(db_path)
+                try:
+                    cur = conn.execute(
+                        "INSERT INTO bug_report "
+                        "(account_id, workspace_id, message, page, user_agent) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            session.account_id if session is not None else None,
+                            session.workspace_id if session is not None else None,
+                            message,
+                            page,
+                            user_agent or None,
+                        ),
+                    )
+                    report_id = int(cur.lastrowid)
+                    conn.commit()
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                self._send_text(500, f"erreur base de données : {exc}\n")
+                return
+            self._send_json(201, {"ok": True, "id": report_id})
+
         def _handle_upload(self) -> None:
             body = self._read_json_body()
             fields = body if isinstance(body, dict) else {}
@@ -1340,12 +1889,190 @@ def make_handler(
                 201, {"id": int(entry["id"]), "label": str(entry["label"]), "type": str(entry["type"])}
             )
 
+        def _handle_onboarding_analyze(self) -> None:
+            body = self._read_json_body()
+            cv_library_ids = body.get("cv_library_ids") if isinstance(body, dict) else None
+            if not isinstance(cv_library_ids, list) or not cv_library_ids or not all(
+                isinstance(item, int) and not isinstance(item, bool) for item in cv_library_ids
+            ):
+                self._send_json(400, {"error": "CV invalide"})
+                return
+            conn = connect(db_path)
+            try:
+                try:
+                    intents = analyze_cvs(
+                        conn, onboarding_config or draft_config, cv_library_ids
+                    )
+                except OnboardingError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+            finally:
+                conn.close()
+            self._send_json(
+                200,
+                {
+                    "intents": [
+                        {
+                            "label": intent.label,
+                            "keywords": intent.keywords,
+                            "exclude": intent.exclude,
+                        }
+                        for intent in intents
+                    ]
+                },
+            )
+
+        def _handle_onboarding_complete(self, session: Session | None) -> None:
+            if session is None:
+                self._send_json(401, {"error": "authentification requise"})
+                return
+            body = self._read_json_body()
+            fields = body if isinstance(body, dict) else {}
+            cv_library_ids = fields.get("cv_library_ids", [])
+            if not isinstance(cv_library_ids, list) or not all(
+                isinstance(item, int) and not isinstance(item, bool) for item in cv_library_ids
+            ):
+                self._send_json(400, {"error": "CV invalide"})
+                return
+            conn = connect(db_path)
+            try:
+                try:
+                    intents = complete_profile(
+                        conn,
+                        session.account_id,
+                        session.workspace_id,
+                        cv_library_ids,
+                        fields.get("intents"),
+                    )
+                except OnboardingError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                except sqlite3.Error as exc:
+                    self._send_json(500, {"error": f"erreur base de données : {exc}"})
+                    return
+            finally:
+                conn.close()
+            self._send_json(200, {"ok": True, "count": len(intents)})
+
+        def _handle_login(self) -> None:
+            if not self._same_origin():
+                self._send_text(403, "origine invalide\n")
+                return
+            fields = self._read_form_body()
+            email = fields.get("email", "")
+            password = fields.get("password", "")
+            if workspace_slug is None:
+                self._send_auth_page(
+                    "Connexion", _login_form(email, "Instance nommée requise."), status=503
+                )
+                return
+            conn = connect(db_path)
+            try:
+                if not auth_required(conn):
+                    self._redirect("/")
+                    return
+                key = login_throttle_key(email, self.client_address[0])
+                if not login_allowed(conn, key):
+                    self._send_auth_page(
+                        "Connexion",
+                        _login_form(email, "Trop de tentatives. Réessayez dans 15 minutes."),
+                        status=429,
+                    )
+                    return
+                try:
+                    token, _session = create_session(conn, email, password, workspace_slug)
+                except AuthError:
+                    record_login_failure(conn, key)
+                    self._send_auth_page(
+                        "Connexion", _login_form(email, "Email ou mot de passe incorrect."),
+                        status=401,
+                    )
+                    return
+                clear_login_failures(conn, key)
+            finally:
+                conn.close()
+            self._redirect(
+                "/", headers={"Set-Cookie": session_cookie(token, secure=secure_cookie)}
+            )
+
+        def _handle_invite(self, token: str) -> None:
+            if not self._same_origin():
+                self._send_text(403, "origine invalide\n")
+                return
+            fields = self._read_form_body()
+            password = fields.get("password", "")
+            confirmation = fields.get("password_confirmation", "")
+            if workspace_slug is None:
+                self._send_auth_page(
+                    "Créer votre compte",
+                    _invite_form(token, "Instance nommée requise."),
+                    status=503,
+                )
+                return
+            conn = connect(db_path)
+            try:
+                status = invite_status(conn, token, workspace_slug)
+            finally:
+                conn.close()
+            if status == "accepted":
+                self._redirect("/login")
+                return
+            if password != confirmation:
+                self._send_auth_page(
+                    "Créer votre compte",
+                    _invite_form(token, "Les deux mots de passe sont différents."),
+                    status=400,
+                )
+                return
+            conn = connect(db_path)
+            try:
+                try:
+                    account_id = accept_invite(
+                        conn, token, password, workspace_slug=workspace_slug
+                    )
+                    account = conn.execute(
+                        "SELECT email FROM account WHERE id = ?", (account_id,)
+                    ).fetchone()
+                    if account is None:
+                        raise AuthError("instance nommée requise")
+                    session_value, _session = create_session(
+                        conn, str(account["email"]), password, workspace_slug
+                    )
+                except AuthError as exc:
+                    self._send_auth_page(
+                        "Créer votre compte", _invite_form(token, str(exc)), status=400
+                    )
+                    return
+            finally:
+                conn.close()
+            self._redirect(
+                "/", headers={"Set-Cookie": session_cookie(session_value, secure=secure_cookie)}
+            )
+
+        def _read_form_body(self) -> dict[str, str]:
+            try:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                return {}
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            return {key: values[-1] for key, values in parse_qs(raw).items() if values}
+
+        def _same_origin(self) -> bool:
+            fetch_site = self.headers.get("Sec-Fetch-Site")
+            if fetch_site:
+                return fetch_site == "same-origin"
+            origin = self.headers.get("Origin")
+            if not origin or origin == "null":
+                return True
+            parsed = urlsplit(origin)
+            return parsed.netloc == self.headers.get("Host") and parsed.scheme in ("http", "https")
+
         def _read_json_body(self) -> object:
             try:
                 length = int(self.headers.get("Content-Length", 0) or 0)
             except ValueError:
                 return None
-            if length <= 0:
+            if length <= 0 or length > MAX_JSON_BODY_BYTES:
                 return None
             raw = self.rfile.read(length)
             try:
@@ -1356,17 +2083,33 @@ def make_handler(
         def _send_json(self, status: int, payload: dict) -> None:
             self._send_bytes(status, json.dumps(payload).encode("utf-8"), "application/json")
 
-        def _send_bytes(self, status: int, data: bytes, content_type: str) -> None:
+        def _send_bytes(
+            self,
+            status: int,
+            data: bytes,
+            content_type: str,
+            headers: dict[str, str] | None = None,
+        ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
-            if status == 200:
-                self.send_header("Cache-Control", "no-store")
+            for name, value in security_headers().items():
+                self.send_header(name, value)
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
 
         def _send_text(self, status: int, text: str) -> None:
             self._send_bytes(status, text.encode("utf-8"), "text/plain; charset=utf-8")
+
+        def _send_auth_page(self, title: str, body: str, *, status: int = 200) -> None:
+            page = _auth_page(title, body)
+            self._send_bytes(status, page.encode("utf-8"), "text/html; charset=utf-8")
+
+        def _redirect(self, location: str, *, headers: dict[str, str] | None = None) -> None:
+            response_headers = {"Location": location, **(headers or {})}
+            self._send_bytes(303, b"", "text/plain; charset=utf-8", response_headers)
 
         def log_message(self, format: str, *args: object) -> None:
             pass
@@ -1396,12 +2139,29 @@ def _fail_interrupted_draft_jobs(db_path: Path) -> None:
 
 
 def serve_http(
-    db_path: Path, host: str, port: int, draft_config: DraftConfig | None = None
+    db_path: Path,
+    host: str,
+    port: int,
+    draft_config: DraftConfig | None = None,
+    *,
+    workspace_slug: str | None = None,
+    secure_cookie: bool = True,
+    onboarding_enabled: bool = False,
 ) -> None:
     """Crée le serveur HTTP et le sert jusqu'à Ctrl-C."""
     _fail_interrupted_draft_jobs(db_path)
     try:
-        server = ThreadingHTTPServer((host, port), make_handler(db_path, draft_config))
+        server = ThreadingHTTPServer(
+            (host, port),
+            make_handler(
+                db_path,
+                draft_config,
+                workspace_slug=workspace_slug,
+                secure_cookie=secure_cookie,
+                onboarding_config=draft_config,
+                onboarding_enabled=onboarding_enabled,
+            ),
+        )
     except (OSError, OverflowError) as exc:
         raise ServeError(f"impossible d'écouter sur {host}:{port} : {exc}") from exc
     bound_port = int(server.server_address[1])
@@ -1412,6 +2172,214 @@ def serve_http(
         click.echo("arrêt du serveur")
     finally:
         server.server_close()
+
+
+def _csrf_head(token: str) -> str:
+    if not token:
+        return ""
+    escaped = html.escape(token, quote=True)
+    return f"""<meta name="csrf-token" content="{escaped}">
+<script>
+(function () {{
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {{
+    const options = Object.assign({{}}, init || {{}});
+    const method = String(options.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {{
+      const headers = new Headers(options.headers || {{}});
+      headers.set('X-CSRF-Token', document.querySelector('meta[name="csrf-token"]').content);
+      options.headers = headers;
+    }}
+    return originalFetch(input, options);
+  }};
+}})();
+</script>"""
+
+
+_BUG_REPORT_DIALOG = """\
+<div class="bug-report-overlay" id="bug-report-overlay" hidden>
+  <section class="bug-report-dialog" role="dialog" aria-modal="true"
+    aria-labelledby="bug-report-title">
+    <button class="bug-report-close" type="button" data-bug-report-close
+      aria-label="Fermer">×</button>
+    <p class="eyebrow">Un problème ?</p>
+    <h2 id="bug-report-title">Signaler un bug</h2>
+    <p class="bug-report-intro">Décrivez simplement ce qui s'est passé. La page et le
+      navigateur seront joints automatiquement.</p>
+    <form id="bug-report-form">
+      <label class="doc-label" for="bug-report-message">Que s'est-il passé ?</label>
+      <textarea class="apply-input bug-report-message" id="bug-report-message"
+        maxlength="4000" required placeholder="Ex. J'ai appuyé sur… et rien ne s'est passé."></textarea>
+      <div class="bug-report-actions">
+        <button class="card-action" type="button" data-bug-report-close>Annuler</button>
+        <button class="card-action bug-report-submit" type="submit">Envoyer</button>
+      </div>
+      <p class="bug-report-status" id="bug-report-status" aria-live="polite"></p>
+    </form>
+  </section>
+</div>"""
+
+
+_BUG_REPORT_JS = """\
+(function () {
+  const overlay = document.getElementById('bug-report-overlay');
+  const form = document.getElementById('bug-report-form');
+  if (!overlay || !form) return;
+  const message = document.getElementById('bug-report-message');
+  const status = document.getElementById('bug-report-status');
+  const submit = form.querySelector('.bug-report-submit');
+  let previousFocus = null;
+  const open = trigger => {
+    previousFocus = trigger;
+    status.textContent = '';
+    status.classList.remove('is-error', 'is-success');
+    overlay.hidden = false;
+    document.body.classList.add('modal-open');
+    requestAnimationFrame(() => message.focus());
+  };
+  const close = () => {
+    overlay.hidden = true;
+    document.body.classList.remove('modal-open');
+    if (previousFocus) previousFocus.focus();
+  };
+  document.querySelectorAll('[data-bug-report-open]').forEach(button => {
+    button.addEventListener('click', () => open(button));
+  });
+  overlay.querySelectorAll('[data-bug-report-close]').forEach(button => {
+    button.addEventListener('click', close);
+  });
+  overlay.addEventListener('click', event => {
+    if (event.target === overlay) close();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !overlay.hidden) close();
+  });
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const text = message.value.trim();
+    if (!text) {
+      status.textContent = 'Décrivez le problème rencontré.';
+      status.classList.add('is-error');
+      return;
+    }
+    submit.disabled = true;
+    status.textContent = 'Envoi…';
+    status.classList.remove('is-error', 'is-success');
+    try {
+      const response = await fetch('/bug-report', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          message: text,
+          page: location.pathname + location.search,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || 'Envoi impossible.');
+      message.value = '';
+      status.textContent = 'Merci, le signalement a bien été envoyé.';
+      status.classList.add('is-success');
+      setTimeout(close, 1200);
+    } catch (error) {
+      status.textContent = error.message || 'Envoi impossible.';
+      status.classList.add('is-error');
+    } finally {
+      submit.disabled = false;
+    }
+  });
+})();
+"""
+
+
+def _login_form(email: str = "", error: str = "") -> str:
+    error_html = f'<p class="auth-error">{html.escape(error)}</p>' if error else ""
+    return f"""{error_html}
+<form method="post" action="/login">
+  <label>Email<input type="email" name="email" autocomplete="username" required
+    value="{html.escape(email, quote=True)}"></label>
+  {_password_field("password", "Mot de passe", "current-password")}
+  <button type="submit">Se connecter</button>
+</form>"""
+
+
+def _invite_form(token: str, error: str = "") -> str:
+    error_html = f'<p class="auth-error">{html.escape(error)}</p>' if error else ""
+    action = f"/invite/{html.escape(token, quote=True)}"
+    return f"""{error_html}
+<p class="auth-intro">Choisissez un mot de passe d'au moins 8 caractères.</p>
+<form method="post" action="{action}">
+  {_password_field("password", "Mot de passe", "new-password", minlength=8)}
+  {_password_field("password_confirmation", "Confirmation", "new-password", minlength=8)}
+  <button type="submit">Créer mon compte</button>
+</form>"""
+
+
+def _password_field(
+    name: str, label: str, autocomplete: str, *, minlength: int | None = None
+) -> str:
+    minimum = f' minlength="{minlength}"' if minlength is not None else ""
+    field_id = f"auth-{name}"
+    return f"""<label>{html.escape(label)}<span class="password-field">
+    <input id="{field_id}" type="password" name="{name}" autocomplete="{autocomplete}"
+      {minimum} required>
+    <button class="password-toggle" type="button" data-password-target="{field_id}"
+      aria-label="Afficher le mot de passe" aria-pressed="false">
+      <svg class="eye-show" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/>
+        <circle cx="12" cy="12" r="2.5"/></svg>
+      <svg class="eye-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" aria-hidden="true"><path d="m3 3 18 18M10.6 6.2A10.8 10.8 0 0 1 12 6c6 0 9.5 6 9.5 6a16 16 0 0 1-2.3 3M6.3 6.3C3.9 8 2.5 12 2.5 12s3.5 6 9.5 6c1.7 0 3.2-.5 4.5-1.2"/></svg>
+    </button></span></label>"""
+
+
+def _auth_page(title: str, body: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="fr" data-theme="light"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f3f1eb"><title>jobwatch · {html.escape(title)}</title>
+<style>
+:root {{ color-scheme:light; font-family:Inter,ui-sans-serif,system-ui,sans-serif; }}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24px;
+  color:#191b1f; background:radial-gradient(circle at 20% 0,#e5def7 0,transparent 35%),#f3f1eb; }}
+.auth-card {{ width:min(100%,430px); padding:32px; border:1px solid rgba(29,31,35,.12);
+  border-radius:24px; background:#fffefa; box-shadow:0 24px 70px rgba(52,46,34,.13); }}
+.auth-brand {{ color:#42752d; font-size:.78rem; font-weight:800; letter-spacing:.16em;
+  text-transform:uppercase; }}
+h1 {{ margin:12px 0 24px; font-size:clamp(1.8rem,8vw,2.5rem); line-height:1.05; }}
+form {{ display:grid; gap:18px; }}
+label {{ display:grid; gap:8px; color:#686d76; font-size:.86rem; font-weight:650; }}
+input {{ width:100%; padding:13px 14px; border:1px solid rgba(29,31,35,.17);
+  border-radius:12px; color:#191b1f; background:#f8f6ef; font:inherit; }}
+input:focus {{ outline:2px solid #42752d; outline-offset:2px; }}
+.password-field {{ position:relative; display:block; }}
+.password-field input {{ padding-right:48px; }}
+button {{ margin-top:4px; padding:14px 18px; border:0; border-radius:12px;
+  color:#fff; background:#42752d; font:inherit; font-weight:800; cursor:pointer; }}
+.password-toggle {{ position:absolute; top:50%; right:5px; width:38px; height:38px;
+  margin:0; padding:9px; transform:translateY(-50%); color:#686d76; background:transparent; }}
+.password-toggle:hover {{ color:#191b1f; background:rgba(29,31,35,.06); }}
+.password-toggle svg {{ width:20px; height:20px; }}
+.password-toggle .eye-hide {{ display:none; }}
+.password-toggle[aria-pressed="true"] .eye-show {{ display:none; }}
+.password-toggle[aria-pressed="true"] .eye-hide {{ display:block; }}
+.auth-intro {{ color:#686d76; line-height:1.5; }}
+.auth-error {{ padding:12px 14px; border-radius:12px; color:#8f2940;
+  background:rgba(182,60,84,.10); }}
+.auth-link {{ display:inline-flex; padding:12px 16px; border-radius:12px; color:#fff;
+  background:#42752d; font-weight:750; text-decoration:none; }}
+</style></head><body><main class="auth-card"><div class="auth-brand">jobwatch</div>
+<h1>{html.escape(title)}</h1>{body}</main><script>
+document.querySelectorAll('[data-password-target]').forEach(button => {{
+  button.addEventListener('click', () => {{
+    const input = document.getElementById(button.dataset.passwordTarget);
+    const visible = input.type === 'text';
+    input.type = visible ? 'password' : 'text';
+    button.setAttribute('aria-pressed', visible ? 'false' : 'true');
+    button.setAttribute('aria-label', visible ? 'Afficher le mot de passe' : 'Masquer le mot de passe');
+  }});
+}});
+</script></body></html>"""
 
 
 _CSS = """\
@@ -1482,7 +2450,7 @@ html[data-theme="light"] .ambient::after { background:radial-gradient(circle, rg
 .icon-moon { opacity:1; transform:rotate(0) scale(1) }
 html[data-theme="light"] .icon-sun { opacity:1; transform:rotate(0) scale(1) }
 html[data-theme="light"] .icon-moon { opacity:0; transform:rotate(70deg) scale(.6) }
-.theme-toggle:focus-visible, #q:focus-visible, .clear-search:focus-visible,
+.theme-toggle:focus-visible, .clear-search:focus-visible,
 summary:focus-visible, a:focus-visible { outline:3px solid var(--violet); outline-offset:3px }
 .card-toggle:focus-visible { outline:3px solid var(--violet); outline-offset:-4px }
 .hero { margin-bottom:22px }
@@ -1504,6 +2472,8 @@ h1 span { color:var(--muted-2); font-weight:620 }
   transition:color .18s ease, background .18s ease }
 .track-tab.active { color:var(--accent-ink); background:var(--accent);
   box-shadow:0 0 0 4px var(--accent-soft) }
+.manage-link { display:inline-flex; margin-top:18px; color:var(--accent); font-size:.76rem;
+  font-weight:780; text-decoration:none }
 .stats { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin:24px 0 22px }
 .stat { min-width:0; padding:14px 13px 13px; border:1px solid var(--line); border-radius:var(--radius-md);
   background:linear-gradient(145deg, var(--surface-2), var(--surface)); box-shadow:var(--card-shadow) }
@@ -1572,15 +2542,11 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .row.row-discarded::before { background:var(--danger) }
 .row.row-applied::before { background:var(--violet) }
 .row.row-removing { opacity:0; transform:translateX(18px) }
-.row .body { position:relative; z-index:2; min-width:0; pointer-events:none }
-.row.has-summary { cursor:pointer }
-.card-toggle { position:absolute; z-index:1; inset:0; width:100%; padding:0; border:0;
-  border-radius:var(--radius-lg); background:transparent; cursor:pointer }
+.row .body { position:relative; z-index:2; min-width:0 }
 .card-topline { display:flex; align-items:flex-start; justify-content:space-between; gap:10px }
 .card-badges { display:flex; align-items:center; gap:10px }
 .summary-chevron { width:9px; height:9px; margin:0 4px 4px 0; border-right:2px solid var(--muted);
   border-bottom:2px solid var(--muted); transform:rotate(45deg); transition:transform .2s ease }
-.has-summary:has(.card-toggle[aria-expanded="true"]) .summary-chevron { transform:rotate(225deg); margin-top:7px }
 .company { min-width:0; overflow-wrap:anywhere; color:var(--fg); font-size:.74rem; line-height:1.35;
   font-weight:810; letter-spacing:.065em; text-transform:uppercase }
 .role { max-width:620px; margin-top:5px; overflow-wrap:anywhere; color:var(--fg); font-size:.98rem;
@@ -1615,26 +2581,61 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .note { margin:12px 0 0; padding:11px 12px; border:1px dashed var(--line-strong);
   border-radius:12px; color:var(--muted); background:color-mix(in srgb, var(--surface) 55%, transparent);
   font-size:.75rem; overflow-wrap:anywhere }
-.summary-panel { position:relative; z-index:2; margin:14px 0 1px; padding:13px 13px 12px;
-  border-top:1px solid var(--line); pointer-events:none }
+.card-reader { position:relative; z-index:3; margin:13px 13px 0; pointer-events:auto }
+.reader-tabs { display:flex; gap:5px;
+  padding:4px; border:1px solid var(--line); border-radius:12px; background:var(--surface) }
+.reader-tab { flex:1 1 0; min-width:0; min-height:36px; padding:0 8px; overflow:hidden; border:0;
+  border-radius:8px; color:var(--muted); background:transparent; font-size:.68rem; font-weight:740;
+  letter-spacing:.01em; text-overflow:ellipsis; white-space:nowrap; cursor:pointer;
+  transition:color .15s ease, background .15s ease, box-shadow .15s ease }
+.reader-tab[aria-expanded="true"] { color:var(--fg); background:var(--surface-hover);
+  box-shadow:0 1px 4px rgba(0,0,0,.09) }
+.reader-tab.letter-ok { color:var(--violet) }
+.reader-tab.letter-failed { color:var(--danger) }
+.reader-tab.letter-running, .reader-tab.letter-queued { color:var(--violet) }
+.reader-tab:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
+.summary-panel { position:relative; z-index:2; margin:10px 0 1px; padding:13px 0 12px;
+  border-top:1px solid var(--line) }
 .summary-panel[hidden] { display:none }
 .summary-title { color:var(--accent); font-size:.68rem; font-weight:820; letter-spacing:.09em;
   text-transform:uppercase }
 .summary-panel ul { margin:9px 0 0; padding-left:19px; color:var(--muted); font-size:.76rem }
 .summary-panel li + li { margin-top:6px }
-.content-toggle { position:relative; z-index:3; margin:12px 13px 0; padding:9px 12px;
-  display:inline-flex; align-items:center; gap:7px; border:1px solid var(--line);
-  border-radius:11px; color:var(--fg); background:var(--surface); font-size:.71rem;
-  font-weight:700; letter-spacing:.02em; cursor:pointer; pointer-events:auto;
-  transition:border-color .15s ease, background .15s ease }
+.summary-fields { display:grid; gap:5px; margin:10px 0 2px }
+.summary-field { display:flex; gap:8px; align-items:baseline; font-size:.76rem }
+.sf-label { flex:none; min-width:132px; color:var(--muted-2); font-size:.63rem;
+  font-weight:800; letter-spacing:.07em; text-transform:uppercase }
+.sf-value { color:var(--fg); overflow-wrap:anywhere }
+.summary-field.sf-empty .sf-value { color:var(--muted-2); font-style:italic }
+@media (max-width:370px) { .sf-label { min-width:104px } }
+.content-toggle { position:relative; z-index:3; margin:12px 13px 0; padding:0 14px;
+  display:flex; width:calc(100% - 26px); justify-content:center; align-items:center;
+  gap:7px; min-height:38px; border:1px solid var(--line); border-radius:11px;
+  color:var(--fg); background:var(--surface); font-size:.74rem; font-weight:740;
+  letter-spacing:.02em; cursor:pointer; pointer-events:auto;
+  transition:border-color .15s ease, background .15s ease, box-shadow .15s ease }
 .content-toggle .summary-chevron { margin:0 }
+.content-toggle[aria-expanded="true"] { background:var(--surface-hover);
+  box-shadow:0 1px 4px rgba(0,0,0,.09) }
 .content-toggle[aria-expanded="true"] .summary-chevron { transform:rotate(225deg) }
-.content-panel { position:relative; z-index:2; margin:10px 13px 1px; padding:12px 13px;
+.content-toggle:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
+@media (hover:hover) {
+  .content-toggle:hover { border-color:var(--line-strong); background:var(--surface-hover) }
+}
+.content-panel { position:relative; z-index:2; margin:10px 0 1px; padding:12px 0;
   border-top:1px solid var(--line); color:var(--muted); font-size:.76rem;
-  line-height:1.55; overflow-wrap:anywhere; pointer-events:none }
+  line-height:1.55; overflow-wrap:anywhere }
 .content-panel[hidden] { display:none }
 .content-panel p { margin:0 0 10px }
 .content-panel p:last-child { margin-bottom:0 }
+.content-panel .md-heading { margin:14px 0 6px; color:var(--fg); font-weight:800; font-size:.82rem }
+.content-panel .md-heading:first-child { margin-top:0 }
+.content-panel ul, .content-panel ol { margin:0 0 10px; padding-left:19px }
+.content-panel li + li { margin-top:4px }
+.content-panel strong { color:var(--fg) }
+.content-panel a { color:var(--accent) }
+.content-panel hr { margin:16px 0; border:0; border-top:1px solid var(--line) }
+.content-panel .md-heading + hr { margin-top:6px }
 .card-actions { position:relative; z-index:3; display:flex; flex-wrap:wrap; gap:8px;
   margin:12px 13px 0; pointer-events:auto }
 .card-action { min-height:38px; padding:0 14px; display:inline-flex; align-items:center;
@@ -1678,36 +2679,70 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .doc-label-prompt[hidden] { display:none }
 .action-draft { color:var(--violet) }
 .draft-form { position:relative; z-index:3; display:grid; grid-template-columns:minmax(0, 1fr);
-  gap:8px; margin:12px 13px 0; pointer-events:auto }
+  gap:8px; margin:10px 0 0; pointer-events:auto }
 .draft-form[hidden] { display:none }
 .draft-submit { justify-self:start }
 .draft-area { position:relative; z-index:3; display:flex; align-items:center; flex-wrap:wrap;
-  gap:9px; margin:0 13px; pointer-events:auto; color:var(--muted); font-size:.75rem }
-.draft-area:not(:empty) { margin-top:12px }
+  gap:9px; pointer-events:auto; color:var(--muted); font-size:.75rem }
+.draft-area:not(:empty) { margin-bottom:10px }
+.letter-panel { margin:10px 0 1px; padding:12px 0 2px; border-top:1px solid var(--line) }
+.letter-panel[hidden] { display:none }
+.letter-panel > .action-draft { margin-top:2px }
+/* avancement des lettres : ancré dans la barre du haut, jamais posé sur le
+   contenu - un panneau flottant paraissait perdu à droite sur grand écran et
+   mordait la carte dès que la fenêtre rétrécissait */
+.batch-badge-wrap { position:relative; display:flex }
+.batch-badge-wrap[hidden] { display:none }
+.batch-badge { display:flex; align-items:center; gap:7px; height:38px; padding:0 12px 0 9px;
+  border:1px solid var(--line-strong); border-radius:999px; background:var(--surface);
+  color:var(--fg); font-size:.8rem; font-weight:650; cursor:pointer;
+  transition:background .15s ease }
+.batch-badge:hover { background:var(--surface-hover) }
+.batch-ring { width:19px; height:19px; flex:none; border-radius:50%;
+  background:conic-gradient(var(--violet) calc(var(--batch-progress, 0) * 1%),
+    var(--line-strong) 0) }
+/* l'anneau reste gris tant qu'aucune lettre n'est finie : la pulsation dit
+   que le lot tourne, là où un pourcentage à 0 paraîtrait figé */
+.batch-ring:not(.batch-ring-done) { animation:batch-pulse 1.7s ease-in-out infinite }
+@keyframes batch-pulse { 50% { opacity:.45 } }
+.batch-ring::after { content:""; display:block; width:11px; height:11px; margin:4px;
+  border-radius:50%; background:var(--surface) }
+.batch-badge:hover .batch-ring::after { background:var(--surface-hover) }
+.batch-ring-done { background:var(--accent) }
+.batch-panel { position:absolute; z-index:30; right:0; top:calc(100% + 9px);
+  width:max-content; max-width:min(250px, calc(100vw - 32px)); padding:13px 15px;
+  border:1px solid var(--line); border-radius:var(--radius-md);
+  background:var(--surface-2); box-shadow:var(--shadow); text-align:left }
+.batch-panel[hidden] { display:none }
+.batch-panel p { margin:0; font-size:.82rem; line-height:1.4 }
+.batch-panel-note { margin-top:3px; color:var(--muted) }
 .draft-spinner { width:14px; height:14px; flex:none; border:2px solid var(--line-strong);
   border-top-color:var(--violet); border-radius:50%; animation:draft-spin .8s linear infinite }
 @keyframes draft-spin { to { transform:rotate(360deg) } }
 .draft-error { margin:0; color:var(--danger); overflow-wrap:anywhere }
 .draft-error a, .letter-links a { position:relative; z-index:3; pointer-events:auto }
 .draft-warning { margin:0 0 8px; color:var(--amber); overflow-wrap:anywhere }
-.draft-area .letter-toggle { margin:0 }
-.letter-panel { width:100%; margin:4px 0 1px; padding:12px 0 0; border-top:1px solid var(--line) }
-.letter-panel[hidden] { display:none }
 .letter-page { display:block; width:100%; max-width:560px; margin:0 auto 10px;
   border:1px solid var(--line-strong); border-radius:10px; background:#fff }
 .letter-links { margin:4px 0 8px; text-align:center; font-size:.72rem }
-.swipe-fab { position:relative; width:48px; height:48px; flex:0 0 48px; display:grid;
-  place-items:center; border:1px solid var(--line); border-radius:15px; color:var(--violet);
+.swipe-fab { height:48px; flex:none; display:flex; align-items:center; justify-content:center;
+  gap:8px; padding:0 13px; border:1px solid var(--line); border-radius:15px; color:var(--violet);
   background:color-mix(in srgb, var(--surface) 86%, transparent); box-shadow:var(--card-shadow);
+  font-weight:760; text-decoration:none;
   transition:transform .2s ease, background .2s ease, border-color .2s ease }
 .swipe-fab svg { width:20px; height:20px }
 .swipe-fab:active { transform:scale(.94) }
-.swipe-fab-count { position:absolute; top:-6px; right:-6px; min-width:20px; height:20px;
+.swipe-fab-count { min-width:20px; height:20px;
   display:grid; place-items:center; padding:0 5px; border-radius:999px;
   color:var(--accent-ink); background:var(--accent); font-size:.62rem; font-weight:820;
-  font-variant-numeric:tabular-nums; box-shadow:0 0 0 3px var(--bg) }
+  font-variant-numeric:tabular-nums; }
 @media (hover:hover) { .swipe-fab:hover { background:var(--surface-hover) } }
 .topbar-tools { display:flex; align-items:center; gap:10px }
+.logout-button { height:48px; display:flex; align-items:center; justify-content:center; gap:8px;
+  padding:0 13px; border:1px solid var(--line); border-radius:15px; color:var(--fg);
+  background:color-mix(in srgb, var(--surface) 86%, transparent); box-shadow:var(--card-shadow);
+  font-weight:700; cursor:pointer; }
+.logout-button svg { width:19px; height:19px; }
 .swipe-popup { position:fixed; inset:0; z-index:60; display:flex; align-items:flex-end;
   justify-content:center; padding:16px; background:rgba(0,0,0,.45);
   -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
@@ -1750,7 +2785,40 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .no-results { margin:0 0 14px; padding:26px 18px; border:1px dashed var(--line-strong);
   border-radius:var(--radius-lg); color:var(--muted); text-align:center }
 .no-results strong { display:block; margin-bottom:3px; color:var(--fg) }
-.footer { margin-top:24px; color:var(--muted-2); font-size:.68rem; text-align:center }
+.footer { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:7px;
+  margin-top:24px; color:var(--muted-2); font-size:.68rem; text-align:center }
+.bug-report-button { display:inline-flex; align-items:center; justify-content:center; min-height:34px;
+  padding:0 10px; border:1px solid var(--line); border-radius:10px; color:var(--muted);
+  background:var(--surface); font:inherit; font-weight:720; cursor:pointer;
+  transition:color .15s ease, background .15s ease, border-color .15s ease }
+.bug-report-button:hover { color:var(--fg); background:var(--surface-hover) }
+.bug-report-button:focus-visible, .bug-report-close:focus-visible {
+  outline:3px solid var(--violet); outline-offset:2px }
+.bug-report-overlay { position:fixed; inset:0; z-index:100; display:flex; align-items:flex-end;
+  justify-content:center; padding:16px; background:rgba(10,12,16,.5);
+  -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px) }
+.bug-report-overlay[hidden] { display:none }
+.bug-report-dialog { position:relative; width:min(100%, 520px); padding:22px;
+  border:1px solid var(--line-strong); border-radius:var(--radius-xl); color:var(--fg);
+  background:var(--surface); box-shadow:var(--shadow) }
+.bug-report-dialog h2 { margin:4px 34px 7px 0; font-size:1.35rem; letter-spacing:-.025em }
+.bug-report-close { position:absolute; top:12px; right:12px; width:38px; height:38px;
+  border:0; border-radius:10px; color:var(--muted); background:transparent;
+  font-size:1.45rem; line-height:1; cursor:pointer }
+.bug-report-close:hover { color:var(--fg); background:var(--surface-hover) }
+.bug-report-intro { margin:0 0 16px; color:var(--muted); font-size:.78rem; line-height:1.5 }
+#bug-report-form { display:grid; grid-template-columns:minmax(0, 1fr) }
+.bug-report-message { width:100%; min-height:130px; margin-top:7px; resize:vertical;
+  line-height:1.45 }
+.bug-report-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px }
+.bug-report-submit { color:var(--blue) }
+.bug-report-submit:disabled { opacity:.5; cursor:default }
+.bug-report-status { min-height:18px; margin:10px 0 0; color:var(--muted);
+  font-size:.72rem; text-align:right }
+.bug-report-status.is-error { color:var(--danger) }
+.bug-report-status.is-success { color:var(--accent) }
+body.modal-open { overflow:hidden }
+@media (min-width:620px) { .bug-report-overlay { align-items:center } }
 a { color:var(--blue) }
 @media (hover:hover) {
   .theme-toggle:hover, .clear-search:hover { background:var(--surface-hover) }
@@ -1766,6 +2834,12 @@ a { color:var(--blue) }
   .card-list { padding:0 10px 10px; gap:10px }
   .row { padding:18px 18px 17px 21px }
 }
+@media (max-width:619px) {
+  .topbar { flex-wrap:wrap; }
+  .topbar-tools { width:100%; }
+  .swipe-fab { flex:1; }
+  .logout-button { margin-left:auto; }
+}
 @media (max-width:370px) {
   .stat { padding:12px 9px }
   .stat-value { font-size:1.35rem }
@@ -1776,6 +2850,76 @@ a { color:var(--blue) }
   *, *::before, *::after { scroll-behavior:auto !important; animation:none !important; transition:none !important }
 }
 """
+
+_BATCH_BADGE_JS = """\
+(function () {
+  const wrap = document.getElementById('batch-badge-wrap');
+  if (!wrap) return;
+  const badge = document.getElementById('batch-badge');
+  const ring = document.getElementById('batch-ring');
+  const count = document.getElementById('batch-badge-count');
+  const panel = document.getElementById('batch-panel');
+  const line1 = document.getElementById('batch-panel-line1');
+  const line2 = document.getElementById('batch-panel-line2');
+  const track = document.body.dataset.track || 'engineer';
+  let timer = null;
+
+  const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+  const poll = () => fetch(`/draft/batch/status?track=${track}`)
+    .then(resp => resp.ok ? resp.json() : null)
+    .then(payload => {
+      if (!payload) return;
+      const active = payload.queued + payload.running;
+      const done = payload.ok + payload.failed;
+      const failed = payload.failed ? ` · ${payload.failed} échec(s)` : '';
+      if (active > 0) {
+        wrap.hidden = false;
+        ring.classList.remove('batch-ring-done');
+        ring.style.setProperty('--batch-progress', Math.round(100 * done / (done + active)));
+        count.textContent = String(active);
+        line1.textContent = `${active} lettre(s) en cours`;
+        line2.textContent = `${payload.ok} prête(s)${failed}`;
+        if (!timer) timer = setInterval(poll, 3000);
+        return;
+      }
+      stop();
+      if (wrap.hidden) return;          // rien n'a tourné pendant cette visite
+      ring.classList.add('batch-ring-done');
+      ring.style.setProperty('--batch-progress', 100);
+      count.textContent = String(payload.ok);
+      line1.textContent = `Terminé · ${payload.ok} lettre(s) prête(s)`;
+      line2.textContent = `à joindre depuis les cartes${failed}`;
+    })
+    .catch(() => {});
+
+  badge.addEventListener('click', () => {
+    const open = badge.getAttribute('aria-expanded') === 'true';
+    badge.setAttribute('aria-expanded', open ? 'false' : 'true');
+    panel.hidden = open;
+  });
+  document.addEventListener('click', event => {
+    if (panel.hidden || wrap.contains(event.target)) return;
+    badge.setAttribute('aria-expanded', 'false');
+    panel.hidden = true;
+  });
+
+  window.jwBatchBadge = {
+    poll,
+    start: () => {
+      wrap.hidden = false;
+      ring.classList.remove('batch-ring-done');
+      ring.style.setProperty('--batch-progress', 0);
+      count.textContent = '…';
+      line1.textContent = 'Génération lancée…';
+      line2.textContent = '';
+      if (!timer) timer = setInterval(poll, 3000);
+      poll();
+    },
+  };
+  poll();
+})();
+"""
+
 
 _JS = """\
 (function () {
@@ -1802,15 +2946,17 @@ _JS = """\
   const searchDock = document.getElementById('search-dock');
   const details = [...document.querySelectorAll('.section')];
   const rows = [...document.querySelectorAll('.row')];
-  // .letter-toggle est géré par délégation : le fragment de statut est réinjecté
-  // après chaque génération et perdrait des écouteurs attachés directement.
-  const cardToggles = [...document.querySelectorAll('.card-toggle, .content-toggle:not(.letter-toggle)')];
-  cardToggles.forEach(button => {
-    button.addEventListener('click', () => {
-      const expanded = button.getAttribute('aria-expanded') === 'true';
-      const panel = document.getElementById(button.getAttribute('aria-controls'));
-      button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-      if (panel) panel.hidden = expanded;
+  // Résumé, annonce et lettre partagent un lecteur : une seule vue reste ouverte.
+  document.addEventListener('click', event => {
+    const button = event.target.closest('.reader-tab');
+    if (!button) return;
+    const reader = button.closest('.card-reader');
+    const expanded = button.getAttribute('aria-expanded') === 'true';
+    reader.querySelectorAll('.reader-tab').forEach(other => {
+      const panel = document.getElementById(other.getAttribute('aria-controls'));
+      const keepOpen = other === button && !expanded;
+      other.setAttribute('aria-expanded', keepOpen ? 'true' : 'false');
+      if (panel) panel.hidden = !keepOpen;
     });
   });
   const readSession = (key, fallback) => {
@@ -1842,7 +2988,10 @@ _JS = """\
     const needle = normalize(rawNeedle);
     let shownTotal = 0;
     rows.forEach(r => {
-      const visible = !needle || normalize(r.textContent).includes(needle);
+      // data-search est rendu côté serveur et déjà normalisé : il ne contient
+      // que société, poste, lieu, plateforme et recherche. Lire textContent
+      // ferait entrer les <option> des menus de documents dans le filtre.
+      const visible = !needle || (r.dataset.search || '').includes(needle);
       r.hidden = !visible;
       if (visible) shownTotal += 1;
     });
@@ -1945,8 +3094,7 @@ _JS = """\
       });
     });
   });
-  // Candidater et Générer LM partagent l'espace sous la carte : ouvrir l'un
-  // referme l'autre pour éviter deux formulaires empilés.
+  // Un seul formulaire d'action reste ouvert à la fois dans une carte.
   [...document.querySelectorAll('.action-apply, .action-draft')].forEach(button => {
     button.addEventListener('click', () => {
       const expanded = button.getAttribute('aria-expanded') === 'true';
@@ -1984,14 +3132,6 @@ _JS = """\
     });
   });
 
-  document.addEventListener('click', e => {
-    const btn = e.target.closest('.letter-toggle');
-    if (!btn) return;
-    const expanded = btn.getAttribute('aria-expanded') === 'true';
-    const panel = document.getElementById(btn.getAttribute('aria-controls'));
-    btn.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-    if (panel) panel.hidden = expanded;
-  });
   const RUNNING_HTML = '<span class="draft-spinner" aria-hidden="true"></span>'
     + '<span>Génération de la lettre en cours…</span>';
   const DRAFT_POLL_MS = 3000;
@@ -2001,6 +3141,21 @@ _JS = """\
     if (!area) return;
     area.innerHTML = html;
     area.dataset.status = status;
+    const tab = document.querySelector(`.letter-toggle[aria-controls="letter-panel-${matchId}"]`);
+    if (tab) {
+      tab.classList.remove('letter-empty', 'letter-queued', 'letter-running', 'letter-failed', 'letter-ok');
+      tab.classList.add(`letter-${status || 'empty'}`);
+      const label = tab.querySelector('.reader-tab-label');
+      if (label) label.textContent = status === 'ok' ? 'Lettre · prête'
+        : status === 'failed' ? 'Lettre · échec'
+        : status === 'queued' || status === 'running' ? 'Lettre · en cours' : 'Lettre';
+    }
+    const compose = document.querySelector(`.action-draft[aria-controls="draft-form-${matchId}"]`);
+    if (compose) {
+      compose.hidden = status === 'queued' || status === 'running';
+      compose.textContent = status === 'ok' ? 'Régénérer la lettre'
+        : status === 'failed' ? 'Réessayer' : 'Générer la lettre';
+    }
   };
   const registerCoverLetter = (matchId, libraryId, label) => {
     const value = String(libraryId);
@@ -2190,6 +3345,8 @@ _TRACK_TABS = (
 
 
 def _track_nav(track: str) -> str:
+    if track == "all":
+        return ""
     links = []
     for key, href, label in _TRACK_TABS:
         current = ' aria-current="page"' if key == track else ""
@@ -2202,27 +3359,38 @@ def _track_nav(track: str) -> str:
 
 def _page_template(
     *, body, total, new_count, seen_count, applied_count, stamp, track,
-    swipe_fab="", swipe_popup="",
+    category_link="", swipe_fab="", swipe_popup="", batch_badge="", csrf_token="",
 ) -> str:
+    logout_button = (
+        '<button class="logout-button" type="button" aria-label="Déconnexion" '
+        'onclick="fetch(\'/logout\',{method:\'POST\'}).then(()=>location.href=\'/login\')">'
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        '<path d="M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4"/>'
+        '<path d="m15 8 4 4-4 4M9 12h10"/></svg><span>Déconnexion</span></button>'
+        if csrf_token
+        else ""
+    )
     return f"""<!DOCTYPE html>
-<html lang="fr" data-theme="dark"><head><meta charset="utf-8">
+<html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#090b10" id="theme-color">
+<meta name="theme-color" content="#f3f1eb" id="theme-color">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>jobwatch · tableau de bord</title>
+{_csrf_head(csrf_token)}
 <script>
 (function () {{
   try {{
     const saved = localStorage.getItem('jw-theme');
-    document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = saved === 'dark' ? 'dark' : 'light';
   }} catch (_) {{
-    document.documentElement.dataset.theme = 'dark';
+    document.documentElement.dataset.theme = 'light';
   }}
 }})();
 </script>
 <style>
-{_CSS}</style></head><body>
+{_CSS}</style></head><body data-track="{track}">
 <div class="ambient" aria-hidden="true"></div>
 <div class="shell">
   <header>
@@ -2234,6 +3402,7 @@ def _page_template(
       </div>
       <div class="topbar-tools">
       {swipe_fab}
+      {batch_badge}
       <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Passer au thème clair">
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
           <circle cx="12" cy="12" r="3.7"/><path d="M12 2v2.1M12 19.9V22M4.93 4.93l1.49 1.49M17.58 17.58l1.49 1.49M2 12h2.1M19.9 12H22M4.93 19.07l1.49-1.49M17.58 6.42l1.49-1.49"/>
@@ -2242,6 +3411,7 @@ def _page_template(
           <path d="M20.2 15.1A8.4 8.4 0 0 1 8.9 3.8 8.5 8.5 0 1 0 20.2 15.1Z"/>
         </svg>
       </button>
+      {logout_button}
       </div>
     </div>
     <div class="hero">
@@ -2251,6 +3421,7 @@ def _page_template(
         Mis à jour le {stamp}</p>
     </div>
     {_track_nav(track)}
+    {category_link}
     <div class="stats" aria-label="Vue d'ensemble">
       <div class="stat stat-new"><span class="stat-value">{new_count}</span><span class="stat-label">Nouveaux matchs</span></div>
       <div class="stat stat-seen"><span class="stat-value">{seen_count}</span><span class="stat-label">Vus</span></div>
@@ -2277,11 +3448,16 @@ def _page_template(
     <div class="no-results" id="no-results" hidden><strong>Aucune offre trouvée</strong>
       Essayez un autre mot-clé.</div>
   </main>
-  <footer class="footer">Lecture seule · données locales · base SQLite jobwatch</footer>
+  <footer class="footer"><span>Données locales · base SQLite jobwatch</span>
+    <button class="bug-report-button" type="button" data-bug-report-open>Signaler un bug</button>
+  </footer>
 </div>
 {swipe_popup}
+{_BUG_REPORT_DIALOG}
 <script>
-{_JS}</script></body></html>
+{_JS}
+{_BUG_REPORT_JS}
+{_BATCH_BADGE_JS}</script></body></html>
 """
 
 
@@ -2309,7 +3485,7 @@ _SWIPE_CSS = """\
   transition:transform .28s ease, opacity .28s ease }
 .swipe-card-scroll { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch }
 .swipe-card .content-panel { margin:10px 0 0; padding:12px 0 0; pointer-events:auto }
-.swipe-card .content-toggle { margin:12px 0 0 }
+.swipe-card .content-toggle { margin:12px 0 0; width:100% }
 .swipe-summary { margin:14px 0 0; padding:12px 12px 11px; border:1px dashed var(--line-strong);
   border-radius:12px }
 .swipe-summary ul { margin:8px 0 0; padding-left:18px; color:var(--muted); font-size:.8rem }
@@ -2345,9 +3521,8 @@ _SWIPE_CSS = """\
 .batch-form { display:grid; grid-template-columns:minmax(0, 1fr); gap:10px }
 .batch-btn { justify-self:start; gap:5px; color:var(--violet) }
 .batch-btn:disabled { opacity:.45; cursor:default }
-.batch-progress { display:flex; align-items:center; gap:9px; margin-top:14px;
-  color:var(--muted); font-size:.8rem }
-.batch-progress[hidden] { display:none }
+.done-back { display:inline-flex; margin-top:18px; text-decoration:none }
+.swipe-support { display:flex; justify-content:center; padding-top:8px }
 """
 
 _SWIPE_JS = """\
@@ -2359,6 +3534,7 @@ _SWIPE_JS = """\
   const done = document.getElementById('swipe-done');
   const undoBtn = document.getElementById('swipe-undo');
   const track = document.body.dataset.track;
+  const backHref = document.body.dataset.backHref || '/';
   const pendingInitial = Number(document.body.dataset.pending || '0');
   const total = cards.length;
   let index = 0;
@@ -2493,27 +3669,6 @@ _SWIPE_JS = """\
     let savedCv = null;
     try { savedCv = localStorage.getItem(`jw-cv-${track}`); } catch (_) {}
     if (savedCv && [...select.options].some(o => o.value === savedCv)) select.value = savedCv;
-    const progress = document.getElementById('batch-progress');
-    const progressText = progress.querySelector('span:last-child');
-    let batchTimer = null;
-    const pollBatch = () => {
-      fetch(`/draft/batch/status?track=${track}`)
-        .then(resp => resp.ok ? resp.json() : null)
-        .then(payload => {
-          if (!payload) return;
-          const active = payload.queued + payload.running;
-          progress.hidden = false;
-          progressText.textContent =
-            `${payload.ok} générée(s) · ${payload.failed} échec(s) · ${active} en cours`;
-          if (active === 0 && batchTimer) {
-            clearInterval(batchTimer);
-            batchTimer = null;
-            progress.querySelector('.draft-spinner').hidden = true;
-            progressText.textContent += ' — terminé, les lettres sont sur le tableau de bord';
-          }
-        })
-        .catch(() => {});
-    };
     batchBtn.addEventListener('click', () => {
       if (!select.value) return;
       try { localStorage.setItem(`jw-cv-${track}`, select.value); } catch (_) {}
@@ -2525,9 +3680,12 @@ _SWIPE_JS = """\
         body: JSON.stringify({track, cv_library_id: Number(select.value)}),
       }).then(resp => {
         if (!resp.ok) { batchBtn.disabled = false; delete batchBtn.dataset.started; return; }
-        if (!batchTimer) batchTimer = setInterval(pollBatch, 3000);
-        pollBatch();
-      }).catch(() => {});
+        if (window.jwBatchBadge) window.jwBatchBadge.start();
+        window.location.assign(backHref);
+      }).catch(() => {
+        batchBtn.disabled = false;
+        delete batchBtn.dataset.started;
+      });
     });
   }
 
@@ -2536,30 +3694,34 @@ _SWIPE_JS = """\
 """
 
 
-def _swipe_page_template(*, track, cards, total, pending, batch, back_href) -> str:
+def _swipe_page_template(
+    *, track, cards, total, pending, batch, back_href, batch_badge="", csrf_token=""
+) -> str:
     return f"""<!DOCTYPE html>
-<html lang="fr" data-theme="dark"><head><meta charset="utf-8">
+<html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#090b10">
+<meta name="theme-color" content="#f3f1eb">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>jobwatch · tri des offres</title>
+{_csrf_head(csrf_token)}
 <script>
 (function () {{
   try {{
     const saved = localStorage.getItem('jw-theme');
-    document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = saved === 'dark' ? 'dark' : 'light';
   }} catch (_) {{
-    document.documentElement.dataset.theme = 'dark';
+    document.documentElement.dataset.theme = 'light';
   }}
 }})();
 </script>
 <style>
 {_CSS}{_SWIPE_CSS}</style></head>
-<body data-track="{track}" data-pending="{pending}">
+<body data-track="{track}" data-pending="{pending}" data-back-href="{back_href}">
 <div class="ambient" aria-hidden="true"></div>
 <div class="swipe-shell">
   <div class="swipe-top">
     <a class="swipe-back" href="{back_href}">← Tableau de bord</a>
+    {batch_badge}
     <span class="swipe-count" id="swipe-count">1 / {total}</span>
   </div>
   <div class="swipe-stage" id="swipe-stage">
@@ -2580,8 +3742,15 @@ def _swipe_page_template(*, track, cards, total, pending, batch, back_href) -> s
     <h2>Tri terminé</h2>
     <p class="done-stats"><span id="done-right">0</span> à candidater · <span id="done-left">0</span> écartée(s)</p>
     {batch}
+    <a class="card-action done-back" href="{back_href}">← Retour au tableau de bord</a>
   </section>
+  <div class="swipe-support">
+    <button class="bug-report-button" type="button" data-bug-report-open>Signaler un bug</button>
+  </div>
 </div>
+{_BUG_REPORT_DIALOG}
 <script>
-{_SWIPE_JS}</script></body></html>
+{_SWIPE_JS}
+{_BUG_REPORT_JS}
+{_BATCH_BADGE_JS}</script></body></html>
 """

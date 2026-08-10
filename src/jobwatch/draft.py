@@ -16,6 +16,7 @@ l'iPhone comme au rechargement de la page.
 from __future__ import annotations
 
 import datetime
+import gzip
 import logging
 import re
 import shutil
@@ -27,9 +28,9 @@ from pathlib import Path
 
 import httpx
 
-from jobwatch.config import DraftConfig
+from jobwatch.config import DRAFT_TRACKS, DraftConfig
 from jobwatch.db import connect
-from jobwatch.enrich import _extract_text, _fetch_and_convert
+from jobwatch.enrich import _extract_text, _fetch_and_extract, opencode_sandbox
 from jobwatch.library import documents_dir
 
 log = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ _MONTHS_FR = (
 
 PROMPT = (
     "Rédige une lettre de motivation en français pour l'offre d'emploi décrite dans la "
-    "section OFFRE du fichier joint, au nom du candidat décrit dans la section CV. "
+    "section OFFRE du document fourni, au nom du candidat décrit dans la section CV. "
     "Les sections EXEMPLE contiennent de vraies lettres du candidat : imite fidèlement "
     "leur format LaTeX (préambule, mise en page, formules d'ouverture et de clôture, "
     "signature) et leur ton. Réponds uniquement avec le document LaTeX complet, de "
@@ -112,23 +113,24 @@ def _offer_markdown(conn: sqlite3.Connection, offer_id: int, url: str) -> str | 
     if row is not None and row["status"] == "ok" and row["markdown"]:
         return str(row["markdown"])
     with httpx.Client(timeout=30.0) as client:
-        markdown, fetch_method = _fetch_and_convert(url, client)
-    if markdown is None:
+        extracted, fetch_method, html = _fetch_and_extract(url, client)
+    if extracted is None:
         return None
+    html_gz = gzip.compress(html.encode("utf-8")) if html else None
     if row is None:
         conn.execute(
-            "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
-            "VALUES (?, ?, ?, 'ok')",
-            (offer_id, markdown, fetch_method),
+            "INSERT INTO offer_content (offer_id, markdown, fetch_method, extract_method, "
+            "html_gz, status) VALUES (?, ?, ?, ?, ?, 'ok')",
+            (offer_id, extracted.markdown, fetch_method, extracted.method, html_gz),
         )
     else:
         conn.execute(
-            "UPDATE offer_content SET markdown = ?, fetch_method = ?, status = 'ok', "
-            "fetched_at = datetime('now') WHERE offer_id = ?",
-            (markdown, fetch_method, offer_id),
+            "UPDATE offer_content SET markdown = ?, fetch_method = ?, extract_method = ?, "
+            "html_gz = ?, status = 'ok', fetched_at = datetime('now') WHERE offer_id = ?",
+            (extracted.markdown, fetch_method, extracted.method, html_gz, offer_id),
         )
     conn.commit()
-    return markdown
+    return extracted.markdown
 
 
 def _offer_fallback(conn: sqlite3.Connection, match: sqlite3.Row) -> str:
@@ -183,8 +185,15 @@ def _cv_text(conn: sqlite3.Connection, cv_library_id: int) -> str:
 
 
 def _example_texts(config: DraftConfig, track: str) -> list[str]:
+    paths = config.examples.get(track)
+    if not paths and track == "all":
+        paths = list(
+            dict.fromkeys(
+                path for key in DRAFT_TRACKS for path in config.examples.get(key, [])
+            )
+        )
     texts = []
-    for path in config.examples.get(track, []):
+    for path in paths or []:
         try:
             texts.append(path.read_text(encoding="utf-8"))
         except OSError as exc:
@@ -208,17 +217,79 @@ def _build_bundle(
     return "\n\n".join(parts)
 
 
+CODEX_PREAMBLE = (
+    "Le bloc <stdin> ci-dessous contient le document fourni (sections OFFRE, CV, "
+    "EXEMPLE...). N'exécute aucune commande et ne lis aucun fichier : réponds "
+    "directement. "
+)
+CODEX_TIMEOUT_SECONDS = 600
+
+
 def _call_llm(config: DraftConfig, prompt: str, attachment: str) -> str:
+    if config.runner == "codex":
+        return _call_codex(config, prompt, attachment)
+    return _call_opencode(config, prompt, attachment)
+
+
+def _call_codex(config: DraftConfig, prompt: str, attachment: str) -> str:
+    # Le bundle passe par stdin (bloc <stdin> côté codex) et la réponse finale
+    # est écrite par codex dans un fichier (-o) : pas de limite d'argument ni
+    # de parsing de log. Le bundle contient du texte d'annonce scrapé, donc non
+    # fiable : lecture seule, config utilisateur ignorée et outils désactivés.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        out_path = Path(tmp_dir) / "reponse.txt"
+        command = [
+            config.codex_bin, "exec",
+            "--ignore-user-config",
+            "--disable", "shell_tool",
+            "--disable", "code_mode_host",
+            "--disable", "apps",
+            "--disable", "plugins",
+            "--model", config.model,
+            "-s", "read-only",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "-o", str(out_path),
+        ]
+        if config.variant:
+            command += ["-c", f"model_reasoning_effort={config.variant}"]
+        command.append(CODEX_PREAMBLE + prompt)
+        try:
+            completed = subprocess.run(
+                command,
+                input=attachment,
+                capture_output=True,
+                text=True,
+                timeout=CODEX_TIMEOUT_SECONDS,
+                check=False,
+                cwd=tmp_dir,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DraftError(f"appel codex échoué : {exc}") from exc
+        if completed.returncode != 0:
+            raise DraftError(f"codex a quitté avec le code {completed.returncode}")
+        try:
+            text = out_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise DraftError("codex n'a pas écrit sa réponse finale") from exc
+    if not text.strip():
+        raise DraftError("réponse vide du modèle")
+    return text
+
+
+def _call_opencode(config: DraftConfig, prompt: str, attachment: str) -> str:
     # Pièce jointe via --file et non en argument : le noyau limite chaque
     # argument à ~128 Ko (MAX_ARG_STRLEN), un bundle offre+CV+exemples dépasse.
     with tempfile.TemporaryDirectory() as tmp_dir:
         bundle_path = Path(tmp_dir) / "bundle.md"
         bundle_path.write_text(attachment, encoding="utf-8")
+        env = opencode_sandbox(Path(tmp_dir))
         try:
             completed = subprocess.run(
                 [
                     config.opencode_bin,
                     "run",
+                    "--pure",
                     "--model",
                     config.model,
                     "--format",
@@ -232,6 +303,7 @@ def _call_llm(config: DraftConfig, prompt: str, attachment: str) -> str:
                 timeout=LLM_TIMEOUT_SECONDS,
                 check=False,
                 cwd=tmp_dir,
+                env=env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise DraftError(f"appel OpenCode échoué : {exc}") from exc

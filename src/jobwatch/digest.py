@@ -22,7 +22,7 @@ def _collect_unnotified(conn: sqlite3.Connection) -> dict[str, list[sqlite3.Row]
         "SELECT m.id AS match_id, s.name AS search_name, c.name AS company, o.title AS title, "
         "       o.location AS location, o.url AS url "
         "FROM match m "
-        "JOIN search s ON s.id = m.search_id "
+        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
         "JOIN offer o ON o.id = m.offer_id "
         "JOIN company c ON c.id = o.company_id "
         "WHERE m.notified_at IS NULL AND m.state = 'new' "
@@ -93,11 +93,11 @@ def send_digest(
     """
     groups = _collect_unnotified(conn)
     count = sum(len(rows) for rows in groups.values())
-    if count == 0:
+    if count == 0 and not config.notify.heartbeat:
         log.info("0 new matches")
         return []
 
-    body = format_digest(groups)
+    body = format_digest(groups) if count else "Aucune nouvelle offre aujourd'hui.\n"
     used: list[str] = []
 
     if config.notify.ntfy is not None:
@@ -113,7 +113,7 @@ def send_digest(
     if config.notify.smtp is not None and _send_smtp(config.notify.smtp, body, count):
         used.append("smtp")
 
-    if used:
+    if used and count:
         match_ids = [int(r["match_id"]) for rows in groups.values() for r in rows]
         for match_id in match_ids:
             conn.execute("UPDATE match SET notified_at = datetime('now') WHERE id = ?", (match_id,))

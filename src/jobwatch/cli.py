@@ -10,13 +10,18 @@ import click
 
 from jobwatch import __version__, importing
 from jobwatch.applications import ApplicationError, record_application
+from jobwatch.auth import AuthError, create_invite
 from jobwatch.collectors import build_collectors
-from jobwatch.collectors.base import store_offers
+from jobwatch.collectors.base import RawOffer, store_offers
 from jobwatch.config import Config, ConfigError, example_config_text, load_config
 from jobwatch.db import connect, init_db
 from jobwatch.digest import send_digest
 from jobwatch.enrich import EnrichError, enrich
-from jobwatch.matching import run_matching, sync_searches
+from jobwatch.library import LibraryError, migrate_draft_examples, migrate_external_documents
+from jobwatch.matching import active_search_configs, run_matching, sync_searches
+from jobwatch.onboarding import sync_profile_searches
+from jobwatch.paths import INSTANCE_ENV, instance_paths, validate_instance_name
+from jobwatch.research import apply_research_fits, research_offers
 from jobwatch.serve import ServeError, serve_http
 
 logger = logging.getLogger(__name__)
@@ -37,9 +42,31 @@ def _fatal(message: str) -> None:
     raise SystemExit(1)
 
 
+def _instance_option(
+    _ctx: click.Context, _param: click.Parameter, value: str | None
+) -> str | None:
+    if value is None:
+        return None
+    try:
+        return validate_instance_name(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
+
+
+def _current_instance() -> str | None:
+    context = click.get_current_context(silent=True)
+    if context is None:
+        return None
+    value = context.find_root().params.get("instance")
+    return str(value) if value else None
+
+
 def _resolve_config_path(explicit: str | None) -> Path:
     if explicit is not None:
         return Path(explicit)
+    instance = _current_instance()
+    if instance is not None:
+        return instance_paths(instance).config
     local = Path(DEFAULT_CONFIG)
     if local.exists():
         return local
@@ -66,9 +93,24 @@ def _open_db(config: Config) -> sqlite3.Connection:
 
 
 @click.group()
+@click.option(
+    "--instance",
+    envvar=INSTANCE_ENV,
+    callback=_instance_option,
+    help="instance isolée à utiliser (équivalent : JOBWATCH_INSTANCE)",
+)
+@click.option(
+    "-v",
+    "--verbose",
+    is_flag=True,
+    help="détaille chaque étape (une ligne par offre), utile en cron",
+)
 @click.version_option(version=__version__, message="jw, version %(version)s")
-def cli() -> None:
+def cli(instance: str | None, verbose: bool) -> None:
     """jobwatch : observateur d'offres d'emploi auto-hébergé."""
+    if verbose:
+        # Seul le logger jobwatch monte : httpx et consorts resteraient bruyants.
+        logging.getLogger("jobwatch").setLevel(logging.INFO)
 
 
 @cli.command()
@@ -82,16 +124,19 @@ def cli() -> None:
 )
 def init(config_path: Path | None, db_path: Path | None) -> None:
     """Crée un fichier config.yaml et une base de données vide, puis affiche les prochaines étapes."""
-    target = config_path or Path(DEFAULT_CONFIG)
+    instance = _current_instance()
+    paths = instance_paths(instance) if instance is not None else None
+    target = config_path or (paths.config if paths is not None else Path(DEFAULT_CONFIG))
     if target.exists():
         _fatal(f"refus d'écraser la config existante {target}")
 
     text = example_config_text()
-    if db_path is not None:
+    target_db = db_path or (paths.db if paths is not None else None)
+    if target_db is not None:
         default_db_line = "db: ~/.local/share/jobwatch/jobwatch.db"
         if default_db_line not in text:
             _fatal("ligne db par défaut introuvable dans la config d'exemple")
-        text = text.replace(default_db_line, f"db: {db_path}", 1)
+        text = text.replace(default_db_line, f"db: {target_db}", 1)
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -117,19 +162,45 @@ def run(config_path: Path | None) -> None:
     conn = _open_db(config)
     try:
         sync_searches(conn, config.searches)
+        sync_profile_searches(conn)
+        searches = active_search_configs(conn)
         collected = 0
+        direct_candidates: list[RawOffer] = []
         for collector in build_collectors(config.sources):
             offers = collector.fetch()
             new_ids = store_offers(conn, collector.name, collector.source_type, offers)
             collected += len(new_ids)
+            if new_ids:
+                placeholders = ",".join("?" for _ in new_ids)
+                new_urls = {
+                    str(row["url"])
+                    for row in conn.execute(
+                        f"SELECT url FROM offer WHERE id IN ({placeholders})", new_ids
+                    ).fetchall()
+                }
+                direct_candidates.extend(offer for offer in offers if offer.url in new_urls)
             logger.info("collected %d new offers from %s", len(new_ids), collector.name)
+        research_failed = False
+        research_fits: dict[str, str] = {}
+        if config.research is not None:
+            result = research_offers(config.research, searches, direct_candidates)
+            research_failed = result.failed
+            research_fits = result.fits_by_url
+            new_ids = store_offers(conn, "research", "research", result.offers)
+            collected += len(new_ids)
         new_matches = run_matching(conn)
+        fitted = apply_research_fits(conn, research_fits)
         channels = send_digest(conn, config)
     finally:
         conn.close()
 
     notified = f", notifié via {', '.join(channels)}" if channels else ""
-    click.echo(f"{collected} nouvelles offres collectées, {len(new_matches)} nouveaux matchs{notified}")
+    research_note = ", recherche large en échec" if research_failed else ""
+    fit_note = f", {fitted} fit(s) renseigné(s)" if fitted else ""
+    click.echo(
+        f"{collected} nouvelles offres collectées, {len(new_matches)} nouveaux matchs"
+        f"{fit_note}{notified}{research_note}"
+    )
 
 
 @cli.command("enrich")
@@ -145,10 +216,7 @@ def enrich_cmd(config_path: Path | None) -> None:
             _fatal(str(exc))
     finally:
         conn.close()
-    click.echo(
-        f"{result.fetched_ok} offre(s) récupérée(s), {result.fetched_failed} échec(s), "
-        f"{result.summaries_written} résumé(s) généré(s)"
-    )
+    click.echo(result.summary_line())
 
 
 @cli.command("ingest-daily")
@@ -238,6 +306,74 @@ def import_summaries(config_path: Path | None, path: Path) -> None:
         f"{result.summaries_unchanged} inchangé(s), "
         f"{result.bullets_written} puce(s) écrite(s)"
     )
+
+
+@cli.command("migrate-storage")
+@click.option(
+    "--source-root",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="racine des anciens chemins relatifs, par exemple l'ancien workspace Postuler",
+)
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def migrate_storage(config_path: Path | None, source_root: Path | None) -> None:
+    """Copie les documents externes dans le stockage géré par jobwatch."""
+    try:
+        resolved_config_path = _resolve_config_path(
+            str(config_path) if config_path is not None else None
+        )
+    except CliError as exc:
+        _fatal(str(exc))
+    config = _require_config(config_path)
+    conn = _open_db(config)
+    try:
+        result = migrate_external_documents(conn, config.db, source_root)
+    finally:
+        conn.close()
+    try:
+        examples = migrate_draft_examples(
+            resolved_config_path, config.db, source_root
+        )
+    except (OSError, LibraryError) as exc:
+        _fatal(f"migration des exemples impossible : {exc}")
+    click.echo(
+        f"{result.copied} document(s) copié(s), "
+        f"{result.already_managed} déjà géré(s), {len(result.missing)} introuvable(s)"
+    )
+    for path in result.missing:
+        click.echo(f"avertissement : document introuvable : {path}", err=True)
+    click.echo(
+        f"{examples.copied} exemple(s) LaTeX copié(s), "
+        f"{examples.already_managed} déjà géré(s), {len(examples.missing)} introuvable(s)"
+    )
+    for path in examples.missing:
+        click.echo(f"avertissement : exemple introuvable : {path}", err=True)
+
+
+@cli.group("account")
+def account_group() -> None:
+    """Gère le compte propriétaire de l'instance."""
+
+
+@account_group.command("invite")
+@click.argument("email")
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def account_invite(config_path: Path | None, email: str) -> None:
+    """Crée un lien d'invitation propriétaire valable 48 heures."""
+    instance = _current_instance()
+    if instance is None:
+        _fatal("account invite nécessite --instance NAME ou JOBWATCH_INSTANCE")
+    config = _require_config(config_path)
+    conn = _open_db(config)
+    try:
+        try:
+            token = create_invite(conn, instance, email)
+        except AuthError as exc:
+            _fatal(str(exc))
+    finally:
+        conn.close()
+    click.echo(f"invitation créée pour {email.strip().casefold()} (valable 48 h)")
+    click.echo(f"/invite/{token}")
 
 
 @cli.command("list")
@@ -423,6 +559,37 @@ def log(
     click.echo(f"événement {event_type} consigné pour la candidature {application_id}")
 
 
+@cli.command("bugs")
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def bugs(config_path: Path | None) -> None:
+    """Liste les signalements envoyés depuis le dashboard."""
+    config = _require_config(config_path)
+    conn = _open_db(config)
+    try:
+        reports = conn.execute(
+            "SELECT br.id AS id, br.created_at AS created_at, br.page AS page, "
+            "       br.message AS message, br.user_agent AS user_agent, a.email AS email "
+            "FROM bug_report br "
+            "LEFT JOIN account a ON a.id = br.account_id "
+            "ORDER BY br.id DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    if not reports:
+        click.echo("Aucun signalement.")
+        return
+    for report in reports:
+        reporter = str(report["email"] or "instance locale")
+        click.echo(
+            f"#{int(report['id'])} · {report['created_at']!s} · "
+            f"{reporter} · {report['page']!s}"
+        )
+        for line in str(report["message"]).splitlines() or [""]:
+            click.echo(f"  {line}")
+        if report["user_agent"]:
+            click.echo(f"  Navigateur : {report['user_agent']}")
+
+
 @cli.command("apps")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def apps(config_path: Path | None) -> None:
@@ -459,13 +626,27 @@ def apps(config_path: Path | None) -> None:
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 @click.option("--host", "host", default="127.0.0.1", show_default=True, help="adresse d'écoute")
 @click.option("--port", "port", type=int, default=8000, show_default=True, help="port d'écoute")
-def serve(config_path: Path | None, host: str, port: int) -> None:
+@click.option(
+    "--secure-cookie/--no-secure-cookie",
+    default=True,
+    show_default=True,
+    help="cookie réservé à HTTPS ; désactiver explicitement pour un accès HTTP privé",
+)
+def serve(config_path: Path | None, host: str, port: int, secure_cookie: bool) -> None:
     """Sert un tableau de bord web local."""
     config = _require_config(config_path)
     conn = _open_db(config)
     conn.close()
     try:
-        serve_http(config.db, host, port, draft_config=config.draft)
+        serve_http(
+            config.db,
+            host,
+            port,
+            draft_config=config.draft,
+            workspace_slug=_current_instance(),
+            secure_cookie=secure_cookie,
+            onboarding_enabled=_current_instance() is not None,
+        )
     except ServeError as exc:
         _fatal(str(exc))
 

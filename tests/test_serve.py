@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import socket
 import sqlite3
 import threading
@@ -17,7 +18,7 @@ from click.testing import CliRunner
 
 from jobwatch.cli import cli
 from jobwatch.db import connect, init_db
-from jobwatch.serve import make_handler, render_page
+from jobwatch.serve import _markdown_to_html, make_handler, render_page
 
 
 @pytest.fixture()
@@ -88,6 +89,46 @@ def _seed_offer(
     return match_id, offer_id
 
 
+def test_search_haystack_ignores_the_document_library_menus(
+    conn: sqlite3.Connection,
+) -> None:
+    """Régression : chercher une société ne doit pas matcher via les <option>.
+
+    Les menus « Candidater » et « Générer LM » listent toute la bibliothèque.
+    Le filtre lisait le textContent de la carte, donc une lettre nommée
+    « LM Wavestone - … » faisait ressortir toutes les cartes portant un
+    formulaire au lieu des seules offres Wavestone.
+    """
+    _seed_offer(conn, company="Valeo", title="Ingénieur IA", location="Créteil", state="later")
+    _seed_offer(conn, company="Wavestone", title="Consultant IA", location="Paris", state="later")
+    _seed_library(conn, "cover_letter", "LM Wavestone - Consultant IA", "/tmp/lm.pdf")
+
+    page = render_page(conn)
+
+    # Le nom de la lettre est bien présent dans la page (les menus le listent)...
+    assert "LM Wavestone - Consultant IA" in page
+    # ...mais il ne doit apparaître dans aucune zone cherchable.
+    haystacks = re.findall(r'data-search="([^"]*)"', page)
+    assert haystacks, "les cartes doivent exposer data-search"
+    valeo = [h for h in haystacks if "valeo" in h]
+    assert valeo, "la carte Valeo doit être cherchable"
+    assert all("wavestone" not in h for h in valeo)
+
+    wavestone = [h for h in haystacks if "wavestone" in h]
+    assert len(wavestone) == 1
+    assert "consultant ia" in wavestone[0]
+    assert "paris" in wavestone[0]
+
+
+def test_search_haystack_is_accent_and_case_folded(conn: sqlite3.Connection) -> None:
+    """La comparaison côté JS est un simple includes : le serveur normalise."""
+    _seed_offer(conn, company="Éloïse & Co", title="Développeur IA", location="Lyon")
+
+    haystacks = re.findall(r'data-search="([^"]*)"', render_page(conn))
+
+    assert any("eloise" in h and "developpeur" in h for h in haystacks)
+
+
 def _seed_library(
     conn: sqlite3.Connection, doc_type: str, label: str, file_path: str
 ) -> int:
@@ -114,7 +155,7 @@ def _apply(conn: sqlite3.Connection, match_id: int, offer_id: int, note: str = "
     return application_id
 
 
-def _add_summary(conn: sqlite3.Connection, offer_id: int, *bullets: str) -> None:
+def _add_summary(conn: sqlite3.Connection, offer_id: int, *bullets: str) -> int:
     summary_id = int(
         conn.execute("INSERT INTO offer_summary (offer_id) VALUES (?)", (offer_id,)).lastrowid
     )
@@ -123,6 +164,7 @@ def _add_summary(conn: sqlite3.Connection, offer_id: int, *bullets: str) -> None
         ((summary_id, position, bullet) for position, bullet in enumerate(bullets)),
     )
     conn.commit()
+    return summary_id
 
 
 def _add_content(
@@ -433,12 +475,12 @@ def test_high_summary_renders_escaped_ordered_accessible_collapsible_block(
     page = render_page(conn)
     section = _section_html(page, "priority")
 
-    assert 'class="row row-new has-summary"' in section
-    assert 'class="card-toggle"' in section
+    assert 'class="row row-new"' in section
+    assert 'class="reader-tab summary-toggle"' in section
     assert 'aria-expanded="false"' in section
     assert 'aria-controls="summary-match-' in section
     assert 'aria-label="Afficher le résumé de AI &lt;Engineer&gt; &quot;Senior&quot;"' in section
-    assert 'class="summary-chevron"' in section
+    assert 'class="reader-tabs"' in section
     assert 'class="summary-panel"' in section
     assert "hidden" in section
     assert "En bref" in section
@@ -447,18 +489,44 @@ def test_high_summary_renders_escaped_ordered_accessible_collapsible_block(
     assert section.index("Premier") < section.index("Deuxième &amp; dernier")
 
 
-@pytest.mark.parametrize("fit", ["medium", "low", None])
-def test_summary_is_not_rendered_for_non_high_fit(
+@pytest.mark.parametrize("fit", ["high", "medium", "low", None])
+def test_summary_is_rendered_for_any_fit(
     conn: sqlite3.Connection, fit: str | None
 ) -> None:
+    """Depuis les résumés structurés systématiques, En bref s'affiche quel que soit le fit."""
     _match_id, offer_id = _seed_offer(conn, company=f"Co-{fit}", fit=fit)
-    _add_summary(conn, offer_id, "Fait masqué")
+    _add_summary(conn, offer_id, "Fait visible")
 
     page = render_page(conn)
 
-    assert "Fait masqué" not in page
-    assert "En bref" not in page
-    assert '<button class="card-toggle"' not in page
+    assert "Fait visible" in page
+    assert "En bref" in page
+    assert '<button class="reader-tab summary-toggle"' in page
+
+
+def test_summary_fields_render_labeled_lines(conn: sqlite3.Connection) -> None:
+    _match_id, offer_id = _seed_offer(conn, company="FieldsCo")
+    summary_id = _add_summary(conn, offer_id, "Puce mission")
+    conn.executemany(
+        "INSERT INTO summary_field (summary_id, key, value) VALUES (?, ?, ?)",
+        [
+            (summary_id, "experience", "3-5 ans"),
+            (summary_id, "salary", "non précisé"),
+            (summary_id, "remote", "hybride 2 jours"),
+            (summary_id, "stack", "Python, RAG"),
+        ],
+    )
+    conn.commit()
+
+    page = render_page(conn)
+
+    assert "Expérience souhaitée" in page
+    assert "3-5 ans" in page
+    assert "hybride 2 jours" in page
+    # Champ « non précisé » : affiché mais atténué
+    assert 'summary-field sf-empty' in page
+    # L'ordre d'affichage suit FIELD_LABELS : expérience avant stack
+    assert page.index("Expérience souhaitée") < page.index("Stack")
 
 
 def test_high_without_summary_has_no_empty_summary_space(conn: sqlite3.Connection) -> None:
@@ -468,7 +536,7 @@ def test_high_without_summary_has_no_empty_summary_space(conn: sqlite3.Connectio
 
     assert "En bref" not in page
     assert '<div class="summary-panel"' not in page
-    assert 'class="row row-new has-summary"' not in page
+    assert 'class="reader-tab summary-toggle"' not in page
 
 
 def test_high_application_renders_its_summary(conn: sqlite3.Connection) -> None:
@@ -483,7 +551,7 @@ def test_high_application_renders_its_summary(conn: sqlite3.Connection) -> None:
     assert 'aria-controls="summary-application-' in applied
 
 
-def test_summary_toggle_script_preserves_external_link_interaction(
+def test_summary_reader_preserves_external_link_interaction(
     conn: sqlite3.Connection,
 ) -> None:
     _match_id, offer_id = _seed_offer(conn, company="HighCo", fit="high")
@@ -491,9 +559,8 @@ def test_summary_toggle_script_preserves_external_link_interaction(
 
     page = render_page(conn)
 
-    assert "button.addEventListener('click'" in page
-    assert "button.setAttribute('aria-expanded'" in page
-    assert "panel.hidden = expanded" in page
+    assert 'class="reader-tab summary-toggle"' in page
+    assert 'class="card-reader"' in page
     assert 'target="_blank"' in page
     assert ".meta a { position:relative; z-index:3" in page
     assert "pointer-events:auto" in page
@@ -506,10 +573,10 @@ def test_content_panel_renders_escaped_and_collapsible(conn: sqlite3.Connection)
     page = render_page(conn)
     section = _section_html(page, "new")
 
-    assert 'class="content-toggle"' in section
+    assert 'class="reader-tab offer-toggle"' in section
     assert 'aria-expanded="false"' in section
     assert 'aria-controls="content-match-' in section
-    assert "Annonce complète" in section
+    assert ">Annonce</button>" in section
     assert 'class="content-panel"' in section
     assert "hidden" in section
     assert "Poste &lt;script&gt;alert(1)&lt;/script&gt;" in section
@@ -522,7 +589,7 @@ def test_content_panel_absent_without_offer_content(conn: sqlite3.Connection) ->
 
     page = render_page(conn)
 
-    assert '<button class="content-toggle"' not in page
+    assert '<button class="reader-tab offer-toggle"' not in page
     assert '<div class="content-panel"' not in page
 
 
@@ -532,8 +599,149 @@ def test_content_panel_absent_when_fetch_failed(conn: sqlite3.Connection) -> Non
 
     page = render_page(conn)
 
-    assert '<button class="content-toggle"' not in page
+    assert '<button class="reader-tab offer-toggle"' not in page
     assert '<div class="content-panel"' not in page
+
+
+def test_markdown_to_html_renders_heading_as_styled_paragraph() -> None:
+    """Pas de vraie balise <h1>-<h6> : ça casserait la hiérarchie de titres de la carte."""
+    assert _markdown_to_html("## Missions") == '<p class="md-heading">Missions</p>'
+
+
+def test_markdown_to_html_ignores_hash_without_space() -> None:
+    assert _markdown_to_html("#recrutement2026") == "<p>#recrutement2026</p>"
+
+
+def test_markdown_to_html_renders_bold_and_italic() -> None:
+    assert _markdown_to_html("**Stack**: *Python*") == "<p><strong>Stack</strong>: <em>Python</em></p>"
+
+
+def test_markdown_to_html_leaves_lone_asterisk_untouched() -> None:
+    """Un astérisque isolé (ex: note de salaire '40-50k*') ne doit pas être avalé."""
+    assert _markdown_to_html("Salaire 40-50k*") == "<p>Salaire 40-50k*</p>"
+
+
+def test_markdown_to_html_renders_flat_unordered_list() -> None:
+    html_out = _markdown_to_html("- Python\n- SQL")
+    assert html_out == "<ul><li>Python</li><li>SQL</li></ul>"
+
+
+def test_markdown_to_html_renders_ordered_list() -> None:
+    html_out = _markdown_to_html("1. Entretien RH\n2. Entretien technique")
+    assert html_out == "<ol><li>Entretien RH</li><li>Entretien technique</li></ol>"
+
+
+def test_markdown_to_html_switches_list_type_without_blank_line() -> None:
+    html_out = _markdown_to_html("- Python\n1. Entretien RH")
+    assert html_out == "<ul><li>Python</li></ul><ol><li>Entretien RH</li></ol>"
+
+
+def test_markdown_to_html_renders_safe_link() -> None:
+    html_out = _markdown_to_html("Voir [le site](https://example.com/careers)")
+    assert (
+        '<a href="https://example.com/careers" target="_blank" '
+        'rel="noopener noreferrer">le site</a>' in html_out
+    )
+
+
+def test_markdown_to_html_degrades_unsafe_link_scheme_to_label_only() -> None:
+    """Ni lien ni syntaxe brute : le contenu réel regorge de liens relatifs/ancre
+    de navigation scrapés (ex. '#main-content'), les laisser en littéral donnerait
+    une impression de rendu cassé sur une bonne partie des annonces."""
+    html_out = _markdown_to_html("[cliquer](javascript:malicious)")
+    assert "<a " not in html_out
+    assert "javascript:" not in html_out
+    assert html_out == "<p>cliquer</p>"
+
+
+def test_markdown_to_html_degrades_relative_nav_link_to_label_only() -> None:
+    html_out = _markdown_to_html("[Skip to main content](#main-content)")
+    assert "<a " not in html_out
+    assert html_out == "<p>Skip to main content</p>"
+
+
+def test_markdown_to_html_renders_titled_link() -> None:
+    html_out = _markdown_to_html('[Wavestone](https://www.wavestone.com/ "Wavestone")')
+    assert (
+        '<a href="https://www.wavestone.com/" target="_blank" '
+        'rel="noopener noreferrer">Wavestone</a>' in html_out
+    )
+
+
+def test_markdown_to_html_renders_link_with_parens_in_url() -> None:
+    """Motif réel (choisirleservicepublic.gouv.fr) : une URL peut contenir des parenthèses."""
+    html_out = _markdown_to_html("[Fiche](https://example.gouv.fr/metiers/ingenieur(e)/)")
+    assert (
+        '<a href="https://example.gouv.fr/metiers/ingenieur(e)/" target="_blank" '
+        'rel="noopener noreferrer">Fiche</a>' in html_out
+    )
+
+
+def test_markdown_to_html_degrades_mailto_with_raw_spaces_to_label_only() -> None:
+    """Motif réel (partage par email) : espaces bruts non encodés dans l'URL,
+    et un titre optionnel en fin de parenthèse ne doit pas être avalé par l'URL."""
+    html_out = _markdown_to_html(
+        '[Partager par email](mailto:?subject=Une offre &body=Voir ici "Partager par email")'
+    )
+    assert "<a " not in html_out
+    assert html_out == "<p>Partager par email</p>"
+
+
+def test_markdown_to_html_renders_clickable_logo_as_plain_link() -> None:
+    """Motif réel des offres scrapées : logo cliquable [![alt](image)](lien)."""
+    html_out = _markdown_to_html(
+        "[![Wavestone logo](https://c.example.com/logo.png)](https://www.wavestone.com/)"
+    )
+    assert (
+        '<a href="https://www.wavestone.com/" target="_blank" '
+        'rel="noopener noreferrer">Wavestone logo</a>' in html_out
+    )
+    assert "![" not in html_out
+
+
+def test_markdown_to_html_drops_standalone_image() -> None:
+    html_out = _markdown_to_html("![Decorative banner](https://example.com/banner.png)")
+    assert html_out == "<p>Decorative banner</p>"
+
+
+def test_markdown_to_html_renders_underlined_setext_heading() -> None:
+    """markdownify produit ce style par défaut pour les h1/h2 (pas de #) ; une
+    ligne de séparation visuelle marque la coupure de section sous le titre."""
+    html_out = _markdown_to_html("Missions\n========\n\nTexte.")
+    assert html_out == '<p class="md-heading">Missions</p><hr><p>Texte.</p>'
+
+
+def test_markdown_to_html_drops_bare_heading_marker() -> None:
+    """Motif réel (offre Valeo) : '#### ' sans texte (logo d'entreprise réduit
+    à rien par markdownify) ne doit pas laisser '####' apparaître littéralement."""
+    html_out = _markdown_to_html("#### \n\nValeo")
+    assert "#" not in html_out
+    assert html_out == "<p>Valeo</p>"
+
+
+def test_markdown_to_html_renders_horizontal_rule() -> None:
+    """Une ligne de --- seule (pas de texte juste avant) devient une vraie
+    séparation visuelle, comme sur Obsidian, au lieu de tirets littéraux."""
+    html_out = _markdown_to_html("Texte 1.\n\n---\n\nTexte 2.")
+    assert html_out == "<p>Texte 1.</p><hr><p>Texte 2.</p>"
+
+
+def test_markdown_to_html_renders_long_horizontal_rule() -> None:
+    html_out = _markdown_to_html("Texte 1.\n\n----------------------------\n\nTexte 2.")
+    assert html_out == "<p>Texte 1.</p><hr><p>Texte 2.</p>"
+
+
+def test_markdown_to_html_horizontal_rule_does_not_break_setext_heading() -> None:
+    """--- juste après une ligne de texte (sans ligne blanche) reste un titre
+    souligné suivi de sa ligne, pas un --- littéral ni un titre sans ligne."""
+    html_out = _markdown_to_html("Titre\n---\n\nTexte.")
+    assert html_out == '<p class="md-heading">Titre</p><hr><p>Texte.</p>'
+
+
+def test_markdown_to_html_escapes_html_inside_formatting() -> None:
+    html_out = _markdown_to_html("**<script>alert(1)</script>**")
+    assert "<script>" not in html_out
+    assert "<strong>&lt;script&gt;alert(1)&lt;/script&gt;</strong>" in html_out
 
 
 def test_content_panel_independent_from_summary_panel(conn: sqlite3.Connection) -> None:
@@ -562,7 +770,7 @@ def test_content_panel_rendered_for_low_fit_and_no_summary(conn: sqlite3.Connect
 
     page = render_page(conn)
 
-    assert "content-toggle" in page
+    assert "offer-toggle" in page
     assert "Texte complet peu importe le fit." in page
 
 
@@ -574,7 +782,7 @@ def test_content_panel_renders_for_application(conn: sqlite3.Connection) -> None
     page = render_page(conn)
     applied = _section_html(page, "applied")
 
-    assert "content-toggle" in applied
+    assert "offer-toggle" in applied
     assert 'aria-controls="content-application-' in applied
     assert "Annonce complete pour une candidature." in applied
 
@@ -1188,7 +1396,8 @@ def test_post_documents_uploads_and_returns_library_entry(tmp_path: Path) -> Non
     server, thread = _start_server(db_path)
     try:
         port = server.server_address[1]
-        content = base64.b64encode(b"contenu pdf").decode("ascii")
+        pdf = b"%PDF-1.4\ncontenu pdf"
+        content = base64.b64encode(pdf).decode("ascii")
         status, headers, body = _json_post(
             port,
             "/documents",
@@ -1209,7 +1418,7 @@ def test_post_documents_uploads_and_returns_library_entry(tmp_path: Path) -> Non
         assert row["label"] == "CV principal"
         file_path = Path(row["file_path"])
         assert file_path.parent == db_path.parent / "documents"
-        assert file_path.read_bytes() == b"contenu pdf"
+        assert file_path.read_bytes() == pdf
     finally:
         server.shutdown()
         server.server_close()
@@ -1224,7 +1433,7 @@ def test_post_documents_sanitizes_traversal_filename(tmp_path: Path) -> None:
     server, thread = _start_server(db_path)
     try:
         port = server.server_address[1]
-        content = base64.b64encode(b"malicious").decode("ascii")
+        content = base64.b64encode(b"%PDF-1.4\nmalicious").decode("ascii")
         status, _headers, body = _json_post(
             port,
             "/documents",
@@ -1275,6 +1484,27 @@ def test_post_documents_rejects_invalid_type(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
+def test_post_documents_rejects_non_pdf_cv(tmp_path: Path) -> None:
+    db_path = tmp_path / "jw.db"
+    connection = connect(db_path)
+    init_db(connection)
+    connection.close()
+    server, thread = _start_server(db_path)
+    try:
+        content = base64.b64encode(b"not a pdf").decode("ascii")
+        status, _headers, body = _json_post(
+            server.server_address[1],
+            "/documents",
+            {"filename": "cv.pdf", "type": "cv", "label": "", "content_base64": content},
+        )
+        assert status == 400
+        assert "fichier PDF" in json.loads(body)["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_post_documents_rejects_missing_fields(tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     connection = connect(db_path)
@@ -1301,7 +1531,7 @@ def test_uploaded_document_appears_in_dropdown_on_next_render(tmp_path: Path) ->
     server, thread = _start_server(db_path)
     try:
         port = server.server_address[1]
-        content = base64.b64encode(b"x").decode("ascii")
+        content = base64.b64encode(b"%PDF-1.4\nx").decode("ascii")
         status, _headers, body = _json_post(
             port,
             "/documents",
@@ -1437,3 +1667,25 @@ def test_http_document_preview_serves_library_file(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_matches_of_a_config_deactivated_search_stay_visible(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="Bridge", title="Data Engineer", search="suivi-importe")
+    conn.execute("UPDATE search SET active = 0 WHERE name = 'suivi-importe'")
+    conn.commit()
+
+    page = render_page(conn, "engineer")
+
+    assert "Bridge" in page
+
+
+def test_matches_of_an_archived_category_are_hidden(conn: sqlite3.Connection) -> None:
+    _seed_offer(conn, company="Ancienne", title="Data Engineer", search="Data")
+    conn.execute(
+        "UPDATE search SET active = 0, archived_at = datetime('now') WHERE name = 'Data'"
+    )
+    conn.commit()
+
+    page = render_page(conn, "engineer")
+
+    assert "Ancienne" not in page

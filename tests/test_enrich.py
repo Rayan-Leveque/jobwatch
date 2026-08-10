@@ -9,7 +9,7 @@ import pytest
 
 from jobwatch.config import EnrichConfig
 from jobwatch.db import connect, init_db
-from jobwatch.enrich import EnrichError, enrich
+from jobwatch.enrich import FIELD_UNKNOWN, EnrichError, enrich
 
 
 @pytest.fixture()
@@ -26,7 +26,9 @@ def _seed_offer(
     source_name: str = "france_travail",
     url: str = "https://example.com/offer-1",
     title: str = "AI Engineer",
+    match_state: str | None = "new",
 ) -> int:
+    """Sème une offre, avec un match actif par défaut (enrich ignore le reste)."""
     conn.execute("INSERT OR IGNORE INTO source (type, name) VALUES (?, ?)", (source_type, source_name))
     source_id = conn.execute(
         "SELECT id FROM source WHERE name = ?", (source_name,)
@@ -37,7 +39,19 @@ def _seed_offer(
         "INSERT INTO offer (source_id, company_id, title, url) VALUES (?, ?, ?, ?)",
         (source_id, company_id, title, url),
     )
-    return int(cur.lastrowid)
+    offer_id = int(cur.lastrowid)
+    if match_state is not None:
+        conn.execute(
+            "INSERT OR IGNORE INTO search (name, include_json, exclude_json, locations_json) "
+            "VALUES ('test', '[]', '[]', '[]')"
+        )
+        search_id = conn.execute("SELECT id FROM search WHERE name = 'test'").fetchone()["id"]
+        conn.execute(
+            "INSERT INTO match (search_id, offer_id, state) VALUES (?, ?, ?)",
+            (search_id, offer_id, match_state),
+        )
+    conn.commit()
+    return offer_id
 
 
 def _config() -> EnrichConfig:
@@ -63,17 +77,48 @@ def test_enrich_without_config_raises() -> None:
         enrich(conn, None)
 
 
-def test_enrich_ignores_bridge_offers(conn: sqlite3.Connection) -> None:
-    """Les offres du bridge ai-job-search (type 'web'/'import') ne sont jamais enrichies."""
-    _seed_offer(conn, source_type="web", source_name="linkedin", url="https://linkedin.com/x")
+def test_enrich_ignores_offers_without_active_match(conn: sqlite3.Connection) -> None:
+    """Sans match new/seen/later ni candidature, aucune offre n'est enrichie (aucun token)."""
+    _seed_offer(conn, url="https://example.com/no-match", match_state=None)
+    _seed_offer(
+        conn, url="https://example.com/discarded", match_state="discarded"
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("no fetch expected for bridge offers")
+        raise AssertionError("no fetch expected for inactive offers")
 
     result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
     assert result.fetched_ok == 0
     assert result.fetched_failed == 0
     assert conn.execute("SELECT COUNT(*) AS n FROM offer_content").fetchone()["n"] == 0
+
+
+def test_enrich_processes_bridge_offers_with_active_match(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """Les offres importées du bridge sont enrichies dès qu'un match les rend visibles."""
+    offer_id = _seed_offer(
+        conn, source_type="web", source_name="linkedin", url="https://linkedin.com/x"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=LONG_HTML)
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: ({"experience": "junior"}, {}, ["Poste IA"]),
+    )
+    result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+    assert result.fetched_ok == 1
+    assert result.summaries_written == 1
+    assert result.fields_written == 1
+    field = conn.execute(
+        "SELECT sf.value AS value FROM summary_field sf "
+        "JOIN offer_summary os ON os.id = sf.summary_id "
+        "WHERE os.offer_id = ? AND sf.key = 'experience'",
+        (offer_id,),
+    ).fetchone()
+    assert field["value"] == "junior"
 
 
 def test_enrich_stores_content_and_summary(conn: sqlite3.Connection, monkeypatch) -> None:
@@ -82,7 +127,10 @@ def test_enrich_stores_content_and_summary(conn: sqlite3.Connection, monkeypatch
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=LONG_HTML)
 
-    monkeypatch.setattr("jobwatch.enrich._summarize", lambda config, markdown: ["Poste IA", "Paris"])
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: ({"experience": "3 ans"}, {}, ["Poste IA", "Paris"]),
+    )
 
     result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
 
@@ -128,12 +176,8 @@ def test_enrich_does_not_overwrite_manual_summary(conn: sqlite3.Connection, monk
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=LONG_HTML)
 
-    called = False
-
     def fake_summarize(config, markdown):
-        nonlocal called
-        called = True
-        return ["ne doit jamais être écrit"]
+        return {"experience": "5 ans"}, {}, ["ne doit jamais être écrit"]
 
     monkeypatch.setattr("jobwatch.enrich._summarize", fake_summarize)
 
@@ -141,7 +185,7 @@ def test_enrich_does_not_overwrite_manual_summary(conn: sqlite3.Connection, monk
 
     assert result.fetched_ok == 1
     assert result.summaries_written == 0
-    assert called is False
+    assert result.fields_written == 1
 
     row = conn.execute(
         "SELECT source FROM offer_summary WHERE offer_id = ?", (offer_id,)
@@ -288,3 +332,305 @@ def test_enrich_sleeps_between_offers(conn: sqlite3.Connection, monkeypatch) -> 
 
     assert len(sleeps) == 1  # entre les 2 offres, jamais après la dernière
     assert 1.0 <= sleeps[0] <= 2.0
+
+
+def test_parse_summary_extracts_fields_and_bullets() -> None:
+    from jobwatch.enrich import _parse_summary
+
+    text = (
+        "EXPERIENCE: 3-5 ans\n"
+        "SALAIRE: 45-55k\n"
+        "TELETRAVAIL: hybride 2 jours\n"
+        "STACK: Python, RAG, AWS\n"
+        "- Poste d'ingénieur IA\n"
+        "- CDI à Paris\n"
+    )
+    fields, quotes, bullets = _parse_summary(text)
+    assert fields == {
+        "experience": "3-5 ans",
+        "salary": "45-55k",
+        "remote": "hybride 2 jours",
+        "stack": "Python, RAG, AWS",
+    }
+    assert quotes == {}
+    assert bullets == ["Poste d'ingénieur IA", "CDI à Paris"]
+
+
+def test_parse_summary_tolerates_noise_and_missing_fields() -> None:
+    from jobwatch.enrich import _parse_summary
+
+    text = "Voici le résumé :\n**SALAIRE:** \n- Une puce\nTexte libre ignoré\n"
+    fields, quotes, bullets = _parse_summary(text)
+    assert fields == {"salary": "non précisé"}
+    assert quotes == {}
+    assert bullets == ["Une puce"]
+
+
+def test_summary_only_keeps_citations_found_in_offer_text() -> None:
+    from jobwatch.enrich import _parse_summary, _verified_quotes
+
+    text = (
+        "EXPERIENCE: 3 ans\n"
+        "EXPERIENCE_CITATION: Vous avez au moins 3 ans d’expérience.\n"
+        "SALAIRE: 60k\n"
+        "SALAIRE_CITATION: Salaire annuel garanti de 60k.\n"
+        "- Mission IA\n"
+    )
+    fields, quotes, bullets = _parse_summary(text)
+
+    verified = _verified_quotes(
+        quotes,
+        "Le profil recherché : vous avez au moins 3 ans d’expérience.",
+    )
+
+    assert fields == {"experience": "3 ans", "salary": "60k"}
+    assert verified == {"experience": "Vous avez au moins 3 ans d’expérience."}
+    assert bullets == ["Mission IA"]
+
+
+def test_enrich_adds_fields_to_offer_with_content_without_refetch(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """Backfill : contenu déjà en base -> champs ajoutés sans aucun fetch web."""
+    offer_id = _seed_offer(conn, match_state="later")
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
+        "VALUES (?, 'Annonce IA détaillée.', 'http', 'ok')",
+        (offer_id,),
+    )
+    cur = conn.execute(
+        "INSERT INTO offer_summary (offer_id, source) VALUES (?, 'auto')", (offer_id,)
+    )
+    conn.execute(
+        "INSERT INTO summary_bullet (summary_id, position, text) VALUES (?, 0, 'ancienne puce')",
+        (int(cur.lastrowid),),
+    )
+    conn.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no fetch expected: content already stored")
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: ({"experience": "senior"}, {}, ["nouvelle puce ignorée"]),
+    )
+    sleeps: list[float] = []
+    result = enrich(conn, _config(), client=_http_client(handler), sleep=sleeps.append)
+
+    assert result.fetched_ok == 0
+    assert result.fields_written == 1
+    assert result.summaries_written == 0
+    assert sleeps == []  # pas de fetch web, pas de pause anti-martèlement
+    bullets = [
+        row["text"]
+        for row in conn.execute(
+            "SELECT text FROM summary_bullet sb "
+            "JOIN offer_summary os ON os.id = sb.summary_id WHERE os.offer_id = ?",
+            (offer_id,),
+        )
+    ]
+    assert bullets == ["ancienne puce"]
+
+    # Une fois les champs écrits, l'offre n'est plus jamais retraitée.
+    second = enrich(conn, _config(), client=_http_client(handler), sleep=sleeps.append)
+    assert second.fields_written == 0
+
+
+def test_summarize_passes_variant_to_opencode(monkeypatch) -> None:
+    import json
+    import subprocess as sp
+
+    from jobwatch.enrich import _summarize
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        event = json.dumps({"type": "text", "part": {"text": "EXPERIENCE: 2 ans\n- Puce"}})
+        return sp.CompletedProcess(command, 0, stdout=event, stderr="")
+
+    monkeypatch.setattr("jobwatch.enrich.subprocess.run", fake_run)
+    result = _summarize(
+        EnrichConfig(opencode_bin="opencode", model="opencode-go/gpt-5.6-luna", variant="max"),
+        "texte d'offre",
+    )
+    assert result == ({"experience": "2 ans"}, {}, ["Puce"])
+    command = captured["command"]
+    assert command[command.index("--variant") + 1] == "max"
+    assert command[command.index("--model") + 1] == "opencode-go/gpt-5.6-luna"
+
+    # Sans variant configuré, le drapeau n'apparaît pas.
+    _summarize(EnrichConfig(opencode_bin="opencode", model="m"), "texte")
+    assert "--variant" not in captured["command"]
+
+
+def test_enrich_summarizes_in_parallel_pool(conn: sqlite3.Connection, monkeypatch) -> None:
+    """Les résumés partent en parallèle : deux appels simultanés observés avec 2 workers."""
+    import threading as th
+    import time as time_mod
+
+    for i in range(3):
+        _seed_offer(conn, url=f"https://example.com/par-{i}")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=LONG_HTML)
+
+    active = 0
+    peak = 0
+    lock = th.Lock()
+
+    def slow_summarize(config, markdown):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time_mod.sleep(0.05)
+        with lock:
+            active -= 1
+        return {"experience": "x"}, {}, ["puce"]
+
+    monkeypatch.setattr("jobwatch.enrich._summarize", slow_summarize)
+    config = EnrichConfig(opencode_bin="opencode", model="m", concurrency=2)
+    result = enrich(conn, config, client=_http_client(handler), sleep=_no_sleep)
+
+    assert result.summaries_written == 3
+    assert result.fields_written == 3
+    assert peak == 2  # borné par concurrency, mais bien parallèle
+
+
+def test_config_parses_codex_runner(tmp_path) -> None:
+    from jobwatch.config import ConfigError, load_config
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "enrich:\n"
+        "  runner: codex\n"
+        "  model: gpt-5.6-luna\n"
+        "  variant: max\n"
+    )
+    config = load_config(config_file).enrich
+    assert config is not None
+    assert config.runner == "codex"
+    assert config.codex_bin == "codex"
+    assert config.model == "gpt-5.6-luna"
+
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "enrich:\n"
+        "  runner: gemini\n"
+        "  model: m\n"
+    )
+    import pytest as _pytest
+
+    with _pytest.raises(ConfigError, match="runner"):
+        load_config(config_file)
+
+    # Le runner opencode exige toujours opencode_bin explicitement.
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "enrich:\n"
+        "  model: m\n"
+    )
+    with _pytest.raises(ConfigError, match="opencode_bin"):
+        load_config(config_file)
+
+
+def test_summarize_codex_builds_command_and_reads_output(monkeypatch) -> None:
+    import subprocess as sp
+    from pathlib import Path as P
+
+    from jobwatch.enrich import _summarize
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["input"] = kwargs.get("input")
+        out_path = P(command[command.index("-o") + 1])
+        out_path.write_text("EXPERIENCE: 4 ans\nSALAIRE: 50k\n- Mission IA\n", encoding="utf-8")
+        return sp.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("jobwatch.enrich.subprocess.run", fake_run)
+    config = EnrichConfig(model="gpt-5.6-luna", runner="codex", variant="max")
+    result = _summarize(config, "texte de l'offre")
+
+    assert result == ({"experience": "4 ans", "salary": "50k"}, {}, ["Mission IA"])
+    command = captured["command"]
+    assert command[:2] == ["codex", "exec"]
+    assert command[command.index("--model") + 1] == "gpt-5.6-luna"
+    assert "model_reasoning_effort=max" in command
+    assert "-s" in command and command[command.index("-s") + 1] == "read-only"
+    assert "--ignore-user-config" in command
+    disabled = {command[index + 1] for index, item in enumerate(command) if item == "--disable"}
+    assert disabled == {"shell_tool", "code_mode_host", "apps", "plugins"}
+    assert captured["input"] == "texte de l'offre"
+
+
+def test_summarize_opencode_denies_every_tool_by_name(monkeypatch) -> None:
+    """opencode.json et OPENCODE_PERMISSION sont les contrats lus par opencode."""
+    import json
+    import subprocess as sp
+    from pathlib import Path as P
+
+    from jobwatch.enrich import OPENCODE_TOOLS, _summarize
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["file"] = json.loads(
+            (P(kwargs["cwd"]) / "opencode.json").read_text(encoding="utf-8")
+        )
+        captured["env"] = json.loads(kwargs["env"]["OPENCODE_PERMISSION"])
+        event = json.dumps({"type": "text", "part": {"text": "EXPERIENCE: 2 ans\n- Puce"}})
+        return sp.CompletedProcess(command, 0, stdout=event, stderr="")
+
+    monkeypatch.setattr("jobwatch.enrich.subprocess.run", fake_run)
+    _summarize(EnrichConfig(opencode_bin="opencode", model="m"), "texte d'offre")
+
+    assert "--pure" in captured["command"]
+    expected = {"*": "deny", **{tool: "deny" for tool in OPENCODE_TOOLS}}
+    assert captured["file"]["permission"] == expected
+    assert captured["env"] == expected
+
+
+def test_enrich_logs_one_line_per_offer_and_counts_the_run(
+    conn: sqlite3.Connection, monkeypatch, caplog
+) -> None:
+    """Un run doit laisser une trace : ligne par offre en -v, bilan chiffré toujours."""
+    import logging as logging_mod
+
+    _seed_offer(conn, url="https://example.com/log-1")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=LONG_HTML)
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: (
+            {"experience": "3 ans", "salary": FIELD_UNKNOWN},
+            {"experience": "Ingénieur IA Paris"},
+            ["Poste IA"],
+        ),
+    )
+    with caplog.at_level(logging_mod.INFO, logger="jobwatch.enrich"):
+        result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("https://example.com/log-1" in message for message in messages)
+    assert any("car." in message for message in messages)
+
+    assert sum(result.extract_methods.values()) == 1
+    assert result.raw_chars > 0
+    assert result.kept_chars > 0
+    assert result.quotes_verified == 1
+    # 'non précisé' n'est pas un champ sans citation : il n'y a rien à ancrer.
+    assert result.quotes_rejected == 0
+
+    line = result.summary_line()
+    assert "extraction" in line
+    assert "citation(s) vérifiée(s)" in line

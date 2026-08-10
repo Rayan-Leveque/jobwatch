@@ -289,7 +289,7 @@ def test_run_job_without_offer_content_falls_back_with_warning(
     job_id = _seed_job(conn, match_id, cv_id)
     conn.close()
 
-    monkeypatch.setattr(draft, "_fetch_and_convert", lambda url, client: (None, None))
+    monkeypatch.setattr(draft, "_fetch_and_extract", lambda url, client: (None, None, None))
     monkeypatch.setattr(draft, "_call_llm", lambda config, prompt, bundle: MINIMAL_TEX)
     run_job(db_path, _config(tmp_path), job_id)
 
@@ -323,11 +323,13 @@ def test_run_job_failure_lands_in_error(db_path: Path, tmp_path: Path, monkeypat
 # ---------------------------------------------------------------- rendu HTML
 
 
-def test_render_page_hides_draft_button_when_disabled(db_path: Path) -> None:
+def test_render_page_hides_letter_reader_when_draft_disabled(db_path: Path) -> None:
     conn = _conn(db_path)
     _seed_match(conn)
-    assert ">Générer LM</button>" not in render_page(conn)
-    assert ">Générer LM</button>" in render_page(conn, draft_enabled=True)
+    assert 'class="reader-tab letter-toggle' not in render_page(conn)
+    enabled = render_page(conn, draft_enabled=True)
+    assert 'class="reader-tab letter-toggle letter-empty"' in enabled
+    assert ">Lettre</span></button>" in enabled
     conn.close()
 
 
@@ -340,6 +342,27 @@ def test_render_page_shows_running_state(db_path: Path, tmp_path: Path) -> None:
     conn.close()
     assert 'data-status="running"' in page
     assert "Génération de la lettre en cours" in page
+
+
+def test_render_page_shows_completed_letter_in_reader(db_path: Path, tmp_path: Path) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    job_id = _seed_job(conn, match_id, cv_id)
+    conn.execute(
+        "UPDATE draft_job SET status = 'ok', tex_path = 'letter.tex', "
+        "pdf_path = 'letter.pdf', png_pages = 1 WHERE id = ?",
+        (job_id,),
+    )
+    conn.commit()
+
+    page = render_page(conn, draft_enabled=True)
+    conn.close()
+
+    assert 'class="reader-tab letter-toggle letter-ok"' in page
+    assert "Lettre · prête" in page
+    assert ">Régénérer la lettre</button>" in page
+    assert f'/match/{match_id}/letter/1.png' in page
 
 
 # ---------------------------------------------------------------- serveur HTTP
@@ -573,6 +596,33 @@ def test_render_swipe_page_without_draft_config(db_path: Path) -> None:
     assert 'id="batch-btn"' not in page
 
 
+def test_swipe_done_offers_a_way_out(db_path: Path, tmp_path: Path) -> None:
+    """La fin du tri propose un retour explicite ; l'avancement part dans la pastille."""
+    conn = _conn(db_path)
+    _seed_match(conn)
+    _seed_cv(conn, tmp_path)
+    page = render_swipe_page(conn, draft_enabled=True)
+    conn.close()
+    assert 'class="card-action done-back" href="/"' in page
+    assert 'data-back-href="/"' in page
+    assert "window.location.assign(backHref)" in page
+    assert "Signaler un bug" in page
+    assert 'id="batch-badge"' in page
+    assert 'id="batch-progress"' not in page
+
+
+def test_batch_badge_follows_to_the_dashboard(db_path: Path, tmp_path: Path) -> None:
+    """Le tableau de bord affiche le même badge d'avancement, piste comprise."""
+    conn = _conn(db_path)
+    _seed_match(conn)
+    page = render_page(conn, track="project", draft_enabled=True)
+    plain = render_page(conn)
+    conn.close()
+    assert 'id="batch-badge"' in page
+    assert 'data-track="project"' in page
+    assert 'id="batch-badge"' not in plain
+
+
 def test_http_swipe_routes(db_path: Path, tmp_path: Path) -> None:
     server, thread = _start_server(db_path, _config(tmp_path))
     try:
@@ -687,10 +737,11 @@ def test_run_job_processes_queued_job(db_path: Path, tmp_path: Path, monkeypatch
     assert job["status"] == "ok"
 
 
-def test_render_page_shows_swipe_invites_only_with_new_offers(db_path: Path) -> None:
+def test_render_page_keeps_swipe_button_and_only_prompts_for_new_offers(db_path: Path) -> None:
     conn = _conn(db_path)
     page = render_page(conn)
-    assert 'href="/swipe"' not in page
+    assert 'class="swipe-fab" href="/swipe"' in page
+    assert 'aria-label="Ouvrir le tri des offres"' in page
     assert 'id="swipe-popup"' not in page
     _seed_match(conn)
     page = render_page(conn)
@@ -699,3 +750,99 @@ def test_render_page_shows_swipe_invites_only_with_new_offers(db_path: Path) -> 
     assert "C'est le moment de swiper." in page
     assert 'swipe-fab-count">1<' in page
     conn.close()
+
+
+def test_config_parses_codex_draft_runner(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "draft:\n"
+        "  runner: codex\n"
+        "  model: gpt-5.6-luna\n"
+        "  variant: max\n"
+    )
+    config = load_config(config_file).draft
+    assert config is not None
+    assert config.runner == "codex"
+    assert config.codex_bin == "codex"
+    assert config.variant == "max"
+
+    # Le runner opencode exige toujours opencode_bin explicitement.
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "draft:\n"
+        "  model: m\n"
+    )
+    with pytest.raises(ConfigError, match="opencode_bin"):
+        load_config(config_file)
+
+
+def test_call_llm_codex_builds_command_and_reads_output(monkeypatch) -> None:
+    import subprocess as sp
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["input"] = kwargs.get("input")
+        out_path = Path(command[command.index("-o") + 1])
+        out_path.write_text(MINIMAL_TEX, encoding="utf-8")
+        return sp.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("jobwatch.draft.subprocess.run", fake_run)
+    config = DraftConfig(model="gpt-5.6-luna", runner="codex", variant="max")
+    text = draft._call_llm(config, "Rédige la lettre.", "# OFFRE\n\ncontenu")
+
+    assert text == MINIMAL_TEX
+    command = captured["command"]
+    assert command[:2] == ["codex", "exec"]
+    assert command[command.index("--model") + 1] == "gpt-5.6-luna"
+    assert "model_reasoning_effort=max" in command
+    assert command[command.index("-s") + 1] == "read-only"
+    assert "--ignore-user-config" in command
+    disabled = {command[index + 1] for index, item in enumerate(command) if item == "--disable"}
+    assert disabled == {"shell_tool", "code_mode_host", "apps", "plugins"}
+    assert captured["input"] == "# OFFRE\n\ncontenu"
+    assert command[-1].endswith("Rédige la lettre.")
+
+
+def test_call_llm_codex_failure_raises_drafterror(monkeypatch) -> None:
+    import subprocess as sp
+
+    monkeypatch.setattr(
+        "jobwatch.draft.subprocess.run",
+        lambda command, **kwargs: sp.CompletedProcess(command, 1, stdout="", stderr="boom"),
+    )
+    config = DraftConfig(model="m", runner="codex")
+    with pytest.raises(DraftError, match="codex"):
+        draft._call_llm(config, "prompt", "bundle")
+
+
+def test_call_opencode_denies_every_tool_by_name(monkeypatch) -> None:
+    """opencode.json et OPENCODE_PERMISSION sont les contrats lus par opencode."""
+    import subprocess as sp
+
+    from jobwatch.enrich import OPENCODE_TOOLS
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["file"] = json.loads(
+            (Path(kwargs["cwd"]) / "opencode.json").read_text(encoding="utf-8")
+        )
+        captured["env"] = json.loads(kwargs["env"]["OPENCODE_PERMISSION"])
+        event = json.dumps({"type": "text", "part": {"text": MINIMAL_TEX}})
+        return sp.CompletedProcess(command, 0, stdout=event, stderr="")
+
+    monkeypatch.setattr("jobwatch.draft.subprocess.run", fake_run)
+    config = DraftConfig(model="m", runner="opencode")
+    text = draft._call_llm(config, "Rédige la lettre.", "# OFFRE\n\ncontenu")
+
+    assert text.strip() == MINIMAL_TEX.strip()
+    assert "--pure" in captured["command"]
+    expected = {"*": "deny", **{tool: "deny" for tool in OPENCODE_TOOLS}}
+    assert captured["file"]["permission"] == expected
+    assert captured["env"] == expected

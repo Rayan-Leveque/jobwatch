@@ -10,20 +10,24 @@ et la carte restait figée sans toast d'annulation.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from test_serve import _seed_offer
+from test_serve import _add_content, _add_summary, _seed_offer
 
+import jobwatch.serve as serve_module
+from jobwatch.auth import create_invite
+from jobwatch.config import DraftConfig
 from jobwatch.db import connect, init_db
 from jobwatch.serve import make_handler
 
 pytest.importorskip("playwright.sync_api")
 from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 NO_TRANSITIONS_CSS = "*, *::before, *::after { transition: none !important }"
 
@@ -57,6 +61,81 @@ def dashboard(tmp_path: Path):
     thread.join(timeout=5)
 
 
+@pytest.fixture()
+def swipe_batch_dashboard(tmp_path: Path, monkeypatch):
+    """Une offre, un CV et une génération neutralisée pour tester la sortie du swipe."""
+    db_path = tmp_path / "jw.db"
+    conn = connect(db_path)
+    init_db(conn)
+    _seed_offer(conn, company="BatchCo", title="Batch Role", state="new")
+    cv_path = tmp_path / "cv.pdf"
+    cv_path.write_bytes(b"%PDF-1.4 test")
+    conn.execute(
+        "INSERT INTO document_library (type, label, file_path) VALUES ('cv', 'CV test', ?)",
+        (str(cv_path),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(serve_module, "_spawn_draft_job", lambda *_args: None)
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        make_handler(db_path, DraftConfig(model="test-model")),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", db_path
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+@pytest.fixture()
+def protected_dashboard(tmp_path: Path):
+    """Instance nommée protégée, avec invitation propriétaire à consommer."""
+    db_path = tmp_path / "jw.db"
+    conn = connect(db_path)
+    init_db(conn)
+    _seed_offer(conn, company="AuthCo", title="Auth Role", state="new")
+    invite = create_invite(conn, "alice", "alice@example.com")
+    conn.close()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        make_handler(db_path, workspace_slug="alice", secure_cookie=False),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", invite
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+@pytest.fixture()
+def onboarding_instance(tmp_path: Path):
+    """Instance protégée avec le wizard d'onboarding activé."""
+    db_path = tmp_path / "jw.db"
+    conn = connect(db_path)
+    init_db(conn)
+    invite = create_invite(conn, "alice", "alice@example.com")
+    conn.close()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        make_handler(
+            db_path,
+            workspace_slug="alice",
+            secure_cookie=False,
+            onboarding_config=DraftConfig(model="test-model"),
+            onboarding_enabled=True,
+        ),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", invite
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
 def _open_page(browser, url: str, dismiss_popup: bool = True):
     page = browser.new_page()
     page.goto(url)
@@ -76,6 +155,207 @@ def _assert_not_reloaded(page) -> None:
 
 def _card(page, company: str):
     return page.locator(f'.row:has(.company:text-is("{company}"))')
+
+
+def _sign_in_to_onboarding(page, url: str, invite: str) -> None:
+    page.goto(f"{url}/invite/{invite}")
+    password = "une très longue phrase secrète"
+    page.get_by_label("Mot de passe", exact=True).fill(password)
+    page.get_by_label("Confirmation", exact=True).fill(password)
+    page.get_by_role("button", name="Créer mon compte").click()
+    page.wait_for_load_state("networkidle")
+    if page.url.endswith("/login"):
+        page.get_by_label("Email", exact=True).fill("alice@example.com")
+        page.get_by_label("Mot de passe", exact=True).fill(password)
+        page.get_by_role("button", name="Se connecter").click()
+        page.wait_for_load_state("networkidle")
+    page.goto(f"{url}/onboarding")
+    page.locator("#choice-step").wait_for(state="visible")
+
+
+def _assert_balanced_action_panel(
+    page, panel_selector: str, action_selector: str, reference_selector: str
+) -> None:
+    gaps = page.evaluate(
+        """({panelSelector, actionSelector, referenceSelector}) => {
+          const panel = document.querySelector(panelSelector);
+          const action = document.querySelector(actionSelector);
+          const reference = document.querySelector(referenceSelector);
+          const actionRect = action.getBoundingClientRect();
+          const referenceRect = reference.getBoundingClientRect();
+          const panelRect = panel.getBoundingClientRect();
+          return {
+            top: actionRect.top - referenceRect.bottom,
+            bottom: panelRect.bottom - actionRect.bottom,
+          };
+        }""",
+        {
+            "panelSelector": panel_selector,
+            "actionSelector": action_selector,
+            "referenceSelector": reference_selector,
+        },
+    )
+    assert abs(gaps["top"] - gaps["bottom"]) <= 1.5, gaps
+
+
+def _assert_no_horizontal_overflow(page) -> None:
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= window.innerWidth + 1"
+    )
+
+
+def test_onboarding_actions_are_balanced_on_both_paths(browser, onboarding_instance) -> None:
+    url, invite = onboarding_instance
+    page = browser.new_page()
+    _sign_in_to_onboarding(page, url, invite)
+
+    for width, height in ((390, 844), (1280, 900)):
+        page.set_viewport_size({"width": width, "height": height})
+        page.goto(f"{url}/onboarding")
+        page.get_by_role("button", name=re.compile(r"^Créer mes catégories")).click()
+        page.locator("#intent-step .panel").wait_for(state="visible")
+        _assert_balanced_action_panel(
+            page, "#intent-step .action-panel", "#intent-step .actions", "#intent-list"
+        )
+        _assert_no_horizontal_overflow(page)
+
+        page.locator("#back-to-choice-intents").click()
+        page.locator("#choice-step").wait_for(state="visible")
+        page.get_by_role("button", name=re.compile(r"^Importer mes CV")).click()
+        page.locator("#upload-step .panel").wait_for(state="visible")
+        _assert_balanced_action_panel(
+            page, "#upload-step .action-panel", "#analyze", "#drop-zone"
+        )
+        heights = page.evaluate(
+            """() => ({
+              back: document.querySelector('#back-to-choice-upload').getBoundingClientRect().height,
+              action: document.querySelector('#analyze').getBoundingClientRect().height,
+            })"""
+        )
+        assert abs(heights["back"] - heights["action"]) <= 1.5, heights
+        _assert_no_horizontal_overflow(page)
+
+        page.locator("#back-to-choice-upload").click()
+        page.locator("#choice-step").wait_for(state="visible")
+    page.close()
+
+
+def test_onboarding_keeps_invalid_file_error_visible(browser, onboarding_instance) -> None:
+    url, invite = onboarding_instance
+    page = browser.new_page()
+    _sign_in_to_onboarding(page, url, invite)
+    page.get_by_role("button", name=re.compile(r"^Importer mes CV")).click()
+
+    page.locator("#cv-file").set_input_files(
+        {"name": "notes.txt", "mimeType": "text/plain", "buffer": b"pas un CV"}
+    )
+
+    assert "n’est pas un fichier PDF" in page.locator("#upload-status").inner_text()
+    assert page.locator("#upload-status").get_attribute("class") == "status error"
+    assert page.locator("#analyze").is_disabled()
+    page.close()
+
+
+def test_manual_onboarding_reaches_unified_dashboard(browser, onboarding_instance) -> None:
+    url, invite = onboarding_instance
+    page = browser.new_page()
+    _sign_in_to_onboarding(page, url, invite)
+    page.get_by_role("button", name=re.compile(r"^Créer mes catégories")).click()
+    page.locator(".intent-label").fill("Ingénierie IA")
+    page.locator(".keywords").fill("AI Engineer, LLM Engineer")
+
+    page.locator("#confirm").click()
+
+    page.wait_for_url(f"{url}/")
+    assert page.get_by_role("link", name=re.compile("Modifier mes catégories")).is_visible()
+    assert page.locator(".track-tabs").count() == 0
+    page.close()
+
+
+def test_card_reader_keeps_only_one_panel_open(browser, dashboard) -> None:
+    url, db_path = dashboard
+    conn = connect(db_path)
+    offer_id = int(
+        conn.execute(
+            "SELECT o.id FROM offer o JOIN company c ON c.id = o.company_id "
+            "WHERE c.name = 'NewCo'"
+        ).fetchone()["id"]
+    )
+    _add_summary(conn, offer_id, "Résumé visible")
+    _add_content(conn, offer_id, "Annonce visible")
+    conn.close()
+    page = _open_page(browser, url)
+    card = _card(page, "NewCo")
+    summary = card.locator(".summary-panel")
+    content = card.locator(".content-panel")
+
+    card.locator(".summary-toggle").click()
+    assert summary.is_visible()
+    assert not content.is_visible()
+    card.locator(".offer-toggle").click()
+    assert not summary.is_visible()
+    assert content.is_visible()
+    assert card.locator('.reader-tab[aria-expanded="true"]').all_inner_texts() == ["Annonce"]
+    card.locator(".offer-toggle").click()
+    assert not content.is_visible()
+    tab_tops = card.locator(".reader-tab").evaluate_all(
+        "tabs => tabs.map(tab => Math.round(tab.getBoundingClientRect().top))"
+    )
+    assert len(set(tab_tops)) == 1
+    _assert_no_horizontal_overflow(page)
+    page.close()
+
+
+def test_offer_markdown_renders_visually_not_as_raw_syntax(browser, dashboard) -> None:
+    """L'onglet Annonce affiche du HTML rendu, pas la syntaxe Markdown brute."""
+    url, db_path = dashboard
+    conn = connect(db_path)
+    offer_id = int(
+        conn.execute(
+            "SELECT o.id FROM offer o JOIN company c ON c.id = o.company_id "
+            "WHERE c.name = 'NewCo'"
+        ).fetchone()["id"]
+    )
+    _add_content(
+        conn,
+        offer_id,
+        "## Missions\n\n**Stack** : Python\n\n- Développement\n- Code review",
+    )
+    conn.close()
+    page = _open_page(browser, url)
+    card = _card(page, "NewCo")
+    content = card.locator(".content-panel")
+
+    card.locator(".offer-toggle").click()
+    assert content.is_visible()
+    assert content.locator(".md-heading", has_text="Missions").is_visible()
+    assert content.locator("strong", has_text="Stack").is_visible()
+    assert content.locator("li", has_text="Développement").is_visible()
+    assert content.locator("li", has_text="Code review").is_visible()
+    assert "##" not in content.inner_text()
+    assert "**" not in content.inner_text()
+    assert "- Développement" not in content.inner_text()
+    _assert_no_horizontal_overflow(page)
+    page.close()
+
+
+def test_invite_then_protected_action_in_browser(browser, protected_dashboard) -> None:
+    url, invite = protected_dashboard
+    page = browser.new_page()
+    page.goto(f"{url}/invite/{invite}")
+    password = "une très longue phrase secrète"
+    page.get_by_label("Mot de passe", exact=True).fill(password)
+    page.get_by_label("Confirmation", exact=True).fill(password)
+    page.get_by_role("button", name="Créer mon compte").click()
+    page.wait_for_url(f"{url}/")
+    popup = page.locator("#swipe-popup")
+    if popup.is_visible():
+        page.locator(".swipe-popup-later").click()
+    card = _card(page, "AuthCo")
+    card.locator(".action-later").click()
+    page.locator(".undo-toast").wait_for(state="visible", timeout=5000)
+    assert card.count() == 0
+    page.close()
 
 
 def test_later_click_removes_card_and_shows_undo_without_reload(browser, dashboard) -> None:
@@ -213,4 +493,74 @@ def test_swipe_popup_shows_once_per_session(browser, dashboard) -> None:
     page.reload()
     page.wait_for_selector(".swipe-fab")
     assert not page.locator("#swipe-popup").is_visible()
+    page.close()
+
+
+def test_bug_report_form_is_for_regular_users(browser, dashboard) -> None:
+    url, db_path = dashboard
+    page = _open_page(browser, url)
+
+    page.get_by_role("button", name="Signaler un bug").click()
+    dialog = page.get_by_role("dialog", name="Signaler un bug")
+    expect(dialog).to_be_visible()
+    dialog.get_by_label("Que s'est-il passé ?").fill(
+        "Le résumé de la première offre ne s'affiche pas."
+    )
+    dialog.get_by_role("button", name="Envoyer").click()
+
+    expect(dialog.locator("#bug-report-status")).to_contain_text(
+        "le signalement a bien été envoyé"
+    )
+    conn = connect(db_path)
+    report = conn.execute("SELECT message, page, user_agent FROM bug_report").fetchone()
+    conn.close()
+    assert report["message"] == "Le résumé de la première offre ne s'affiche pas."
+    assert report["page"] == "/"
+    assert "Chrome" in report["user_agent"]
+    page.close()
+
+
+def test_batch_generation_returns_to_dashboard(browser, swipe_batch_dashboard) -> None:
+    url, db_path = swipe_batch_dashboard
+    page = browser.new_page()
+    page.goto(f"{url}/swipe")
+
+    with page.expect_response(re.compile(r"/match/\d+/later$")) as later_response:
+        page.locator("#swipe-yes").click()
+    assert later_response.value.ok
+    expect(page.locator("#swipe-done")).to_be_visible()
+
+    with page.expect_response(re.compile(r"/draft/batch$")) as batch_response:
+        page.locator("#batch-btn").click()
+    assert batch_response.value.status == 202
+    page.wait_for_url(f"{url}/")
+
+    conn = connect(db_path)
+    job = conn.execute("SELECT status FROM draft_job").fetchone()
+    conn.close()
+    assert job["status"] == "queued"
+    assert page.locator(".hero").is_visible()
+    page.close()
+
+
+def test_onboarding_refuses_to_drop_an_incomplete_category(browser, onboarding_instance) -> None:
+    url, invite = onboarding_instance
+    page = browser.new_page()
+    _sign_in_to_onboarding(page, url, invite)
+    page.get_by_role("button", name=re.compile(r"^Créer mes catégories")).click()
+    page.locator(".intent-label").fill("Ingénierie IA")
+    page.locator(".keywords").fill("AI Engineer")
+    page.locator("#add-intent").click()
+    page.locator(".intent").nth(1).locator(".intent-label").fill("Produit")
+
+    page.locator("#confirm").click()
+
+    status = page.locator("#intent-status")
+    assert "nom et au moins un mot-clé" in status.inner_text()
+    assert page.url.endswith("/onboarding")
+
+    page.locator(".intent").nth(1).locator(".keywords").fill("Product Owner")
+    page.locator("#confirm").click()
+
+    page.wait_for_url(f"{url}/")
     page.close()

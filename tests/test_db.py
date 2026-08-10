@@ -29,6 +29,7 @@ EXPECTED_TABLES = {
     "application",
     "event",
     "document",
+    "bug_report",
 }
 
 
