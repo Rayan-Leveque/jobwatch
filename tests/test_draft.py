@@ -522,6 +522,46 @@ def test_apply_body_edit_failure_does_not_persist(
     assert count == 1  # seulement le job initial : rien n'a été ajouté après l'échec
 
 
+@pytest.mark.skipif(not HAS_TEX, reason="lualatex/pdftoppm absents")
+def test_apply_body_edit_rejects_page_overflow(
+    db_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    _seed_ok_job(conn, db_path, match_id, cv_id)
+    monkeypatch.setattr(draft, "_pdf_page_count", lambda pdf_path: 2)
+
+    with pytest.raises(DraftError, match="une page"):
+        apply_body_edit(conn, db_path, match_id, "Texte qui déborderait sur deux pages.")
+
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM draft_job WHERE match_id = ?", (match_id,)
+    ).fetchone()["n"]
+    conn.close()
+    assert count == 1  # rien n'a été ajouté après le rejet pour dépassement d'une page
+
+
+@pytest.mark.skipif(not HAS_TEX, reason="lualatex/pdftoppm absents")
+def test_apply_body_edit_rejects_when_generation_running(
+    db_path: Path, tmp_path: Path
+) -> None:
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    cv_id = _seed_cv(conn, tmp_path)
+    _seed_ok_job(conn, db_path, match_id, cv_id)
+    _seed_job(conn, match_id, cv_id)  # job laissé 'running' (statut par défaut du schéma)
+
+    with pytest.raises(DraftError, match="déjà en cours"):
+        apply_body_edit(conn, db_path, match_id, "Nouveau texte pendant une génération.")
+
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM draft_job WHERE match_id = ?", (match_id,)
+    ).fetchone()["n"]
+    conn.close()
+    assert count == 2  # le job 'ok' initial et le job 'running' : rien de plus
+
+
 # ---------------------------------------------------------------- rendu HTML
 
 

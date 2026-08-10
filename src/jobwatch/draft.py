@@ -451,6 +451,26 @@ def compile_latex(tex: str, work_dir: Path) -> Path | str:
     return (log_text or completed.stdout or "échec lualatex sans log")[-LOG_TAIL_CHARS:]
 
 
+def _pdf_page_count(pdf_path: Path) -> int:
+    """Renvoie le nombre de pages du PDF via pdfinfo (même paquet poppler que pdftoppm)."""
+    try:
+        completed = subprocess.run(
+            ["pdfinfo", str(pdf_path)],
+            capture_output=True,
+            text=True,
+            timeout=COMPILE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DraftError(f"pdfinfo a échoué : {exc}") from exc
+    if completed.returncode != 0:
+        raise DraftError(f"pdfinfo a quitté avec le code {completed.returncode}")
+    for line in completed.stdout.splitlines():
+        if line.startswith("Pages:"):
+            return int(line.split(":", 1)[1].strip())
+    raise DraftError("pdfinfo n'a pas indiqué le nombre de pages")
+
+
 def render_pngs(pdf_path: Path, target_dir: Path, stem: str) -> int:
     """Rend chaque page du PDF en PNG <stem>-<n>.png ; renvoie le nombre de pages."""
     for stale in target_dir.glob(f"{stem}-*.png"):
@@ -671,9 +691,13 @@ def get_body_edit(conn: sqlite3.Connection, match_id: int) -> str:
 def apply_body_edit(conn: sqlite3.Connection, db_path: Path, match_id: int, body_text: str) -> int:
     """Recompile la lettre existante avec un corps édité à la main ; renvoie l'id du nouveau job.
 
-    Aucun appel LLM : une compilation échouée lève DraftError sans rien persister, pour
-    laisser l'utilisateur corriger son texte plutôt que de retomber sur la boucle de
-    réparation du modèle (réservée aux brouillons générés).
+    Aucun appel LLM : une compilation échouée, ou un rendu dépassant une page, lève
+    DraftError sans rien persister (ni fichier, ni ligne draft_job), pour laisser
+    l'utilisateur corriger son texte plutôt que de retomber sur la boucle de réparation
+    du modèle (réservée aux brouillons générés) ou d'écraser la lettre précédente. Un
+    job 'running' est réservé le temps de l'opération pour bloquer une régénération
+    concurrente sur le même match, comme le fait déjà le flux de régénération pour un
+    nouveau hand-edit.
     """
     job = _latest_ok_job(conn, match_id)
     tex_path = Path(str(job["tex_path"]))
@@ -683,35 +707,61 @@ def apply_body_edit(conn: sqlite3.Connection, db_path: Path, match_id: int, body
     new_tex = splice_body(tex, body_text)
 
     match = _load_match(conn, match_id)
+
+    running = conn.execute(
+        "SELECT id FROM draft_job WHERE match_id = ? AND status IN ('running', 'queued')",
+        (match_id,),
+    ).fetchone()
+    if running is not None:
+        raise DraftError("une génération est déjà en cours")
+
+    cur = conn.execute(
+        "INSERT INTO draft_job (match_id, track, cv_library_id, status) "
+        "VALUES (?, ?, ?, 'running')",
+        (match_id, job["track"], job["cv_library_id"]),
+    )
+    placeholder_id = int(cur.lastrowid)
+    conn.commit()
+
     target_dir = documents_dir(db_path)
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        work_dir = Path(tmp_dir)
-        result = compile_latex(new_tex, work_dir)
-        if not isinstance(result, Path):
-            raise DraftError(f"compilation LaTeX en échec : {result[-500:]}")
-        target_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"draft_{match_id}"
-        final_tex = target_dir / f"{stem}.tex"
-        final_pdf = target_dir / f"{stem}.pdf"
-        final_tex.write_text(new_tex, encoding="utf-8")
-        shutil.copyfile(result, final_pdf)
-        pages = render_pngs(final_pdf, target_dir, stem)
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            result = compile_latex(new_tex, work_dir)
+            if not isinstance(result, Path):
+                raise DraftError(f"compilation LaTeX en échec : {result[-500:]}")
+            pages = _pdf_page_count(result)
+            if pages > 1:
+                raise DraftError(
+                    "la lettre modifiée dépasse une page : raccourcissez le texte et réessayez"
+                )
+            stem = f"draft_{match_id}"
+            work_pdf = work_dir / f"{stem}.pdf"
+            shutil.copyfile(result, work_pdf)
+            render_pngs(work_pdf, work_dir, stem)
+
+            target_dir.mkdir(parents=True, exist_ok=True)
+            final_tex = target_dir / f"{stem}.tex"
+            final_pdf = target_dir / f"{stem}.pdf"
+            final_tex.write_text(new_tex, encoding="utf-8")
+            shutil.copyfile(work_pdf, final_pdf)
+            for stale in target_dir.glob(f"{stem}-*.png"):
+                stale.unlink()
+            for png in sorted(work_dir.glob(f"{stem}-*.png")):
+                shutil.copyfile(png, target_dir / png.name)
+    except Exception:
+        conn.execute("DELETE FROM draft_job WHERE id = ?", (placeholder_id,))
+        conn.commit()
+        raise
 
     library_id = _upsert_library_entry(conn, match_id, _label_for(match), final_pdf)
-    cur = conn.execute(
-        "INSERT INTO draft_job "
-        "(match_id, track, cv_library_id, status, tex_path, pdf_path, png_pages, "
-        "library_id, finished_at) "
-        "VALUES (?, ?, ?, 'ok', ?, ?, ?, ?, datetime('now'))",
-        (
-            match_id,
-            job["track"],
-            job["cv_library_id"],
-            str(final_tex),
-            str(final_pdf),
-            pages,
-            library_id,
-        ),
+    _finish_job(
+        conn,
+        placeholder_id,
+        status="ok",
+        tex_path=str(final_tex),
+        pdf_path=str(final_pdf),
+        png_pages=pages,
+        library_id=library_id,
     )
-    conn.commit()
-    return int(cur.lastrowid)
+    return placeholder_id
