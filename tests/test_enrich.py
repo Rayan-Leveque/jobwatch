@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 
 import httpx
@@ -498,8 +499,15 @@ def test_enrich_summarizes_in_parallel_pool(conn: sqlite3.Connection, monkeypatc
     assert peak == 2  # borné par concurrency, mais bien parallèle
 
 
-def test_config_parses_codex_runner(tmp_path) -> None:
+def test_config_parses_codex_runner(tmp_path, monkeypatch) -> None:
     from jobwatch.config import ConfigError, load_config
+
+    fake_bin_dir = tmp_path / "bin"
+    fake_bin_dir.mkdir()
+    fake_codex = fake_bin_dir / "codex"
+    fake_codex.write_text("#!/bin/sh\n")
+    fake_codex.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin_dir}{os.pathsep}{os.environ['PATH']}")
 
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
@@ -513,7 +521,10 @@ def test_config_parses_codex_runner(tmp_path) -> None:
     config = load_config(config_file).enrich
     assert config is not None
     assert config.runner == "codex"
-    assert config.codex_bin == "codex"
+    # codex_bin résolu en chemin absolu (pas juste 'codex') : un cron a un PATH
+    # minimal, donc jw enrich doit échouer fort ici plutôt que de tourner avec
+    # un binaire introuvable au moment de résumer chaque offre.
+    assert config.codex_bin == str(fake_codex)
     assert config.model == "gpt-5.6-luna"
 
     config_file.write_text(
@@ -536,6 +547,24 @@ def test_config_parses_codex_runner(tmp_path) -> None:
         "  model: m\n"
     )
     with _pytest.raises(ConfigError, match="opencode_bin"):
+        load_config(config_file)
+
+
+def test_config_fails_loudly_when_codex_bin_missing_from_path(tmp_path, monkeypatch) -> None:
+    from jobwatch.config import ConfigError, load_config
+
+    monkeypatch.setenv("PATH", str(tmp_path))  # répertoire vide : rien n'y est résoluble
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "enrich:\n"
+        "  runner: codex\n"
+        "  model: gpt-5.6-luna\n"
+        "  codex_bin: codex-introuvable\n"
+    )
+    with pytest.raises(ConfigError, match="codex-introuvable"):
         load_config(config_file)
 
 

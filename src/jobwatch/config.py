@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
@@ -15,6 +16,33 @@ CONFIG_EXAMPLE = "config.example.yaml"
 
 class ConfigError(Exception):
     """Configuration invalide ou manquante. La CLI affiche un message clair et sort avec le code 1."""
+
+
+def _resolve_codex_bin(codex_bin: str, field_name: str) -> str:
+    """Résout codex_bin en chemin absolu, en échouant fort s'il est introuvable.
+
+    Un cron a un PATH minimal qui n'inclut pas forcément le répertoire nvm où
+    vit codex : avec un nom nu, l'échec du sous-processus était auparavant
+    avalé (une offre gardait son texte mais n'obtenait jamais de résumé,
+    sans erreur visible avant d'éplucher les logs). Résoudre ici, une fois,
+    fait échouer 'jw enrich' tout de suite avec un message actionnable
+    plutôt que de dégrader silencieusement chaque appel de résumé.
+    """
+    path = Path(codex_bin)
+    if path.is_absolute():
+        if not os.access(path, os.X_OK):
+            raise ConfigError(
+                f"{field_name} : '{codex_bin}' n'est pas exécutable"
+            )
+        return str(path)
+    resolved = shutil.which(codex_bin)
+    if resolved is None:
+        raise ConfigError(
+            f"{field_name} : binaire codex '{codex_bin}' introuvable dans PATH "
+            "(un cron a souvent un PATH minimal) ; renseignez un chemin absolu, "
+            "par exemple ~/.nvm/versions/node/<version>/bin/codex"
+        )
+    return resolved
 
 
 @dataclass
@@ -439,6 +467,8 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
     codex_bin = raw.get("codex_bin", "codex")
     if not isinstance(codex_bin, str) or not codex_bin:
         raise ConfigError("enrich.codex_bin doit être une chaîne non vide")
+    if runner == "codex":
+        codex_bin = _resolve_codex_bin(codex_bin, "enrich.codex_bin")
     variant = raw.get("variant")
     if variant is not None and (not isinstance(variant, str) or not variant):
         raise ConfigError("enrich.variant doit être une chaîne non vide")
