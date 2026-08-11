@@ -453,7 +453,7 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .content-toggle[aria-expanded="true"] { background:var(--surface-hover);
   box-shadow:0 1px 4px rgba(0,0,0,.09) }
 .content-toggle[aria-expanded="true"] .summary-chevron { transform:rotate(225deg) }
-.content-toggle:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
+.content-toggle:focus-visible { outline:3px solid var(--violet); outline-offset:-4px }
 @media (hover:hover) {
   .content-toggle:hover { border-color:var(--line-strong); background:var(--surface-hover) }
 }
