@@ -339,10 +339,10 @@ def test_offer_markdown_renders_visually_not_as_raw_syntax(browser, dashboard) -
     page.close()
 
 
-def test_swipe_card_scroll_uses_themed_scrollbar(browser, dashboard) -> None:
-    """La scrollbar interne de la carte swipe suit le thème (var(--line-strong)),
-    pas la scrollbar par défaut du navigateur, une fois le contenu déplié en
-    overflow réel."""
+def test_swipe_card_scroll_hides_scrollbar_chrome(browser, dashboard) -> None:
+    """La zone défilante de la carte swipe ne réserve plus de gouttière pour une
+    scrollbar visible (piste/pouce masqués), une fois le contenu déplié en
+    overflow réel, mais le défilement reste fonctionnel."""
     url, db_path = dashboard
     conn = connect(db_path)
     offer_id = int(
@@ -366,18 +366,15 @@ def test_swipe_card_scroll_uses_themed_scrollbar(browser, dashboard) -> None:
     scroll = card.locator(".swipe-card-scroll")
     assert scroll.evaluate("el => el.scrollHeight > el.clientHeight")
 
-    expected = {
-        "light": "rgba(29, 31, 35, 0.17) rgba(0, 0, 0, 0)",
-        "dark": "rgba(255, 255, 255, 0.16) rgba(0, 0, 0, 0)",
-    }
-    for theme, expected_color in expected.items():
-        page.evaluate("t => document.documentElement.dataset.theme = t", theme)
-        computed = scroll.evaluate(
-            "el => { const s = getComputedStyle(el); "
-            "return { color: s.scrollbarColor, width: s.scrollbarWidth }; }"
-        )
-        assert computed["color"] == expected_color, (theme, computed)
-        assert computed["width"] == "thin", (theme, computed)
+    computed_width = scroll.evaluate("el => getComputedStyle(el).scrollbarWidth")
+    assert computed_width == "none", computed_width
+
+    widths = scroll.evaluate("el => ({offset: el.offsetWidth, client: el.clientWidth})")
+    assert widths["offset"] == widths["client"], widths
+
+    assert scroll.evaluate("el => el.scrollTop") == 0
+    scroll.evaluate("el => { el.scrollTop = 100 }")
+    assert scroll.evaluate("el => el.scrollTop") == 100
     page.close()
 
 
