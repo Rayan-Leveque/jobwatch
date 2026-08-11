@@ -1401,11 +1401,8 @@ _SWIPE_CSS = """\
 .swipe-card.leaving { display:flex; z-index:3; pointer-events:none;
   transition:transform .28s ease, opacity .28s ease }
 .swipe-card-scroll { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
-  scrollbar-width:thin; scrollbar-color:var(--line-strong) transparent }
-.swipe-card-scroll::-webkit-scrollbar { width:6px }
-.swipe-card-scroll::-webkit-scrollbar-track { background:transparent }
-.swipe-card-scroll::-webkit-scrollbar-thumb { background:var(--line-strong); border-radius:10px }
-.swipe-card-scroll::-webkit-scrollbar-thumb:hover { background:var(--muted-2) }
+  scrollbar-width:none }
+.swipe-card-scroll::-webkit-scrollbar { display:none }
 .swipe-card .content-panel { margin:10px 0 0; padding:12px 0 0; pointer-events:auto }
 .swipe-card .content-toggle { margin:12px 0 0; width:100% }
 .swipe-summary { margin:14px 0 0; padding:12px 12px 11px; border:1px dashed var(--line-strong);
