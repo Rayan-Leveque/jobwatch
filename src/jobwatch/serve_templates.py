@@ -1552,16 +1552,23 @@ _SWIPE_JS = """\
 
   let drag = null;
   const THRESHOLD = 80;
+  const DIRECTION_THRESHOLD = 8;
   stage.addEventListener('pointerdown', e => {
     if (index >= total) return;
     const card = cards[index];
     if (!card.contains(e.target) || e.target.closest('a, button')) return;
-    drag = {id: e.pointerId, x: e.clientX, dx: 0, card};
-    card.setPointerCapture(e.pointerId);
+    drag = {id: e.pointerId, x: e.clientX, y: e.clientY, dx: 0, horizontal: false, card};
   });
   stage.addEventListener('pointermove', e => {
     if (!drag || e.pointerId !== drag.id) return;
     drag.dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    if (!drag.horizontal) {
+      if (Math.max(Math.abs(drag.dx), Math.abs(dy)) < DIRECTION_THRESHOLD) return;
+      if (Math.abs(dy) >= Math.abs(drag.dx)) { drag = null; return; }
+      drag.horizontal = true;
+      drag.card.setPointerCapture(e.pointerId);
+    }
     drag.card.style.transform = `translateX(${drag.dx}px) rotate(${drag.dx / 22}deg)`;
     const fade = Math.min(1, Math.max(0, (Math.abs(drag.dx) - 30) / 60));
     drag.card.querySelector('.stamp-right').style.opacity = drag.dx > 0 ? fade : 0;
@@ -1569,6 +1576,7 @@ _SWIPE_JS = """\
   });
   const endDrag = e => {
     if (!drag || e.pointerId !== drag.id) return;
+    if (!drag.horizontal) { drag = null; return; }
     const {card, dx} = drag;
     drag = null;
     card.querySelector('.stamp-right').style.opacity = '';

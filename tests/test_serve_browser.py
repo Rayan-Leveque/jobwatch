@@ -14,6 +14,7 @@ import re
 import sqlite3
 import threading
 from http.server import ThreadingHTTPServer
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -204,6 +205,30 @@ def _assert_no_horizontal_overflow(page) -> None:
     )
 
 
+def _touch_drag(page, cdp, start: tuple[float, float], end: tuple[float, float]) -> None:
+    pointer_id = 1
+    cdp.send(
+        "Input.dispatchTouchEvent",
+        {
+            "type": "touchStart",
+            "touchPoints": [{"x": start[0], "y": start[1], "id": pointer_id}],
+        },
+    )
+    for step in range(1, 11):
+        progress = step / 10
+        x = start[0] + (end[0] - start[0]) * progress
+        y = start[1] + (end[1] - start[1]) * progress
+        cdp.send(
+            "Input.dispatchTouchEvent",
+            {
+                "type": "touchMove",
+                "touchPoints": [{"x": x, "y": y, "id": pointer_id}],
+            },
+        )
+        page.wait_for_timeout(16)
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+
+
 def _assert_offer_link_in_header(card) -> None:
     link = card.get_by_role("link", name="Voir l’offre externe")
     expect(link).to_have_count(1)
@@ -239,6 +264,86 @@ def test_offer_link_is_a_header_icon_on_match_application_and_swipe_cards(
     page.goto(f"{url}/swipe")
     _assert_offer_link_in_header(page.locator(".swipe-card.top"))
     page.close()
+
+
+def test_swipe_announcement_touch_scroll_preserves_horizontal_swipe(
+    browser, dashboard
+) -> None:
+    url, db_path = dashboard
+    conn = connect(db_path)
+    conn.execute("UPDATE match SET state = 'new'")
+    offer_ids = [int(row["id"]) for row in conn.execute("SELECT id FROM offer")]
+    long_content = "\n\n".join(
+        f"## Section {index}\n\nContenu détaillé de la section {index}."
+        for index in range(30)
+    )
+    for offer_id in offer_ids:
+        _add_content(conn, offer_id, long_content)
+    conn.close()
+
+    context = browser.new_context(
+        viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True
+    )
+    context.add_init_script(
+        """
+        window.__pointerCaptures = [];
+        const capture = Element.prototype.setPointerCapture;
+        Element.prototype.setPointerCapture = function (pointerId) {
+          window.__pointerCaptures.push(pointerId);
+          return capture.call(this, pointerId);
+        };
+        """
+    )
+    page = context.new_page()
+    page.goto(f"{url}/swipe")
+    card = page.locator(".swipe-card.top")
+    initial_match_id = card.get_attribute("data-match-id")
+    card.locator(".swipe-content-toggle").click()
+    scroll = card.locator(".swipe-card-scroll")
+    assert scroll.evaluate("el => el.scrollHeight > el.clientHeight")
+    scroll.evaluate(
+        "el => { window.__scrollPositions = [el.scrollTop]; "
+        "el.addEventListener('scroll', () => window.__scrollPositions.push(el.scrollTop), "
+        "{passive: true}); }"
+    )
+
+    cdp = context.new_cdp_session(page)
+    scroll_box = scroll.bounding_box()
+    assert scroll_box is not None
+    center_x = scroll_box["x"] + scroll_box["width"] / 2
+    _touch_drag(
+        page,
+        cdp,
+        (center_x, scroll_box["y"] + scroll_box["height"] - 80),
+        (center_x, scroll_box["y"] + 120),
+    )
+    page.wait_for_timeout(300)
+
+    positions = page.evaluate("window.__scrollPositions")
+    assert positions[-1] > 100, positions
+    assert all(current >= previous for previous, current in pairwise(positions)), positions
+    assert page.evaluate("window.__pointerCaptures") == []
+
+    card_box = card.bounding_box()
+    assert card_box is not None
+    page.evaluate("window.__pointerCaptures = []")
+    page.mouse.move(card_box["x"] + 45, card_box["y"] + 150)
+    page.mouse.down()
+    page.mouse.move(card_box["x"] + card_box["width"] - 35, card_box["y"] + 150, steps=10)
+    page.mouse.up()
+    captures = page.evaluate("window.__pointerCaptures")
+    assert captures, captures
+    expect(page.locator(".swipe-card.top")).not_to_have_attribute(
+        "data-match-id", initial_match_id, timeout=5000
+    )
+
+    conn = connect(db_path)
+    state = conn.execute(
+        "SELECT state FROM match WHERE id = ?", (int(initial_match_id),)
+    ).fetchone()["state"]
+    conn.close()
+    assert state == "later"
+    context.close()
 
 
 def test_onboarding_actions_are_balanced_on_both_paths(browser, onboarding_instance) -> None:
