@@ -42,7 +42,7 @@ from playwright.sync_api import sync_playwright
 from jobwatch import llm_runner
 from jobwatch.config import EnrichConfig
 from jobwatch.extraction import Extraction, extract
-from jobwatch.llm_runner import LLMRunnerError, run_codex, run_opencode
+from jobwatch.llm_runner import LLMRunnerError, run_codex, run_opencode, run_pi
 
 OPENCODE_TOOLS = llm_runner.OPENCODE_TOOLS
 opencode_sandbox = llm_runner.opencode_sandbox
@@ -259,9 +259,30 @@ SummaryParts = tuple[dict[str, str], dict[str, str], list[str]]
 
 
 def _summarize(config: EnrichConfig, markdown: str) -> SummaryParts | None:
+    if config.runner == "pi":
+        return _summarize_pi(config, markdown)
     if config.runner == "codex":
         return _summarize_codex(config, markdown)
     return _summarize_opencode(config, markdown)
+
+
+def _summarize_pi(config: EnrichConfig, markdown: str) -> SummaryParts | None:
+    try:
+        text = run_pi(
+            binary=config.pi_bin,
+            model=config.model,
+            prompt=SUMMARY_PROMPT,
+            attachment=markdown,
+            timeout=CODEX_TIMEOUT_SECONDS,
+            thinking=config.variant,
+        )
+    except LLMRunnerError as exc:
+        log.warning("enrich: %s", exc)
+        return None
+    fields, quotes, bullets = _parse_summary(text)
+    if not fields and not bullets:
+        return None
+    return fields, _verified_quotes(quotes, markdown), bullets
 
 
 def _summarize_codex(config: EnrichConfig, markdown: str) -> SummaryParts | None:

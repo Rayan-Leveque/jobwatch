@@ -1141,6 +1141,16 @@ def test_config_parses_codex_draft_runner(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="opencode_bin"):
         load_config(config_file)
 
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "draft:\n"
+        "  runner: pi\n"
+        "  model: m\n"
+    )
+    with pytest.raises(ConfigError, match="draft.runner"):
+        load_config(config_file)
+
 
 def test_call_llm_codex_builds_command_and_reads_output(monkeypatch) -> None:
     import subprocess as sp

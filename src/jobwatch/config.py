@@ -18,31 +18,29 @@ class ConfigError(Exception):
     """Configuration invalide ou manquante. La CLI affiche un message clair et sort avec le code 1."""
 
 
-def _resolve_codex_bin(codex_bin: str, field_name: str) -> str:
-    """Résout codex_bin en chemin absolu, en échouant fort s'il est introuvable.
+def _resolve_llm_bin(binary: str, field_name: str, runner: str) -> str:
+    """Résout un binaire LLM en chemin absolu, ou échoue avec une aide exploitable.
 
     Un cron a un PATH minimal qui n'inclut pas forcément le répertoire nvm où
-    vit codex : avec un nom nu, l'échec du sous-processus était auparavant
+    vit le runner : avec un nom nu, l'échec du sous-processus serait autrement
     avalé (une offre gardait son texte mais n'obtenait jamais de résumé,
     sans erreur visible avant d'éplucher les logs). Résoudre ici, une fois,
     fait échouer 'jw enrich' tout de suite avec un message actionnable
     plutôt que de dégrader silencieusement chaque appel de résumé.
     """
-    path = Path(codex_bin)
+    path = Path(binary).expanduser()
     if path.is_absolute():
-        if not os.access(path, os.X_OK):
-            raise ConfigError(
-                f"{field_name} : '{codex_bin}' n'est pas exécutable"
-            )
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise ConfigError(f"{field_name} : '{binary}' n'est pas exécutable")
         return str(path)
-    resolved = shutil.which(codex_bin)
+    resolved = shutil.which(binary)
     if resolved is None:
         raise ConfigError(
-            f"{field_name} : binaire codex '{codex_bin}' introuvable dans PATH "
+            f"{field_name} : binaire {runner} '{binary}' introuvable dans PATH "
             "(un cron a souvent un PATH minimal) ; renseignez un chemin absolu, "
-            "par exemple ~/.nvm/versions/node/<version>/bin/codex"
+            f"par exemple ~/.nvm/versions/node/<version>/bin/{runner}"
         )
-    return resolved
+    return str(Path(resolved).resolve())
 
 
 @dataclass
@@ -140,18 +138,20 @@ class NotifyConfig:
         return self.ntfy is not None or self.smtp is not None
 
 
-ENRICH_RUNNERS = ("opencode", "codex")
+STANDARD_LLM_RUNNERS = ("opencode", "codex")
+ENRICH_RUNNERS = (*STANDARD_LLM_RUNNERS, "pi")
 
 
 @dataclass
 class EnrichConfig:
     model: str
-    # Exécuteur LLM : 'opencode' (API, facturé à l'appel) ou 'codex' (CLI codex exec,
-    # couvert par l'abonnement ChatGPT).
+    # Exécuteur LLM : 'opencode', 'codex' ou 'pi'.
     runner: str = "opencode"
     opencode_bin: str = "opencode"
     codex_bin: str = "codex"
-    # Effort de raisonnement : --variant OpenCode ou model_reasoning_effort codex.
+    pi_bin: str = "pi"
+    # Effort de raisonnement : --variant OpenCode, model_reasoning_effort Codex
+    # ou --thinking Pi.
     variant: str | None = None
     # Appels LLM de résumé simultanés (les fetchs web restent séquentiels et espacés).
     concurrency: int = 4
@@ -414,9 +414,10 @@ def _research_from_dict(raw: object) -> ResearchConfig | None:
     if not isinstance(model, str) or not model:
         raise ConfigError("research.model est requis quand research est présent")
     runner = raw.get("runner", "codex")
-    if runner not in ENRICH_RUNNERS:
+    if runner not in STANDARD_LLM_RUNNERS:
         raise ConfigError(
-            f"research.runner doit être l'un de {list(ENRICH_RUNNERS)}, reçu : {runner!r}"
+            "research.runner doit être l'un de "
+            f"{list(STANDARD_LLM_RUNNERS)}, reçu : {runner!r}"
         )
     opencode_bin = raw.get("opencode_bin", "opencode")
     if not isinstance(opencode_bin, str) or not opencode_bin:
@@ -468,7 +469,12 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
     if not isinstance(codex_bin, str) or not codex_bin:
         raise ConfigError("enrich.codex_bin doit être une chaîne non vide")
     if runner == "codex":
-        codex_bin = _resolve_codex_bin(codex_bin, "enrich.codex_bin")
+        codex_bin = _resolve_llm_bin(codex_bin, "enrich.codex_bin", "codex")
+    pi_bin = raw.get("pi_bin", "pi")
+    if not isinstance(pi_bin, str) or not pi_bin:
+        raise ConfigError("enrich.pi_bin doit être une chaîne non vide")
+    if runner == "pi":
+        pi_bin = _resolve_llm_bin(pi_bin, "enrich.pi_bin", "pi")
     variant = raw.get("variant")
     if variant is not None and (not isinstance(variant, str) or not variant):
         raise ConfigError("enrich.variant doit être une chaîne non vide")
@@ -477,7 +483,7 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
         raise ConfigError("enrich.concurrency doit être un entier >= 1")
     return EnrichConfig(
         model=model, runner=runner, opencode_bin=opencode_bin, codex_bin=codex_bin,
-        variant=variant, concurrency=concurrency,
+        pi_bin=pi_bin, variant=variant, concurrency=concurrency,
     )
 
 
@@ -492,9 +498,9 @@ def _draft_from_dict(raw: object) -> DraftConfig | None:
     if not isinstance(model, str) or not model:
         raise ConfigError("draft.model est requis quand draft est présent")
     runner = raw.get("runner", "opencode")
-    if runner not in ENRICH_RUNNERS:
+    if runner not in STANDARD_LLM_RUNNERS:
         raise ConfigError(
-            f"draft.runner doit être l'un de {list(ENRICH_RUNNERS)}, reçu : {runner!r}"
+            f"draft.runner doit être l'un de {list(STANDARD_LLM_RUNNERS)}, reçu : {runner!r}"
         )
     opencode_bin = raw.get("opencode_bin", "opencode")
     if not isinstance(opencode_bin, str) or not opencode_bin:
