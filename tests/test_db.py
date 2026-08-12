@@ -54,6 +54,37 @@ def test_init_db_creates_v04_discarded_at_column(conn: sqlite3.Connection) -> No
     assert "fit" in match_cols
 
 
+def test_init_db_migrates_historical_offer_content_failure_metadata() -> None:
+    conn = connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE offer_content (
+          id INTEGER PRIMARY KEY,
+          offer_id INTEGER NOT NULL UNIQUE,
+          markdown TEXT,
+          fetch_method TEXT,
+          extract_method TEXT,
+          html_gz BLOB,
+          status TEXT NOT NULL,
+          fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO offer_content (offer_id, status) VALUES (42, 'failed');
+        """
+    )
+
+    init_db(conn)
+
+    migrated = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason FROM offer_content WHERE offer_id = 42"
+    ).fetchone()
+    assert tuple(migrated) == ("failed", 1, None)
+    init_db(conn)
+    assert conn.execute(
+        "SELECT fetch_attempts FROM offer_content WHERE offer_id = 42"
+    ).fetchone()["fetch_attempts"] == 1
+    conn.close()
+
+
 V02_SCHEMA = """
 CREATE TABLE source (
   id INTEGER PRIMARY KEY,

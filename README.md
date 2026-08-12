@@ -154,9 +154,18 @@ ne coûtent aucun token. Pour chaque offre active sans texte stocké ou sans cha
 6. Patiente 1 à 2 secondes entre deux fetchs web pour ne pas marteler les sites tiers.
 
 Un échec (réseau ou LLM) est consigné en avertissement et n'interrompt jamais le traitement des
-offres suivantes ; un fetch en échec (`offer_content` en statut `failed`) n'est jamais retenté
-par un run ultérieur. Le panneau « En bref » du tableau de bord et des cartes de tri affiche
-les champs étiquetés en tête puis les puces, pour toute carte ayant un résumé.
+offres suivantes. Un fetch en échec conserve son nombre de tentatives et sa cause : les erreurs
+temporaires sont retentées après 24 heures, avec un plafond de trois tentatives, tandis que les
+réponses HTTP 404 et 410 sont terminales. Les anciennes lignes `failed` sans cause enregistrée
+reçoivent un retry immédiat afin de migrer le corpus existant vers cette politique bornée. Le
+panneau « En bref » du tableau de bord et des cartes de tri affiche les champs étiquetés en tête
+puis les puces. Un échec temporaire du runner de résumé est retenté sans nouveau fetch, après une
+heure et jusqu'à trois essais. Entre-temps, et lorsqu'une annonce est terminalement indisponible,
+un résumé limité est construit uniquement avec les métadonnées fiables stockées (poste, société,
+lieu, contrat, source, catégorie et fit). Sa provenance est affichée explicitement ; il est remplacé
+par un résumé fondé sur l'annonce dès que du contenu réel devient disponible. Une annonce absente
+n'est jamais fabriquée : la carte explique son retrait terminal, l'épuisement des tentatives ou la
+prochaine tentative prévue.
 
 `jw enrich` nécessite le bloc `enrich` de `config.yaml` (voir la référence de configuration
 ci-dessous) ; sans lui, la commande refuse proprement avec un message clair, sans réseau ni erreur
@@ -355,8 +364,8 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `source` | Sources de job boards configurées et leur dernière exécution |
 | `company` | Sociétés (dédupliquées par nom) |
 | `offer` | Offres d'emploi (dédupliquées par URL et société+titre) |
-| `offer_content` | Texte utile de l'annonce, méthode d'extraction et HTML brut compressé, récupérés par `jw enrich` |
-| `offer_summary` | Résumé factuel unique associé à une offre existante (`source` : `manual` ou `auto`) |
+| `offer_content` | Texte utile de l'annonce, méthode d'extraction, HTML brut compressé et suivi borné des échecs de fetch, récupérés par `jw enrich` |
+| `offer_summary` | Résumé factuel unique associé à une offre existante (`source` : `manual`, `auto` fondé sur l'annonce ou `metadata` limité), avec statut et tentatives de génération |
 | `summary_field` | Champs structurés d'un résumé (expérience, salaire, télétravail, stack) et citation vérifiée optionnelle |
 | `summary_bullet` | Bullets d'un résumé avec leur position explicite |
 | `search` | Recherches enregistrées (mots-clés, localisations, contrat) ; `archived_at` marque une catégorie retirée, masquée du tableau de bord et du digest |

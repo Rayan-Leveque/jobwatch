@@ -158,6 +158,8 @@ class Summary:
 
     bullets: list[str] = dataclasses_field(default_factory=list)
     fields: list[tuple[str, str]] = dataclasses_field(default_factory=list)
+    source: str = "manual"
+    status: str = "ready"
 
     def __bool__(self) -> bool:
         return bool(self.bullets or self.fields)
@@ -173,7 +175,8 @@ def _summary_bullets(
         chunk = offer_ids[start : start + 500]
         placeholders = ",".join("?" * len(chunk))
         rows = conn.execute(
-            "SELECT os.offer_id AS offer_id, sb.text AS text "
+            "SELECT os.offer_id AS offer_id, os.source AS source, os.status AS status, "
+            "       sb.text AS text "
             "FROM offer_summary os "
             "JOIN summary_bullet sb ON sb.summary_id = os.id "
             f"WHERE os.offer_id IN ({placeholders}) "
@@ -181,11 +184,15 @@ def _summary_bullets(
             chunk,
         ).fetchall()
         for row in rows:
-            summaries.setdefault(int(row["offer_id"]), Summary()).bullets.append(
-                str(row["text"])
+            offer_id = int(row["offer_id"])
+            summary = summaries.setdefault(
+                offer_id,
+                Summary(source=str(row["source"] or "manual"), status=str(row["status"])),
             )
+            summary.bullets.append(str(row["text"]))
         field_rows = conn.execute(
-            "SELECT os.offer_id AS offer_id, sf.key AS key, sf.value AS value "
+            "SELECT os.offer_id AS offer_id, os.source AS source, os.status AS status, "
+            "       sf.key AS key, sf.value AS value "
             "FROM offer_summary os "
             "JOIN summary_field sf ON sf.summary_id = os.id "
             f"WHERE os.offer_id IN ({placeholders})",
@@ -193,7 +200,12 @@ def _summary_bullets(
         ).fetchall()
         by_offer: dict[int, dict[str, str]] = {}
         for row in field_rows:
-            by_offer.setdefault(int(row["offer_id"]), {})[str(row["key"])] = str(row["value"])
+            offer_id = int(row["offer_id"])
+            summaries.setdefault(
+                offer_id,
+                Summary(source=str(row["source"] or "manual"), status=str(row["status"])),
+            )
+            by_offer.setdefault(offer_id, {})[str(row["key"])] = str(row["value"])
         for offer_id, values in by_offer.items():
             summaries.setdefault(offer_id, Summary()).fields = [
                 (key, values[key]) for key in FIELD_LABELS if key in values
@@ -216,6 +228,29 @@ def _offer_contents(conn: sqlite3.Connection, offer_ids: list[int]) -> dict[int,
         for row in rows:
             contents[int(row["offer_id"])] = str(row["markdown"])
     return contents
+
+
+def _offer_content_failures(
+    conn: sqlite3.Connection, offer_ids: list[int]
+) -> dict[int, tuple[str, int]]:
+    """Cause persistée des annonces indisponibles et nombre de tentatives."""
+    if not offer_ids:
+        return {}
+    failures: dict[int, tuple[str, int]] = {}
+    for start in range(0, len(offer_ids), 500):
+        chunk = offer_ids[start : start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            "SELECT offer_id, failure_reason, fetch_attempts FROM offer_content "
+            f"WHERE offer_id IN ({placeholders}) AND status = 'failed'",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            failures[int(row["offer_id"])] = (
+                str(row["failure_reason"] or "unclassified"),
+                int(row["fetch_attempts"] or 0),
+            )
+    return failures
 
 
 def _draft_rows(conn: sqlite3.Connection, match_ids: list[int]) -> dict[int, sqlite3.Row]:

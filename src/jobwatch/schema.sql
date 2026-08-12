@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS offer (
 CREATE INDEX IF NOT EXISTS idx_offer_company_title ON offer(company_id, title);
 CREATE TABLE IF NOT EXISTS offer_summary (
   id INTEGER PRIMARY KEY,
-  offer_id INTEGER NOT NULL UNIQUE REFERENCES offer(id) ON DELETE CASCADE
+  offer_id INTEGER NOT NULL UNIQUE REFERENCES offer(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'ready', -- 'ready' | 'limited_no_content' | 'limited_retryable'
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  attempted_at TEXT
 );
 CREATE TABLE IF NOT EXISTS summary_field (
   summary_id INTEGER NOT NULL REFERENCES offer_summary(id) ON DELETE CASCADE,
@@ -47,6 +50,8 @@ CREATE TABLE IF NOT EXISTS offer_content (
   extract_method TEXT,               -- 'jsonld' | 'readable' | 'raw' (repli : page entière)
   html_gz BLOB,                      -- HTML brut compressé, pour re-extraire sans refetch
   status TEXT NOT NULL,              -- 'ok' | 'failed'
+  fetch_attempts INTEGER NOT NULL DEFAULT 0,
+  failure_reason TEXT,               -- NULL si succès ; ex. 'http_410' ou causes retryables
   fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS search (

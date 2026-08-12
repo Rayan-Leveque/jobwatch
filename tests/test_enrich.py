@@ -11,7 +11,7 @@ import pytest
 
 from jobwatch.config import ENRICH_RUNNERS, EnrichConfig
 from jobwatch.db import connect, init_db
-from jobwatch.enrich import FIELD_UNKNOWN, EnrichError, enrich
+from jobwatch.enrich import FIELD_UNKNOWN, EnrichError, FetchPage, enrich
 
 
 @pytest.fixture()
@@ -58,6 +58,10 @@ def _seed_offer(
 
 def _config() -> EnrichConfig:
     return EnrichConfig(opencode_bin="opencode", model="opencode/deepseek-v4-flash-free")
+
+
+def _pi_config() -> EnrichConfig:
+    return EnrichConfig(runner="pi", pi_bin="pi", model="openai-codex/gpt-5.6-luna")
 
 
 def _no_sleep(_seconds: float) -> None:
@@ -218,7 +222,7 @@ def test_enrich_falls_back_to_playwright_on_http_failure(
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="boom")
 
-    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: LONG_HTML)
+    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: FetchPage(LONG_HTML))
     monkeypatch.setattr("jobwatch.enrich._summarize", lambda config, markdown: None)
 
     result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
@@ -239,7 +243,7 @@ def test_enrich_falls_back_to_playwright_on_short_text(
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=SHORT_HTML)
 
-    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: LONG_HTML)
+    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: FetchPage(LONG_HTML))
     monkeypatch.setattr("jobwatch.enrich._summarize", lambda config, markdown: None)
 
     enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
@@ -259,7 +263,9 @@ def test_enrich_marks_failed_when_all_fetches_fail(
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="boom")
 
-    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: None)
+    monkeypatch.setattr(
+        "jobwatch.enrich._fetch_playwright", lambda url: FetchPage(None, "browser_error")
+    )
 
     result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
 
@@ -272,9 +278,10 @@ def test_enrich_marks_failed_when_all_fetches_fail(
     assert content["markdown"] is None
     assert content["fetch_method"] is None
     summary = conn.execute(
-        "SELECT id FROM offer_summary WHERE offer_id = ?", (offer_id,)
+        "SELECT id, source, status FROM offer_summary WHERE offer_id = ?", (offer_id,)
     ).fetchone()
-    assert summary is None
+    assert summary["source"] == "metadata"
+    assert summary["status"] == "limited_retryable"
 
 
 def test_enrich_never_retries_processed_offers(conn: sqlite3.Connection, monkeypatch) -> None:
@@ -299,25 +306,455 @@ def test_enrich_never_retries_processed_offers(conn: sqlite3.Connection, monkeyp
     assert conn.execute("SELECT COUNT(*) AS n FROM offer_content").fetchone()["n"] == 1
 
 
-def test_enrich_never_retries_failed_offers(conn: sqlite3.Connection, monkeypatch) -> None:
-    _seed_offer(conn)
+@pytest.mark.parametrize(
+    ("http_failure", "browser_page", "failure_reason"),
+    (
+        ("403", FetchPage(None, "browser_error"), "http_403+browser_error"),
+        ("timeout", FetchPage(None, "browser_error"), "http_timeout+browser_error"),
+        ("short", FetchPage(None), "http_too_short+playwright_empty"),
+        ("short", FetchPage(SHORT_HTML), "http_too_short+playwright_too_short"),
+    ),
+)
+def test_enrich_retries_transient_failure_after_delay_then_succeeds(
+    conn: sqlite3.Connection,
+    monkeypatch,
+    http_failure: str,
+    browser_page: FetchPage,
+    failure_reason: str,
+) -> None:
+    offer_id = _seed_offer(conn)
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(500, text="boom")
+        if calls > 1:
+            return httpx.Response(200, text=LONG_HTML)
+        if http_failure == "timeout":
+            raise httpx.ReadTimeout("temporary timeout", request=request)
+        if http_failure == "short":
+            return httpx.Response(200, text=SHORT_HTML)
+        return httpx.Response(403, text="temporary block")
 
-    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: None)
+    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: browser_page)
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: ({"experience": "3 ans"}, {}, ["Résumé récupéré"]),
+    )
 
     first = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
     assert first.fetched_failed == 1
-    assert calls == 1
+    failed = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(failed) == ("failed", 1, failure_reason)
 
+    conn.execute(
+        "UPDATE offer_content SET fetched_at = datetime('now', '-2 days') WHERE offer_id = ?",
+        (offer_id,),
+    )
+    conn.commit()
     second = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert second.fetched_ok == 1
+    assert second.summaries_written == 1
+    recovered = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason, markdown "
+        "FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert recovered["status"] == "ok"
+    assert recovered["fetch_attempts"] == 2
+    assert recovered["failure_reason"] is None
+    assert "Ingénieur IA Paris" in recovered["markdown"]
+
+
+def test_enrich_does_not_retry_before_delay(conn: sqlite3.Connection, monkeypatch) -> None:
+    offer_id = _seed_offer(conn)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(403, text="temporary block")
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._fetch_playwright", lambda url: FetchPage(None, "browser_error")
+    )
+
+    first = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+    second = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert first.fetched_failed == 1
     assert second.fetched_failed == 0
     assert calls == 1
-    assert conn.execute("SELECT COUNT(*) AS n FROM offer_content").fetchone()["n"] == 1
+    attempts = conn.execute(
+        "SELECT fetch_attempts FROM offer_content WHERE offer_id = ?", (offer_id,)
+    ).fetchone()["fetch_attempts"]
+    assert attempts == 1
+
+
+def test_enrich_stops_at_attempt_ceiling(conn: sqlite3.Connection) -> None:
+    offer_id = _seed_offer(conn)
+    conn.execute(
+        "INSERT INTO offer_content "
+        "(offer_id, status, fetch_attempts, failure_reason, fetched_at) "
+        "VALUES (?, 'failed', 3, 'browser_error', datetime('now', '-2 days'))",
+        (offer_id,),
+    )
+    conn.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("attempt ceiling must prevent every fetch")
+
+    result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert result.fetched_ok == 0
+    assert result.fetched_failed == 0
+    assert conn.execute(
+        "SELECT fetch_attempts FROM offer_content WHERE offer_id = ?", (offer_id,)
+    ).fetchone()["fetch_attempts"] == 3
+
+
+@pytest.mark.parametrize("status_code", (404, 410))
+def test_enrich_marks_terminal_http_failures_without_retrying(
+    conn: sqlite3.Connection, monkeypatch, status_code: int
+) -> None:
+    offer_id = _seed_offer(conn)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status_code, text="gone")
+
+    def unexpected_browser(_url: str) -> FetchPage:
+        raise AssertionError("terminal HTTP failures must not launch a browser")
+
+    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", unexpected_browser)
+
+    first = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+    conn.execute(
+        "UPDATE offer_content SET fetched_at = datetime('now', '-2 days') WHERE offer_id = ?",
+        (offer_id,),
+    )
+    conn.commit()
+    second = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert first.fetched_failed == 1
+    assert second.fetched_failed == 0
+    assert calls == 1
+    failed = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(failed) == ("failed", 1, f"http_{status_code}")
+
+
+def test_enrich_retries_unclassified_legacy_failure_immediately(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(conn)
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, status, fetch_attempts, failure_reason) "
+        "VALUES (?, 'failed', 1, NULL)",
+        (offer_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr("jobwatch.enrich._summarize", lambda config, markdown: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=LONG_HTML)
+
+    result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert result.fetched_ok == 1
+    recovered = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(recovered) == ("ok", 2, None)
+
+
+def test_enrich_retries_transient_pi_summary_failure_without_refetch(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(conn)
+    fetch_calls = 0
+    summary_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return httpx.Response(200, text=LONG_HTML)
+
+    def summarize_pi(config: EnrichConfig, markdown: str):
+        nonlocal summary_calls
+        summary_calls += 1
+        if summary_calls == 1:
+            return None
+        return {"experience": "3 ans"}, {}, ["Résumé Pi récupéré"]
+
+    monkeypatch.setattr("jobwatch.enrich._summarize_pi", summarize_pi)
+    client = _http_client(handler)
+    first = enrich(conn, _pi_config(), client=client, sleep=_no_sleep)
+    limited = conn.execute(
+        "SELECT source, status, attempt_count FROM offer_summary WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert first.fetched_ok == 1
+    assert tuple(limited) == ("metadata", "limited_retryable", 1)
+
+    conn.execute(
+        "UPDATE offer_summary SET attempted_at = datetime('now', '-2 hours') "
+        "WHERE offer_id = ?",
+        (offer_id,),
+    )
+    conn.commit()
+    second = enrich(conn, _pi_config(), client=client, sleep=_no_sleep)
+    client.close()
+
+    assert second.fetched_ok == 0
+    assert second.summaries_written == 1
+    assert fetch_calls == 1
+    assert summary_calls == 2
+    upgraded = conn.execute(
+        "SELECT source, status, attempt_count FROM offer_summary WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(upgraded) == ("auto", "ready", 2)
+
+
+def test_enrich_bounds_summary_retries_and_respects_delay(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(conn)
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
+        "VALUES (?, ?, 'http', 'ok')",
+        (offer_id, "Annonce fiable " * 30),
+    )
+    conn.commit()
+    calls = 0
+
+    def failed_summary(config: EnrichConfig, markdown: str):
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr("jobwatch.enrich._summarize_pi", failed_summary)
+    first = enrich(conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep)
+    immediate = enrich(
+        conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep
+    )
+    assert first.summaries_written == 1
+    assert immediate.summaries_written == 0
+    assert calls == 1
+
+    for expected_attempts in (2, 3):
+        conn.execute(
+            "UPDATE offer_summary SET attempted_at = datetime('now', '-2 hours') "
+            "WHERE offer_id = ?",
+            (offer_id,),
+        )
+        conn.commit()
+        enrich(conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep)
+        attempts = conn.execute(
+            "SELECT attempt_count FROM offer_summary WHERE offer_id = ?", (offer_id,)
+        ).fetchone()["attempt_count"]
+        assert attempts == expected_attempts
+
+    conn.execute(
+        "UPDATE offer_summary SET attempted_at = datetime('now', '-2 hours') WHERE offer_id = ?",
+        (offer_id,),
+    )
+    conn.commit()
+    capped = enrich(conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep)
+    assert capped.summaries_written == 0
+    assert calls == 3
+
+
+def test_enrich_summarizes_stored_content_without_fetch(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(conn)
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
+        "VALUES (?, ?, 'http', 'ok')",
+        (offer_id, "Annonce fiable " * 30),
+    )
+    conn.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("stored usable content must not be fetched again")
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize_pi",
+        lambda config, markdown: ({"remote": "hybride"}, {}, ["Résumé depuis la base"]),
+    )
+    result = enrich(conn, _pi_config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert result.fetched_ok == 0
+    assert result.summaries_written == 1
+    summary = conn.execute(
+        "SELECT source, status FROM offer_summary WHERE offer_id = ?", (offer_id,)
+    ).fetchone()
+    assert tuple(summary) == ("auto", "ready")
+
+
+def test_terminal_fetch_gets_trustworthy_metadata_fallback(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(
+        conn,
+        source_name="wttj",
+        url="https://example.com/gone",
+        title="Product Owner IA",
+    )
+    conn.execute(
+        "UPDATE offer SET location = 'Paris', contract = 'permanent', platform = 'WTTJ' "
+        "WHERE id = ?",
+        (offer_id,),
+    )
+    conn.execute("UPDATE match SET fit = 'high' WHERE offer_id = ?", (offer_id,))
+    conn.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(410, text="gone")
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._fetch_playwright",
+        lambda url: (_ for _ in ()).throw(AssertionError("410 is terminal")),
+    )
+    result = enrich(conn, _pi_config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert result.fetched_failed == 1
+    summary = conn.execute(
+        "SELECT id, source, status FROM offer_summary WHERE offer_id = ?", (offer_id,)
+    ).fetchone()
+    assert summary["source"] == "metadata"
+    assert summary["status"] == "limited_no_content"
+    bullets = "\n".join(
+        row["text"]
+        for row in conn.execute(
+            "SELECT text FROM summary_bullet WHERE summary_id = ? ORDER BY position",
+            (summary["id"],),
+        )
+    )
+    for expected in ("Product Owner IA", "Paris", "permanent", "WTTJ", "test", "fit high"):
+        assert expected in bullets
+
+
+def test_metadata_fallback_upgrades_when_real_content_arrives(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(conn)
+    conn.execute(
+        "INSERT INTO offer_content "
+        "(offer_id, status, fetch_attempts, failure_reason) VALUES (?, 'failed', 1, 'http_410')",
+        (offer_id,),
+    )
+    conn.commit()
+    first = enrich(conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep)
+    assert first.summaries_written == 1
+
+    conn.execute(
+        "UPDATE offer_content SET status = 'ok', markdown = ?, fetch_method = 'http', "
+        "failure_reason = NULL WHERE offer_id = ?",
+        ("Contenu réel de l'annonce. " * 30, offer_id),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize_pi",
+        lambda config, markdown: ({"stack": "Python"}, {}, ["Mission issue du contenu réel"]),
+    )
+
+    second = enrich(
+        conn,
+        _pi_config(),
+        client=_http_client(
+            lambda request: (_ for _ in ()).throw(AssertionError("no refetch after ok"))
+        ),
+        sleep=_no_sleep,
+    )
+
+    assert second.summaries_written == 1
+    summary = conn.execute(
+        "SELECT id, source, status FROM offer_summary WHERE offer_id = ?", (offer_id,)
+    ).fetchone()
+    assert tuple(summary)[1:] == ("auto", "ready")
+    bullets = [
+        row["text"]
+        for row in conn.execute(
+            "SELECT text FROM summary_bullet WHERE summary_id = ? ORDER BY position",
+            (summary["id"],),
+        )
+    ]
+    assert bullets == ["Mission issue du contenu réel"]
+
+
+def test_metadata_fallback_keeps_bullets_when_upgrade_yields_fields_only(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(conn)
+    conn.execute(
+        "INSERT INTO offer_content "
+        "(offer_id, status, fetch_attempts, failure_reason) VALUES (?, 'failed', 1, 'http_410')",
+        (offer_id,),
+    )
+    conn.commit()
+    first = enrich(conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep)
+    assert first.summaries_written == 1
+    original_bullets = [
+        row["text"]
+        for row in conn.execute(
+            "SELECT sb.text FROM summary_bullet sb JOIN offer_summary os ON os.id = sb.summary_id "
+            "WHERE os.offer_id = ? ORDER BY sb.position",
+            (offer_id,),
+        )
+    ]
+    assert original_bullets
+
+    conn.execute(
+        "UPDATE offer_content SET status = 'ok', markdown = ?, fetch_method = 'http', "
+        "failure_reason = NULL WHERE offer_id = ?",
+        ("Contenu réel de l'annonce. " * 30, offer_id),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize_pi",
+        lambda config, markdown: ({"stack": "Python"}, {}, []),
+    )
+
+    second = enrich(
+        conn,
+        _pi_config(),
+        client=_http_client(
+            lambda request: (_ for _ in ()).throw(AssertionError("no refetch after ok"))
+        ),
+        sleep=_no_sleep,
+    )
+
+    assert second.summaries_written == 0
+    summary = conn.execute(
+        "SELECT id, source, status, attempt_count FROM offer_summary WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert summary["source"] == "metadata"
+    assert summary["attempt_count"] == 1
+    bullets = [
+        row["text"]
+        for row in conn.execute(
+            "SELECT text FROM summary_bullet WHERE summary_id = ? ORDER BY position",
+            (summary["id"],),
+        )
+    ]
+    assert bullets == original_bullets
+    field = conn.execute(
+        "SELECT value FROM summary_field WHERE summary_id = ? AND key = 'stack'",
+        (summary["id"],),
+    ).fetchone()
+    assert field["value"] == "Python"
 
 
 def test_enrich_sleeps_between_offers(conn: sqlite3.Connection, monkeypatch) -> None:

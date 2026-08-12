@@ -14,10 +14,17 @@ COLUMN_MIGRATIONS = (
     ("offer", "deadline", "TEXT"),
     ("match", "fit", "TEXT"),
     ("offer_summary", "source", "TEXT DEFAULT 'manual'"),
+    ("offer_summary", "status", "TEXT NOT NULL DEFAULT 'ready'"),
+    ("offer_summary", "attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("offer_summary", "attempted_at", "TEXT"),
     ("match", "discarded_at", "TEXT"),
     ("summary_field", "quote", "TEXT"),
     ("offer_content", "extract_method", "TEXT"),
     ("offer_content", "html_gz", "BLOB"),
+    # Les lignes existantes ont déjà subi une tentative. Leur raison reste NULL :
+    # enrich leur accorde ainsi un retry legacy immédiat, puis les classifie.
+    ("offer_content", "fetch_attempts", "INTEGER NOT NULL DEFAULT 1"),
+    ("offer_content", "failure_reason", "TEXT"),
     ("career_intent", "search_id", "INTEGER REFERENCES search(id)"),
     ("search", "archived_at", "TEXT"),
 )

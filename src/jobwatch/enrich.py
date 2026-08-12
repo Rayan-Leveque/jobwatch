@@ -52,6 +52,11 @@ log = logging.getLogger(__name__)
 MIN_MARKDOWN_LENGTH = 200
 SLEEP_MIN_SECONDS = 1.0
 SLEEP_MAX_SECONDS = 2.0
+MAX_FETCH_ATTEMPTS = 3
+FETCH_RETRY_SQL_DELAY = "-1 day"
+TERMINAL_HTTP_STATUSES = frozenset({404, 410})
+MAX_SUMMARY_ATTEMPTS = 3
+SUMMARY_RETRY_SQL_DELAY = "-1 hour"
 
 # Champs fixes du résumé structuré, dans l'ordre d'affichage.
 FIELD_KEYS = ("experience", "salary", "remote", "stack")
@@ -147,6 +152,25 @@ class EnrichResult:
         return " ; ".join(parts)
 
 
+@dataclass(frozen=True)
+class FetchPage:
+    """Résultat d'une voie de récupération, avant extraction du texte."""
+
+    html: str | None
+    failure_reason: str | None = None
+    terminal: bool = False
+
+
+@dataclass(frozen=True)
+class FetchOutcome:
+    """Résultat complet d'un fetch, y compris sa cause d'échec persistable."""
+
+    extraction: Extraction | None
+    fetch_method: str | None
+    html: str | None
+    failure_reason: str | None = None
+
+
 def _thousands(value: int) -> str:
     """Sépare les milliers par une espace insécable, comme en français."""
     return f"{value:,}".replace(",", " ")
@@ -157,49 +181,109 @@ def _pending_offers(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
     Une offre est active si un match new/seen/later ou une candidature la
     référence (la corbeille et les offres sans match ne coûtent aucun token).
-    Une offre dont le fetch a déjà échoué n'est jamais retentée.
+    Les échecs retryables sont repris après 24 h, jusqu'à trois tentatives.
+    Les anciennes lignes sans classification ont droit à un retry immédiat.
     """
     return conn.execute(
-        "SELECT o.id AS id, o.url AS url, "
-        "       (SELECT oc.status FROM offer_content oc WHERE oc.offer_id = o.id) "
-        "       AS content_status "
-        "FROM offer o "
+        "SELECT o.id AS id, o.url AS url, oc.status AS content_status, "
+        "       oc.fetch_attempts AS fetch_attempts, oc.failure_reason AS failure_reason, "
+        "       os.id AS summary_id, os.source AS summary_source, "
+        "       os.status AS summary_status, os.attempt_count AS summary_attempts, "
+        "       CASE WHEN oc.id IS NULL OR "
+        "          (oc.status = 'failed' AND oc.fetch_attempts < ? "
+        "           AND (oc.failure_reason IS NULL "
+        "                OR (oc.failure_reason NOT IN ('http_404', 'http_410') "
+        "                    AND oc.fetched_at <= datetime('now', ?)))) "
+        "       THEN 1 ELSE 0 END AS fetch_due "
+        "FROM offer o LEFT JOIN offer_content oc ON oc.offer_id = o.id "
+        "LEFT JOIN offer_summary os ON os.offer_id = o.id "
         "WHERE (EXISTS (SELECT 1 FROM match m WHERE m.offer_id = o.id "
         "               AND m.state IN ('new', 'seen', 'later')) "
         "   OR EXISTS (SELECT 1 FROM application a WHERE a.offer_id = o.id)) "
-        "AND (NOT EXISTS (SELECT 1 FROM offer_content oc WHERE oc.offer_id = o.id) "
-        "  OR (EXISTS (SELECT 1 FROM offer_content oc WHERE oc.offer_id = o.id "
-        "              AND oc.status = 'ok') "
+        "AND (oc.id IS NULL "
+        "  OR (oc.status = 'failed' AND oc.fetch_attempts < ? "
+        "      AND (oc.failure_reason IS NULL "
+        "           OR (oc.failure_reason NOT IN ('http_404', 'http_410') "
+        "               AND oc.fetched_at <= datetime('now', ?)))) "
+        "  OR os.id IS NULL "
+        "  OR NOT EXISTS (SELECT 1 FROM summary_bullet sb WHERE sb.summary_id = os.id) "
+        "     AND NOT EXISTS (SELECT 1 FROM summary_field sf WHERE sf.summary_id = os.id) "
+        "  OR (oc.status = 'ok' AND os.source = 'metadata' "
+        "      AND os.attempt_count < ? "
+        "      AND (os.attempt_count = 0 OR os.attempted_at <= datetime('now', ?))) "
+        "  OR (oc.status = 'ok' AND os.source != 'metadata' "
         "      AND NOT EXISTS (SELECT 1 FROM offer_summary os "
         "                      JOIN summary_field sf ON sf.summary_id = os.id "
         "                      WHERE os.offer_id = o.id))) "
-        "ORDER BY o.id"
+        "ORDER BY o.id",
+        (
+            MAX_FETCH_ATTEMPTS,
+            FETCH_RETRY_SQL_DELAY,
+            MAX_FETCH_ATTEMPTS,
+            FETCH_RETRY_SQL_DELAY,
+            MAX_SUMMARY_ATTEMPTS,
+            SUMMARY_RETRY_SQL_DELAY,
+        ),
     ).fetchall()
 
 
-def _fetch_http(url: str, client: httpx.Client) -> str | None:
+def _fetch_http(url: str, client: httpx.Client) -> FetchPage:
     try:
         response = client.get(url, follow_redirects=True)
         response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        log.warning("enrich: http fetch failed for %s: %s", url, exc)
+        return FetchPage(None, "http_timeout")
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        log.warning("enrich: http fetch failed for %s: %s", url, exc)
+        return FetchPage(
+            None,
+            f"http_{status}",
+            terminal=status in TERMINAL_HTTP_STATUSES,
+        )
     except httpx.HTTPError as exc:
         log.warning("enrich: http fetch failed for %s: %s", url, exc)
-        return None
-    return response.text
+        return FetchPage(None, "http_error")
+    return FetchPage(response.text)
 
 
-def _fetch_playwright(url: str) -> str | None:
+def _fetch_playwright(url: str) -> FetchPage:
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             try:
                 page = browser.new_page()
-                page.goto(url, timeout=30_000, wait_until="domcontentloaded")
-                return page.content()
+                response = page.goto(url, timeout=30_000, wait_until="domcontentloaded")
+                if response is not None and response.status in TERMINAL_HTTP_STATUSES:
+                    return FetchPage(None, f"http_{response.status}", terminal=True)
+                return FetchPage(page.content())
             finally:
                 browser.close()
     except Exception as exc:  # noqa: BLE001 - un site tiers cassé ne doit jamais arrêter le run
         log.warning("enrich: playwright fetch failed for %s: %s", url, exc)
-        return None
+        return FetchPage(None, "browser_error")
+
+
+def _fetch_and_extract_result(url: str, client: httpx.Client) -> FetchOutcome:
+    """Récupère puis extrait une offre, avec une cause d'échec classifiable."""
+    fetchers = (
+        ("http", lambda: _fetch_http(url, client)),
+        ("playwright", lambda: _fetch_playwright(url)),
+    )
+    failure_reasons: list[str] = []
+    for method, fetch in fetchers:
+        page = fetch()
+        if page.terminal:
+            return FetchOutcome(None, None, None, page.failure_reason)
+        if not page.html:
+            failure_reasons.append(page.failure_reason or f"{method}_empty")
+            continue
+        result = extract(page.html)
+        if len(result.markdown) >= MIN_MARKDOWN_LENGTH:
+            return FetchOutcome(result, method, page.html)
+        failure_reasons.append(f"{method}_too_short")
+    return FetchOutcome(None, None, None, "+".join(failure_reasons))
 
 
 def _fetch_and_extract(
@@ -211,18 +295,8 @@ def _fetch_and_extract(
     page trop courte est une page morte ou un mur de connexion, indépendamment
     de la qualité de l'extraction qu'on en tirera.
     """
-    fetchers = (
-        ("http", lambda: _fetch_http(url, client)),
-        ("playwright", lambda: _fetch_playwright(url)),
-    )
-    for method, fetch in fetchers:
-        html = fetch()
-        if not html:
-            continue
-        result = extract(html)
-        if len(result.markdown) >= MIN_MARKDOWN_LENGTH:
-            return result, method, html
-    return None, None, None
+    outcome = _fetch_and_extract_result(url, client)
+    return outcome.extraction, outcome.fetch_method, outcome.html
 
 
 def _store_content(
@@ -231,6 +305,7 @@ def _store_content(
     result: Extraction | None,
     fetch_method: str | None,
     html: str | None,
+    failure_reason: str | None,
 ) -> None:
     """Enregistre le bloc utile, sa provenance et le HTML brut compressé.
 
@@ -239,10 +314,12 @@ def _store_content(
     """
     conn.execute(
         "INSERT INTO offer_content (offer_id, markdown, fetch_method, extract_method, "
-        "html_gz, status) VALUES (?, ?, ?, ?, ?, ?) "
+        "html_gz, status, fetch_attempts, failure_reason) VALUES (?, ?, ?, ?, ?, ?, 1, ?) "
         "ON CONFLICT(offer_id) DO UPDATE SET markdown = excluded.markdown, "
         "fetch_method = excluded.fetch_method, extract_method = excluded.extract_method, "
-        "html_gz = excluded.html_gz, status = excluded.status, fetched_at = datetime('now')",
+        "html_gz = excluded.html_gz, status = excluded.status, "
+        "fetch_attempts = offer_content.fetch_attempts + 1, "
+        "failure_reason = excluded.failure_reason, fetched_at = datetime('now')",
         (
             offer_id,
             result.markdown if result is not None else None,
@@ -250,6 +327,7 @@ def _store_content(
             result.method if result is not None else None,
             gzip.compress(html.encode("utf-8")) if html else None,
             "ok" if result is not None else "failed",
+            failure_reason,
         ),
     )
     conn.commit()
@@ -400,16 +478,47 @@ def _write_summary(
     tout résumé qui n'en a pas encore.
     """
     row = conn.execute(
-        "SELECT id FROM offer_summary WHERE offer_id = ?", (offer_id,)
+        "SELECT id, source, attempt_count FROM offer_summary WHERE offer_id = ?", (offer_id,)
     ).fetchone()
     summary_written = False
     if row is not None:
         summary_id = int(row["id"])
+        if row["source"] == "metadata":
+            if bullets:
+                conn.execute("DELETE FROM summary_bullet WHERE summary_id = ?", (summary_id,))
+                conn.execute("DELETE FROM summary_field WHERE summary_id = ?", (summary_id,))
+                conn.execute(
+                    "UPDATE offer_summary SET source = 'auto', status = 'ready', "
+                    "attempt_count = attempt_count + 1, attempted_at = datetime('now') "
+                    "WHERE id = ?",
+                    (summary_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE offer_summary SET "
+                    "attempt_count = attempt_count + 1, attempted_at = datetime('now') "
+                    "WHERE id = ?",
+                    (summary_id,),
+                )
+        elif row["source"] != "manual":
+            conn.execute(
+                "UPDATE offer_summary SET status = 'ready', "
+                "attempt_count = attempt_count + 1, attempted_at = datetime('now') "
+                "WHERE id = ?",
+                (summary_id,),
+            )
     else:
         cur = conn.execute(
-            "INSERT INTO offer_summary (offer_id, source) VALUES (?, 'auto')", (offer_id,)
+            "INSERT INTO offer_summary "
+            "(offer_id, source, status, attempt_count, attempted_at) "
+            "VALUES (?, 'auto', 'ready', 1, datetime('now'))",
+            (offer_id,),
         )
         summary_id = int(cur.lastrowid)
+    has_bullets = conn.execute(
+        "SELECT 1 FROM summary_bullet WHERE summary_id = ? LIMIT 1", (summary_id,)
+    ).fetchone()
+    if not has_bullets and bullets:
         conn.executemany(
             "INSERT INTO summary_bullet (summary_id, position, text) VALUES (?, ?, ?)",
             ((summary_id, position, bullet) for position, bullet in enumerate(bullets)),
@@ -428,6 +537,97 @@ def _write_summary(
         fields_written = True
     conn.commit()
     return summary_written, fields_written
+
+
+def _metadata_summary_bullets(conn: sqlite3.Connection, offer_id: int) -> list[str]:
+    """Résumé déterministe limité aux métadonnées fiables déjà stockées."""
+    row = conn.execute(
+        "SELECT o.title AS title, c.name AS company, o.location AS location, "
+        "       o.contract AS contract, o.platform AS platform, src.name AS source_name, "
+        "       o.published_at AS published_at, o.deadline AS deadline, "
+        "       (SELECT s.name FROM match m JOIN search s ON s.id = m.search_id "
+        "        WHERE m.offer_id = o.id AND s.archived_at IS NULL ORDER BY m.id LIMIT 1) "
+        "       AS search_name, "
+        "       (SELECT m.fit FROM match m WHERE m.offer_id = o.id "
+        "        AND m.fit IS NOT NULL ORDER BY m.id LIMIT 1) AS fit "
+        "FROM offer o LEFT JOIN company c ON c.id = o.company_id "
+        "JOIN source src ON src.id = o.source_id WHERE o.id = ?",
+        (offer_id,),
+    ).fetchone()
+    if row is None:
+        return ["Informations limitées : métadonnées de l'offre indisponibles."]
+    bullets = [
+        "Résumé limité aux métadonnées enregistrées ; le texte de l'annonce n'est pas disponible.",
+        f"Poste enregistré : {row['title']} chez {row['company'] or 'société inconnue'}.",
+    ]
+    if row["location"]:
+        bullets.append(f"Lieu enregistré : {row['location']}.")
+    if row["contract"]:
+        bullets.append(f"Contrat enregistré : {row['contract']}.")
+    source = row["platform"] or row["source_name"]
+    if source:
+        bullets.append(f"Source enregistrée : {source}.")
+    category = row["search_name"]
+    fit = row["fit"]
+    if category or fit:
+        detail = " · ".join(
+            part
+            for part in (
+                f"catégorie {category}" if category else "",
+                f"fit {fit}" if fit else "",
+            )
+            if part
+        )
+        bullets.append(f"Classement Jobwatch : {detail}.")
+    if row["published_at"]:
+        bullets.append(f"Publication enregistrée : {row['published_at']}.")
+    if row["deadline"]:
+        bullets.append(f"Échéance enregistrée : {row['deadline']}.")
+    return bullets
+
+
+def _write_metadata_summary(
+    conn: sqlite3.Connection,
+    offer_id: int,
+    *,
+    retryable: bool,
+    summary_attempted: bool = False,
+) -> bool:
+    """Crée ou actualise un résumé limité sans écraser un résumé fiable."""
+    row = conn.execute(
+        "SELECT id, source FROM offer_summary WHERE offer_id = ?", (offer_id,)
+    ).fetchone()
+    status = "limited_retryable" if retryable else "limited_no_content"
+    if row is not None and row["source"] != "metadata":
+        return False
+    if row is None:
+        cur = conn.execute(
+            "INSERT INTO offer_summary "
+            "(offer_id, source, status, attempt_count, attempted_at) "
+            "VALUES (?, 'metadata', ?, ?, datetime('now'))",
+            (offer_id, status, int(summary_attempted)),
+        )
+        summary_id = int(cur.lastrowid)
+        created = True
+    else:
+        summary_id = int(row["id"])
+        conn.execute("DELETE FROM summary_bullet WHERE summary_id = ?", (summary_id,))
+        conn.execute("DELETE FROM summary_field WHERE summary_id = ?", (summary_id,))
+        conn.execute(
+            "UPDATE offer_summary SET status = ?, "
+            "attempt_count = attempt_count + ?, attempted_at = datetime('now') WHERE id = ?",
+            (status, int(summary_attempted), summary_id),
+        )
+        created = False
+    conn.executemany(
+        "INSERT INTO summary_bullet (summary_id, position, text) VALUES (?, ?, ?)",
+        (
+            (summary_id, position, bullet)
+            for position, bullet in enumerate(_metadata_summary_bullets(conn, offer_id))
+        ),
+    )
+    conn.commit()
+    return created
 
 
 def enrich(
@@ -466,18 +666,36 @@ def enrich(
     # n'a pas trouvé, sans coûter un seul token.
     jsonld_fields: dict[int, dict[str, str]] = {}
     try:
-        fetch_remaining = sum(1 for offer in offers if offer["content_status"] is None)
+        fetch_remaining = sum(int(offer["fetch_due"]) for offer in offers)
         for offer in offers:
             offer_id = int(offer["id"])
             url = str(offer["url"])
-            if offer["content_status"] is None:
+            content_status = offer["content_status"]
+            if offer["fetch_due"]:
                 fetch_remaining -= 1
-                extracted, fetch_method, html = _fetch_and_extract(url, http_client)
-                _store_content(conn, offer_id, extracted, fetch_method, html)
+                fetch = _fetch_and_extract_result(url, http_client)
+                extracted = fetch.extraction
+                _store_content(
+                    conn,
+                    offer_id,
+                    extracted,
+                    fetch.fetch_method,
+                    fetch.html,
+                    fetch.failure_reason,
+                )
                 if extracted is None:
                     result.fetched_failed += 1
+                    attempts = int(offer["fetch_attempts"] or 0) + 1
+                    terminal = fetch.failure_reason in ("http_404", "http_410")
+                    if _write_metadata_summary(
+                        conn,
+                        offer_id,
+                        retryable=not terminal and attempts < MAX_FETCH_ATTEMPTS,
+                    ):
+                        result.summaries_written += 1
                     log.info("enrich: offre %d ECHEC fetch %s", offer_id, url)
                     continue
+                content_status = "ok"
                 result.fetched_ok += 1
                 result.extract_methods[extracted.method] += 1
                 result.raw_chars += extracted.raw_chars
@@ -485,7 +703,7 @@ def enrich(
                 log.info(
                     "enrich: offre %d %s/%s %d -> %d car.%s%s %s",
                     offer_id,
-                    fetch_method,
+                    fetch.fetch_method,
                     extracted.method,
                     extracted.raw_chars,
                     len(extracted.markdown),
@@ -503,21 +721,38 @@ def enrich(
                 # un texte déjà en base ne martèle personne.
                 if fetch_remaining > 0:
                     sleep(random.uniform(SLEEP_MIN_SECONDS, SLEEP_MAX_SECONDS))
-            else:
+            if content_status == "ok" and not offer["fetch_due"]:
                 row = conn.execute(
                     "SELECT markdown FROM offer_content WHERE offer_id = ?", (offer_id,)
                 ).fetchone()
                 markdown = str(row["markdown"]) if row and row["markdown"] else None
                 if markdown is not None:
                     futures[pool.submit(_summarize, config, markdown)] = offer_id
+            elif content_status != "ok" and not offer["fetch_due"]:
+                attempts = int(offer["fetch_attempts"] or 0)
+                terminal = offer["failure_reason"] in ("http_404", "http_410")
+                if _write_metadata_summary(
+                    conn,
+                    offer_id,
+                    retryable=not terminal and attempts < MAX_FETCH_ATTEMPTS,
+                ):
+                    result.summaries_written += 1
         for future in as_completed(futures):
             offer_id = futures[future]
             try:
                 summarized = future.result()
             except Exception:  # un résumé qui plante ne doit pas emporter le run
                 log.exception("enrich: summary worker failed for offer %d", offer_id)
+                if _write_metadata_summary(
+                    conn, offer_id, retryable=True, summary_attempted=True
+                ):
+                    result.summaries_written += 1
                 continue
             if summarized is None:
+                if _write_metadata_summary(
+                    conn, offer_id, retryable=True, summary_attempted=True
+                ):
+                    result.summaries_written += 1
                 continue
             fields, quotes, bullets = summarized
             # Le JSON-LD ne sert qu'à combler : ce que le modèle a lu dans
