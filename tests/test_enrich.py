@@ -693,6 +693,70 @@ def test_metadata_fallback_upgrades_when_real_content_arrives(
     assert bullets == ["Mission issue du contenu réel"]
 
 
+def test_metadata_fallback_keeps_bullets_when_upgrade_yields_fields_only(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(conn)
+    conn.execute(
+        "INSERT INTO offer_content "
+        "(offer_id, status, fetch_attempts, failure_reason) VALUES (?, 'failed', 1, 'http_410')",
+        (offer_id,),
+    )
+    conn.commit()
+    first = enrich(conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep)
+    assert first.summaries_written == 1
+    original_bullets = [
+        row["text"]
+        for row in conn.execute(
+            "SELECT sb.text FROM summary_bullet sb JOIN offer_summary os ON os.id = sb.summary_id "
+            "WHERE os.offer_id = ? ORDER BY sb.position",
+            (offer_id,),
+        )
+    ]
+    assert original_bullets
+
+    conn.execute(
+        "UPDATE offer_content SET status = 'ok', markdown = ?, fetch_method = 'http', "
+        "failure_reason = NULL WHERE offer_id = ?",
+        ("Contenu réel de l'annonce. " * 30, offer_id),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize_pi",
+        lambda config, markdown: ({"stack": "Python"}, {}, []),
+    )
+
+    second = enrich(
+        conn,
+        _pi_config(),
+        client=_http_client(
+            lambda request: (_ for _ in ()).throw(AssertionError("no refetch after ok"))
+        ),
+        sleep=_no_sleep,
+    )
+
+    assert second.summaries_written == 0
+    summary = conn.execute(
+        "SELECT id, source, status, attempt_count FROM offer_summary WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert summary["source"] == "metadata"
+    assert summary["attempt_count"] == 1
+    bullets = [
+        row["text"]
+        for row in conn.execute(
+            "SELECT text FROM summary_bullet WHERE summary_id = ? ORDER BY position",
+            (summary["id"],),
+        )
+    ]
+    assert bullets == original_bullets
+    field = conn.execute(
+        "SELECT value FROM summary_field WHERE summary_id = ? AND key = 'stack'",
+        (summary["id"],),
+    ).fetchone()
+    assert field["value"] == "Python"
+
+
 def test_enrich_sleeps_between_offers(conn: sqlite3.Connection, monkeypatch) -> None:
     _seed_offer(conn, url="https://example.com/1")
     _seed_offer(conn, url="https://example.com/2")

@@ -484,14 +484,22 @@ def _write_summary(
     if row is not None:
         summary_id = int(row["id"])
         if row["source"] == "metadata":
-            conn.execute("DELETE FROM summary_bullet WHERE summary_id = ?", (summary_id,))
-            conn.execute("DELETE FROM summary_field WHERE summary_id = ?", (summary_id,))
-            conn.execute(
-                "UPDATE offer_summary SET source = 'auto', status = 'ready', "
-                "attempt_count = attempt_count + 1, attempted_at = datetime('now') "
-                "WHERE id = ?",
-                (summary_id,),
-            )
+            if bullets:
+                conn.execute("DELETE FROM summary_bullet WHERE summary_id = ?", (summary_id,))
+                conn.execute("DELETE FROM summary_field WHERE summary_id = ?", (summary_id,))
+                conn.execute(
+                    "UPDATE offer_summary SET source = 'auto', status = 'ready', "
+                    "attempt_count = attempt_count + 1, attempted_at = datetime('now') "
+                    "WHERE id = ?",
+                    (summary_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE offer_summary SET "
+                    "attempt_count = attempt_count + 1, attempted_at = datetime('now') "
+                    "WHERE id = ?",
+                    (summary_id,),
+                )
         elif row["source"] != "manual":
             conn.execute(
                 "UPDATE offer_summary SET status = 'ready', "
