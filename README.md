@@ -14,7 +14,8 @@ et inertes sans configuration explicite : `research` complète les collecteurs d
 recherche web large, `jw enrich` extrait et résume les annonces collectées, et le tableau de bord
 peut rédiger des lettres de motivation. Les appels passent par un binaire OpenCode ou Codex local,
 lancé en bac à sable : Codex ignore la configuration utilisateur et tourne sans outil local,
-OpenCode voit chacun de ses outils refusé nommément (seule `research` rouvre le web).
+OpenCode voit chacun de ses outils refusé nommément (seule `research` rouvre le web). `jw enrich`
+accepte aussi Pi comme runner, exécuté sans outil et sans session persistante.
 
 ## Démarrage rapide
 
