@@ -234,8 +234,10 @@ C'est le moment de swiper. » s'affiche à l'arrivée sur le tableau de bord (un
 session de navigation et par piste ; « Plus tard », un clic hors du panneau ou Échap le
 ferment) et un bouton discret avec badge dans la barre du haut reste disponible en
 permanence. Les deux mènent à une interface de tri une-par-une (`/swipe` pour Ingénieur IA, `/po/swipe` pour Chef de
-projet / PO) : une carte plein écran par offre (titre, société, métadonnées, résumé, annonce
-complète dépliable, lien), les offres `fit high` d'abord. Flèche droite, bouton ✓ ou glisser
+projet / PO) : une carte plein écran par offre (titre, société, icône de lien externe dans
+l'en-tête, métadonnées, résumé, annonce complète dépliable), les offres `fit high` d'abord.
+Faire défiler l'annonce complète dépliée reste un défilement vertical natif ; seul un geste
+horizontal déclenche le swipe. Flèche droite, bouton ✓ ou glisser
 vers la droite : l'offre part dans `À candidater` ; flèche gauche, bouton ✕ ou glisser vers la
 gauche : elle part dans la `Corbeille`. Flèche haut ou bouton ↩ annule le dernier geste et
 remet la carte sur le paquet.
