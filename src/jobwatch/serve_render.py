@@ -93,7 +93,15 @@ def _link(url: object) -> str:
     if scheme not in ("http", "https"):
         return ""
     escaped = html.escape(value)
-    return f'<a href="{escaped}" target="_blank" rel="noopener noreferrer">offre ↗</a>'
+    return (
+        f'<a class="offer-link" href="{escaped}" target="_blank" '
+        'rel="noopener noreferrer" aria-label="Voir l’offre externe">'
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+        'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" '
+        'aria-hidden="true"><path d="M14 5h5v5"/><path d="m19 5-8 8"/>'
+        '<path d="M18 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>'
+        "</svg></a>"
+    )
 
 
 def _meta(
@@ -103,7 +111,7 @@ def _meta(
     search_name: object = None,
     deadline: object = None,
 ) -> str:
-    """Ligne de métadonnées : plateforme, lieu, contrat, deadline, recherche, date, lien."""
+    """Ligne informative : plateforme, lieu, contrat, deadline, recherche et date."""
     parts: list[str] = []
     if row["platform"]:
         parts.append(f'<span class="platform">{html.escape(str(row["platform"]))}</span>')
@@ -121,9 +129,6 @@ def _meta(
         text.append(f"{date_label} {_short_date(str(date))}")
     if text:
         parts.append(html.escape(" · ".join(text)))
-    link = _link(row["url"])
-    if link:
-        parts.append(link)
     return " · ".join(parts)
 
 
@@ -616,6 +621,7 @@ def _match_card(
     company = html.escape(str(row["company"] or "Société inconnue"))
     title = html.escape(str(row["title"] or ""))
     pill = _fit_pill(row["fit"])
+    link = _link(row["url"])
     meta = _meta(row, "collecté le", row["collected_at"], row["search_name"], row["deadline"])
     summary_button, summary_panel = _summary_panel(row, summary, "match")
     content_button, content_panel = _content_panel(row, content, "match")
@@ -634,7 +640,7 @@ def _match_card(
         f'<article class="row row-{cls}" '
         f'data-search="{html.escape(_search_haystack(row), quote=True)}"><div class="body">'
         f'<div class="card-topline"><div class="company">{company}</div>'
-        f'<div class="card-badges">{pill}</div></div>'
+        f'<div class="card-badges">{pill}{link}</div></div>'
         f'<div class="role">{title}</div>'
         f'<div class="meta">{meta}</div></div>{actions_html}{reader}'
         "</article>"
@@ -656,6 +662,7 @@ def _application_card(
     company = html.escape(str(row["company"] or "Société inconnue"))
     title = html.escape(str(row["title"] or ""))
     pill = f'<span class="pill {cls}">{html.escape(label)}</span>'
+    link = _link(row["url"])
     meta = _meta(row, "candidature le", row["created_at"], row["search_name"])
     note = f'<p class="note">{html.escape(str(row["note"]))}</p>' if row["note"] else ""
     summary_button, summary_panel = _summary_panel(row, summary, "application")
@@ -675,7 +682,7 @@ def _application_card(
         f'<article class="row row-applied" '
         f'data-search="{html.escape(_search_haystack(row), quote=True)}"><div class="body">'
         f'<div class="card-topline"><div class="company">{company}</div>'
-        f'<div class="card-badges">{pill}</div></div>'
+        f'<div class="card-badges">{pill}{link}</div></div>'
         f'<div class="role">{title}</div>'
         f'<div class="meta">{meta}</div>{note}</div>{reader}</article>'
     )
@@ -890,6 +897,7 @@ def _swipe_card(row: sqlite3.Row, summary: Summary, content: str | None) -> str:
     company = html.escape(str(row["company"] or "Société inconnue"))
     title = html.escape(str(row["title"] or ""))
     pill = _fit_pill(row["fit"])
+    link = _link(row["url"])
     meta = _meta(row, "collecté le", row["collected_at"], row["search_name"], row["deadline"])
     summary_html = ""
     if summary:
@@ -912,7 +920,7 @@ def _swipe_card(row: sqlite3.Row, summary: Summary, content: str | None) -> str:
         f'<article class="swipe-card" data-match-id="{int(row["id"])}">'
         '<div class="swipe-card-scroll">'
         f'<div class="card-topline"><div class="company">{company}</div>'
-        f'<div class="card-badges">{pill}</div></div>'
+        f'<div class="card-badges">{pill}{link}</div></div>'
         f'<div class="role">{title}</div>'
         f'<div class="meta">{meta}</div>'
         f"{summary_html}{content_html}"

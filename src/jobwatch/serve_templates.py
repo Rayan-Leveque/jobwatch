@@ -379,7 +379,7 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .row.row-removing { opacity:0; transform:translateX(18px) }
 .row .body { position:relative; z-index:2; min-width:0 }
 .card-topline { display:flex; align-items:flex-start; justify-content:space-between; gap:10px }
-.card-badges { display:flex; align-items:center; gap:10px }
+.card-badges { display:flex; flex:none; align-items:center; gap:7px }
 .summary-chevron { width:9px; height:9px; margin:0 4px 4px 0; border-right:2px solid var(--muted);
   border-bottom:2px solid var(--muted); transform:rotate(45deg); transition:transform .2s ease }
 .company { min-width:0; overflow-wrap:anywhere; color:var(--fg); font-size:.74rem; line-height:1.35;
@@ -409,10 +409,11 @@ h1 span { color:var(--muted-2); font-weight:620 }
   color:var(--muted); font-size:.72rem; line-height:1.4; overflow-wrap:anywhere }
 .platform { min-height:24px; display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px;
   color:var(--blue); background:var(--blue-soft); font-size:.64rem; font-weight:760; letter-spacing:.015em }
-.meta a { position:relative; z-index:3; min-height:38px; display:inline-flex; align-items:center;
-  padding:0 12px; border:1px solid var(--line); pointer-events:auto;
-  border-radius:11px; color:var(--fg); background:var(--surface); font-size:.69rem; font-weight:680;
-  text-decoration:none; transition:border-color .15s ease, background .15s ease }
+.offer-link { position:relative; z-index:3; width:34px; height:34px; flex:0 0 34px;
+  display:grid; place-items:center; border:1px solid var(--line); border-radius:11px;
+  color:var(--fg); background:var(--surface); pointer-events:auto; text-decoration:none;
+  transition:border-color .15s ease, background .15s ease }
+.offer-link svg { width:16px; height:16px }
 .note { margin:12px 0 0; padding:11px 12px; border:1px dashed var(--line-strong);
   border-radius:12px; color:var(--muted); background:color-mix(in srgb, var(--surface) 55%, transparent);
   font-size:.75rem; overflow-wrap:anywhere }
@@ -667,7 +668,7 @@ a { color:var(--blue) }
 @media (hover:hover) {
   .theme-toggle:hover, .clear-search:hover { background:var(--surface-hover) }
   .row:hover { transform:translateY(-1px); border-color:var(--line-strong); background:var(--surface-hover) }
-  .meta a:hover { border-color:var(--line-strong); background:var(--surface-hover) }
+  .offer-link:hover { border-color:var(--line-strong); background:var(--surface-hover) }
 }
 @media (min-width:620px) {
   .shell { padding-left:24px; padding-right:24px }

@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from test_serve import _add_content, _add_summary, _seed_offer
+from test_serve import _add_content, _add_summary, _apply, _seed_offer
 
 import jobwatch.serve as serve_module
 from jobwatch.auth import create_invite
@@ -202,6 +202,43 @@ def _assert_no_horizontal_overflow(page) -> None:
     assert page.evaluate(
         "document.documentElement.scrollWidth <= window.innerWidth + 1"
     )
+
+
+def _assert_offer_link_in_header(card) -> None:
+    link = card.get_by_role("link", name="Voir l’offre externe")
+    expect(link).to_have_count(1)
+    expect(link).to_have_attribute("target", "_blank")
+    expect(link).to_have_attribute("rel", "noopener noreferrer")
+    assert link.evaluate("el => el.parentElement.classList.contains('card-badges')")
+    expect(card.locator(".meta a")).to_have_count(0)
+    assert not card.locator(".meta").inner_text().rstrip().endswith("·")
+    dimensions = link.evaluate(
+        "el => ({width: el.getBoundingClientRect().width, "
+        "height: el.getBoundingClientRect().height})"
+    )
+    assert dimensions["width"] == dimensions["height"]
+    assert dimensions["width"] <= 36
+
+
+def test_offer_link_is_a_header_icon_on_match_application_and_swipe_cards(
+    browser, dashboard
+) -> None:
+    url, db_path = dashboard
+    conn = connect(db_path)
+    match_id, offer_id = _seed_offer(
+        conn, company="AppliedCo", title="Applied Role", state="new"
+    )
+    _apply(conn, match_id, offer_id)
+    conn.close()
+
+    page = _open_page(browser, url)
+    _assert_offer_link_in_header(_card(page, "NewCo"))
+    page.locator(".section-applied > summary").click()
+    _assert_offer_link_in_header(_card(page, "AppliedCo"))
+
+    page.goto(f"{url}/swipe")
+    _assert_offer_link_in_header(page.locator(".swipe-card.top"))
+    page.close()
 
 
 def test_onboarding_actions_are_balanced_on_both_paths(browser, onboarding_instance) -> None:

@@ -561,9 +561,9 @@ def test_summary_reader_preserves_external_link_interaction(
 
     assert 'class="reader-tab summary-toggle"' in page
     assert 'class="card-reader"' in page
+    assert 'class="offer-link"' in page
+    assert 'aria-label="Voir l’offre externe"' in page
     assert 'target="_blank"' in page
-    assert ".meta a { position:relative; z-index:3" in page
-    assert "pointer-events:auto" in page
 
 
 def test_content_panel_renders_escaped_and_collapsible(conn: sqlite3.Connection) -> None:
