@@ -12,6 +12,8 @@ MAX_LEVEL = 5
 DEFAULT_MIN_LEVEL = MIN_LEVEL
 DEFAULT_MAX_LEVEL = MAX_LEVEL
 
+OFFER_WINDOW_DAYS = 60
+
 SENIORITY_LEVELS = (
     (0, "Stage"),
     (1, "Alternance"),
@@ -197,7 +199,7 @@ def reclassify_recent_matches(conn: sqlite3.Connection, account_id: int) -> int:
         for row in conn.execute(
             "SELECT m.id FROM match m JOIN offer o ON o.id = m.offer_id "
             "WHERE m.state IN ('new', 'seen') "
-            "AND o.collected_at >= datetime('now', '-60 days') ORDER BY m.id",
+            f"AND o.collected_at >= datetime('now', '-{OFFER_WINDOW_DAYS} days') ORDER BY m.id",
         ).fetchall()
     ]
     for match_id in match_ids:

@@ -6,9 +6,7 @@ import json
 import sqlite3
 
 from jobwatch.config import SearchConfig
-from jobwatch.seniority import assess_new_match
-
-OFFER_WINDOW_DAYS = 60
+from jobwatch.seniority import OFFER_WINDOW_DAYS, assess_new_match
 
 
 def _json_list(values: list[str]) -> str:

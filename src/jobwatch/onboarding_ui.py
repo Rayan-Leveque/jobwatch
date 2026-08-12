@@ -462,14 +462,14 @@ document.getElementById('confirm').addEventListener('click', async event => {{
   const intents = cards.filter(complete);
   if (!intents.length) {{ status.textContent = 'Ajoutez au moins une catégorie avec un mot-clé.';
     status.classList.add('error'); return; }}
-  button.disabled = true; status.textContent = 'Enregistrement de vos catégories…';
-  status.classList.remove('error');
   const seniorityMin=Number(document.getElementById('seniority-min').value);
   const seniorityMax=Number(document.getElementById('seniority-max').value);
   if (seniorityMin > seniorityMax) {{
     status.textContent='Le niveau minimum doit précéder le niveau maximum.';
     status.classList.add('error'); return;
   }}
+  button.disabled = true; status.textContent = 'Enregistrement de vos catégories…';
+  status.classList.remove('error');
   const coverLettersEnabled=document.querySelector('[name="cover_letters_enabled"]:checked').value==='true';
   try {{ const result=await post('/onboarding/complete', {{cv_library_ids:cvLibraryIds, intents,
       seniority_min:seniorityMin, seniority_max:seniorityMax,
