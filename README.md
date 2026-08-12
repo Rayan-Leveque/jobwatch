@@ -142,7 +142,7 @@ ne coûtent aucun token. Pour chaque offre active sans texte stocké ou sans cha
    annonce, retente via Playwright (Chromium headless) et convertit la page rendue.
 4. Stocke le texte retenu dans `offer_content`, avec son statut, sa méthode de récupération,
    sa méthode d'extraction et une copie compressée du HTML brut pour permettre un retraitement.
-5. Génère un résumé structuré via le LLM configuré (runner `opencode` ou `codex`, en
+5. Génère un résumé structuré via le LLM configuré (runner `opencode`, `codex` ou `pi`, en
    subprocess, jusqu'à `concurrency` appels simultanés) : quatre
    champs fixes - Expérience souhaitée, Salaire, Télétravail, Stack, valeur « non précisé »
    quand l'annonce ne dit rien (table `summary_field`) - suivis de puces mission
@@ -308,7 +308,7 @@ remplacer.
 | `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. `linkedin` prend une liste de couples `keywords`/`location` et une fenêtre `hours`. `wttj` prend ses requêtes, pays, villes internationales, fenêtre `hours` et les identifiants publics de l'index Algolia utilisé par le site. |
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
 | `research` | Recherche web large facultative après les collecteurs directs : runner `codex` ou `opencode`, modèle, fenêtre `recency_days`, plafond `max_results` (appliqué après validation et déduplication) et instructions de profil. C'est le seul runner à qui `websearch` et `webfetch` restent autorisés. Les catégories confirmées dans SQLite sont utilisées en priorité. |
-| `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, ou `codex` pour passer par le CLI `codex exec` couvert par un abonnement ChatGPT), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (ex. `opencode/deepseek-v4-flash-free` ou `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). |
+| `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, `codex` ou `pi`), le binaire correspondant (`opencode_bin`/`codex_bin`/`pi_bin`), `model` (ex. `opencode/deepseek-v4-flash-free`, `gpt-5.6-luna` ou `openai-codex/gpt-5.6-luna` avec Pi), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). Pi est exécuté sans outils et sans session persistante. |
 | `draft` | Génération de lettre de motivation depuis le tableau de bord : `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. Si `examples` ne couvre pas la piste, jobwatch utilise les lettres `letter_example` de la bibliothèque de documents, puis un modèle générique fourni avec le projet. |
 
 Le filtre `locations` est une correspondance par sous-chaîne sur la localisation de l'offre :

@@ -568,6 +568,74 @@ def test_config_fails_loudly_when_codex_bin_missing_from_path(tmp_path, monkeypa
         load_config(config_file)
 
 
+def test_config_parses_pi_runner_and_resolves_binary(tmp_path, monkeypatch) -> None:
+    from jobwatch.config import load_config
+
+    fake_bin_dir = tmp_path / "bin"
+    fake_bin_dir.mkdir()
+    fake_pi = fake_bin_dir / "pi"
+    fake_pi.write_text("#!/bin/sh\n")
+    fake_pi.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_bin_dir))
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "enrich:\n"
+        "  runner: pi\n"
+        "  model: openai-codex/gpt-5.6-luna\n"
+        "  variant: max\n"
+    )
+
+    config = load_config(config_file).enrich
+    assert config is not None
+    assert config.runner == "pi"
+    assert config.pi_bin == str(fake_pi)
+    assert config.model == "openai-codex/gpt-5.6-luna"
+    assert config.variant == "max"
+
+
+def test_config_pi_accepts_absolute_binary_with_empty_path(tmp_path, monkeypatch) -> None:
+    from jobwatch.config import load_config
+
+    fake_pi = tmp_path / "pi"
+    fake_pi.write_text("#!/bin/sh\n")
+    fake_pi.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "enrich:\n"
+        "  runner: pi\n"
+        f"  pi_bin: {fake_pi}\n"
+        "  model: model\n"
+    )
+
+    config = load_config(config_file).enrich
+    assert config is not None
+    assert config.pi_bin == str(fake_pi)
+
+
+def test_config_fails_loudly_when_pi_bin_missing(tmp_path, monkeypatch) -> None:
+    from jobwatch.config import ConfigError, load_config
+
+    monkeypatch.setenv("PATH", str(tmp_path))
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "enrich:\n"
+        "  runner: pi\n"
+        "  pi_bin: pi-introuvable\n"
+        "  model: model\n"
+    )
+
+    with pytest.raises(ConfigError, match="pi-introuvable"):
+        load_config(config_file)
+
+
 def test_summarize_codex_builds_command_and_reads_output(monkeypatch) -> None:
     import subprocess as sp
     from pathlib import Path as P
@@ -597,6 +665,48 @@ def test_summarize_codex_builds_command_and_reads_output(monkeypatch) -> None:
     disabled = {command[index + 1] for index, item in enumerate(command) if item == "--disable"}
     assert disabled == {"shell_tool", "code_mode_host", "apps", "plugins"}
     assert captured["input"] == "texte de l'offre"
+
+
+def test_summarize_pi_preserves_parsing_and_quote_verification(monkeypatch) -> None:
+    from jobwatch.enrich import SUMMARY_PROMPT, _summarize
+
+    captured: dict[str, object] = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return (
+            "TELETRAVAIL: hybride\n"
+            "TELETRAVAIL_CITATION: Télétravail deux jours par semaine.\n"
+            "STACK: Python\n"
+            "STACK_CITATION: citation inventée\n"
+            "- Mission IA\n"
+        )
+
+    monkeypatch.setattr("jobwatch.enrich.run_pi", fake_run)
+    markdown = "Télétravail deux jours par semaine. Stack Python."
+    result = _summarize(
+        EnrichConfig(
+            model="openai-codex/gpt-5.6-luna",
+            runner="pi",
+            pi_bin="/usr/bin/pi",
+            variant="max",
+        ),
+        markdown,
+    )
+
+    assert result == (
+        {"remote": "hybride", "stack": "Python"},
+        {"remote": "Télétravail deux jours par semaine."},
+        ["Mission IA"],
+    )
+    assert captured == {
+        "binary": "/usr/bin/pi",
+        "model": "openai-codex/gpt-5.6-luna",
+        "prompt": SUMMARY_PROMPT,
+        "attachment": markdown,
+        "timeout": 300,
+        "thinking": "max",
+    }
 
 
 def test_summarize_opencode_denies_every_tool_by_name(monkeypatch) -> None:

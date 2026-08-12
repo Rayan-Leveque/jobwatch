@@ -88,6 +88,58 @@ def run_codex(
         raise LLMRunnerError(f"appel codex échoué : {exc}") from exc
 
 
+def run_pi(
+    *,
+    binary: str,
+    model: str,
+    prompt: str,
+    attachment: str,
+    timeout: float,
+    thinking: str | None = None,
+) -> str:
+    """Run Pi without tools or persistence, returning its plain-text response.
+
+    Le texte tiers passe par un fichier temporaire référencé avec ``@`` plutôt
+    que dans un argument : une annonce volumineuse ne rencontre pas la limite
+    du noyau sur la taille d'un argument et son contenu n'est jamais interprété
+    par le shell.
+    """
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            attachment_path = Path(tmp_dir) / "offer.md"
+            attachment_path.write_text(attachment, encoding="utf-8")
+            command = [
+                binary,
+                "--print",
+                "--no-session",
+                "--no-tools",
+                "--model",
+                model,
+            ]
+            if thinking:
+                command += ["--thinking", thinking]
+            command += [f"@{attachment_path}", prompt]
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                cwd=tmp_dir,
+            )
+            if completed.returncode != 0:
+                detail = completed.stderr.strip()[-500:]
+                suffix = f" : {detail}" if detail else ""
+                raise LLMRunnerError(
+                    f"pi a quitté avec le code {completed.returncode}{suffix}"
+                )
+            if not completed.stdout.strip():
+                raise LLMRunnerError("pi a renvoyé une réponse vide")
+            return completed.stdout
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LLMRunnerError(f"appel pi échoué : {exc}") from exc
+
+
 def run_opencode(
     *,
     binary: str,

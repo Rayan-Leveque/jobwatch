@@ -66,6 +66,7 @@ research:
     [
         ("research: enabled", "research.*mapping"),
         ("research:\n  runner: codex", "research.model"),
+        ("research:\n  runner: pi\n  model: test", "research.runner"),
         ("research:\n  model: test\n  recency_days: 0", "research.recency_days"),
         ("research:\n  model: test\n  instructions: []", "research.instructions"),
     ],
