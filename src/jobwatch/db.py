@@ -25,8 +25,15 @@ COLUMN_MIGRATIONS = (
     # enrich leur accorde ainsi un retry legacy immédiat, puis les classifie.
     ("offer_content", "fetch_attempts", "INTEGER NOT NULL DEFAULT 1"),
     ("offer_content", "failure_reason", "TEXT"),
+    ("offer_content", "wttj_recovery_version", "INTEGER NOT NULL DEFAULT 0"),
     ("career_intent", "search_id", "INTEGER REFERENCES search(id)"),
     ("search", "archived_at", "TEXT"),
+    ("candidate_profile", "motivations", "TEXT"),
+    ("candidate_profile", "targets", "TEXT"),
+    ("candidate_profile", "highlights", "TEXT"),
+    ("candidate_profile", "preferred_tone", "TEXT"),
+    ("candidate_profile", "constraints_text", "TEXT"),
+    ("candidate_profile", "reusable_details", "TEXT"),
 )
 
 

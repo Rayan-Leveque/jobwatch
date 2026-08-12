@@ -235,6 +235,67 @@ def test_enrich_falls_back_to_playwright_on_http_failure(
     assert content["fetch_method"] == "playwright"
 
 
+def test_wttj_uses_source_scoped_browser_headers_before_playwright(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(
+        conn,
+        source_type="wttj",
+        source_name="wttj",
+        url=(
+            "https://www.welcometothejungle.com/fr/companies/acme/jobs/"
+            "ai-engineer_paris"
+        ),
+    )
+    seen_user_agents: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        user_agent = request.headers["user-agent"]
+        seen_user_agents.append(user_agent)
+        if user_agent.startswith("Mozilla/5.0"):
+            return httpx.Response(200, text=LONG_HTML)
+        return httpx.Response(403, text="blocked")
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._fetch_playwright", lambda url: FetchPage(None, "browser_error")
+    )
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: ({"experience": "junior"}, {}, ["Résumé WTTJ fiable"]),
+    )
+
+    result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert result.fetched_ok == 1
+    assert len(seen_user_agents) == 1
+    assert seen_user_agents[0].startswith("Mozilla/5.0")
+    content = conn.execute(
+        "SELECT status, fetch_method, markdown FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(content)[:2] == ("ok", "http")
+    assert "Ingénieur IA Paris" in content["markdown"]
+
+
+def test_wttj_headers_are_not_sent_to_proven_generic_source(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    _seed_offer(
+        conn,
+        source_type="smartrecruiters",
+        source_name="smartrecruiters",
+        url="https://jobs.smartrecruiters.com/Acme/123",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["user-agent"].startswith("python-httpx/")
+        return httpx.Response(200, text=LONG_HTML)
+
+    monkeypatch.setattr("jobwatch.enrich._summarize", lambda config, markdown: None)
+    result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+    assert result.fetched_ok == 1
+
+
 def test_enrich_falls_back_to_playwright_on_short_text(
     conn: sqlite3.Connection, monkeypatch
 ) -> None:
@@ -415,6 +476,104 @@ def test_enrich_stops_at_attempt_ceiling(conn: sqlite3.Connection) -> None:
     assert conn.execute(
         "SELECT fetch_attempts FROM offer_content WHERE offer_id = ?", (offer_id,)
     ).fetchone()["fetch_attempts"] == 3
+
+
+def test_explicit_wttj_recovery_is_bounded_observable_and_idempotent(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(
+        conn,
+        source_type="wttj",
+        source_name="wttj",
+        url=(
+            "https://www.welcometothejungle.com/fr/companies/acme/jobs/"
+            "ai-engineer_paris"
+        ),
+    )
+    conn.execute(
+        "INSERT INTO offer_content "
+        "(offer_id, status, fetch_attempts, failure_reason, fetched_at) "
+        "VALUES (?, 'failed', 3, 'http_403+browser_error', datetime('now', '-2 days'))",
+        (offer_id,),
+    )
+    conn.commit()
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.headers["user-agent"].startswith("Mozilla/5.0")
+        return httpx.Response(200, text=LONG_HTML)
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: ({"experience": "junior"}, {}, ["WTTJ récupéré"]),
+    )
+    client = _http_client(handler)
+    first = enrich(
+        conn, _config(), client=client, sleep=_no_sleep, recover_wttj=True
+    )
+    second = enrich(
+        conn, _config(), client=client, sleep=_no_sleep, recover_wttj=True
+    )
+    client.close()
+
+    assert first.wttj_recovery_attempted == 1
+    assert first.wttj_recovery_recovered == 1
+    assert "reprise WTTJ 1/1" in first.summary_line()
+    assert second.wttj_recovery_attempted == 0
+    assert calls == 1
+    content = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason, wttj_recovery_version "
+        "FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(content) == ("ok", 4, None, 1)
+
+
+def test_failed_wttj_recovery_is_attempted_only_once(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(
+        conn,
+        source_type="wttj",
+        source_name="wttj",
+        url="https://www.welcometothejungle.com/fr/companies/acme/jobs/blocked",
+    )
+    conn.execute(
+        "INSERT INTO offer_content "
+        "(offer_id, status, fetch_attempts, failure_reason) "
+        "VALUES (?, 'failed', 3, 'http_403+browser_error')",
+        (offer_id,),
+    )
+    conn.commit()
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(403, text="still blocked")
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._fetch_playwright", lambda url: FetchPage(None, "browser_error")
+    )
+    client = _http_client(handler)
+    first = enrich(
+        conn, _config(), client=client, sleep=_no_sleep, recover_wttj=True
+    )
+    second = enrich(
+        conn, _config(), client=client, sleep=_no_sleep, recover_wttj=True
+    )
+    client.close()
+
+    assert first.wttj_recovery_attempted == 1
+    assert first.wttj_recovery_recovered == 0
+    assert second.wttj_recovery_attempted == 0
+    assert calls == 1
+    assert conn.execute(
+        "SELECT wttj_recovery_version FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("status_code", (404, 410))

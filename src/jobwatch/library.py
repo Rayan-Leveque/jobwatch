@@ -63,6 +63,17 @@ def examples_dir(db_path: Path) -> Path:
     return db_path.parent / "examples"
 
 
+def ensure_private_directory(path: Path) -> None:
+    """Crée un dossier de données et retire les accès groupe/autres."""
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+
+
+def protect_private_file(path: Path) -> None:
+    """Réserve un document candidat au compte système qui exécute Jobwatch."""
+    path.chmod(0o600)
+
+
 def _is_managed(path: Path, db_path: Path) -> bool:
     try:
         path.resolve().relative_to(documents_dir(db_path).resolve())
@@ -119,10 +130,11 @@ def migrate_external_documents(
                     result.missing.append(raw_path)
                     continue
                 target = _managed_copy_path(documents_dir(db_path), source)
-                target.parent.mkdir(parents=True, exist_ok=True)
+                ensure_private_directory(target.parent)
                 if not target.exists():
                     shutil.copy2(source, target)
                     created.append(target)
+                protect_private_file(target)
                 updates.append((table, str(target.resolve()), int(row["id"])))
 
         if not updates:
@@ -220,10 +232,11 @@ def migrate_draft_examples(
                 result.missing.append(raw_path)
                 continue
             target = _managed_copy_path(target_dir, source)
-            target.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_directory(target.parent)
             if not target.exists():
                 shutil.copy2(source, target)
                 created.append(target)
+            protect_private_file(target)
             replacement = json_scalar(str(target.resolve()))
             edits.append((node.start_mark.index, node.end_mark.index, replacement))
         if edits:
@@ -296,9 +309,10 @@ def save_upload(
 
     safe_name = _sanitize_filename(filename)
     target_dir = documents_dir(db_path)
-    target_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(target_dir)
     file_path = target_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
     file_path.write_bytes(content)
+    protect_private_file(file_path)
 
     final_label = (label or "").strip() or safe_name
     cur = conn.execute(

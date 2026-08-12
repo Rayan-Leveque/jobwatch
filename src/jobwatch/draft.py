@@ -33,8 +33,9 @@ import httpx
 from jobwatch.config import DRAFT_TRACKS, DraftConfig
 from jobwatch.db import connect
 from jobwatch.enrich import _extract_text, _fetch_and_extract
-from jobwatch.library import documents_dir
+from jobwatch.library import documents_dir, ensure_private_directory, protect_private_file
 from jobwatch.llm_runner import LLMRunnerError, run_codex, run_opencode
+from jobwatch.profile import draft_profile_context
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +82,10 @@ PROMPT = (
     "signature) et leur ton. Réponds uniquement avec le document LaTeX complet, de "
     "\\documentclass à \\end{{document}}, sans texte autour. Contraintes strictes : "
     "une seule page ; aucune image ni \\includegraphics ; date : {date} ; "
-    "n'invente aucun fait absent du CV. " + _BODY_MARKERS_INSTRUCTION
+    "La section PROFIL PERSONNEL, lorsqu'elle existe, contient des préférences et des faits "
+    "facultatifs fournis par le candidat : utilise les éléments pertinents sans les forcer. "
+    "N'invente aucun fait absent du CV et du PROFIL PERSONNEL. Si cette section est absente, "
+    "rédige sobrement à partir du seul CV. " + _BODY_MARKERS_INSTRUCTION
 )
 
 REGENERATE_PROMPT_SUFFIX = (
@@ -278,9 +282,12 @@ def _build_bundle(
     cv_text: str,
     examples: list[str],
     previous_tex: str | None,
+    profile_context: str | None = None,
 ) -> str:
     """Assemble le fichier joint unique passé au LLM, sectionné et sans ambiguïté."""
     parts = [f"# OFFRE\n\n{offer_text}", f"# CV\n\n{cv_text}"]
+    if profile_context is not None:
+        parts.append(f"# PROFIL PERSONNEL\n\n{profile_context}")
     parts.extend(
         f"# EXEMPLE {index}\n\n{text}" for index, text in enumerate(examples, start=1)
     )
@@ -569,6 +576,7 @@ def _run_job_inner(
 
     cv_text = _cv_text(conn, int(job["cv_library_id"]))
     examples = _example_texts(conn, config, track)
+    personal_context = draft_profile_context(conn)
 
     instruction = str(job["instruction"]).strip() if job["instruction"] else ""
     previous_tex = _previous_tex(conn, match_id) if instruction else None
@@ -578,19 +586,25 @@ def _run_job_inner(
         prompt += REGENERATE_PROMPT_SUFFIX.format(instruction=instruction)
     elif instruction:
         prompt += f" Consigne du candidat : {instruction}"
-    bundle = _build_bundle(offer_text, cv_text, examples, previous_tex)
+    bundle = _build_bundle(
+        offer_text, cv_text, examples, previous_tex, profile_context=personal_context
+    )
 
     target_dir = documents_dir(db_path)
     with tempfile.TemporaryDirectory() as tmp_dir:
         work_dir = Path(tmp_dir)
         tex, pdf_path = _generate_tex(config, prompt, bundle, work_dir)
-        target_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(target_dir)
         stem = f"draft_{match_id}"
         final_tex = target_dir / f"{stem}.tex"
         final_pdf = target_dir / f"{stem}.pdf"
         final_tex.write_text(tex, encoding="utf-8")
         shutil.copyfile(pdf_path, final_pdf)
         pages = render_pngs(final_pdf, target_dir, stem)
+        protect_private_file(final_tex)
+        protect_private_file(final_pdf)
+        for page_path in target_dir.glob(f"{stem}-*.png"):
+            protect_private_file(page_path)
 
     library_id = _upsert_library_entry(conn, match_id, _label_for(match), final_pdf)
     _finish_job(
@@ -656,6 +670,7 @@ def _commit_letter_files(
 
         kept_names = {dest.name for _, dest in staged}
         for src, dest in staged:
+            protect_private_file(src)
             os.replace(src, dest)
         for stale in target_dir.glob(f"{stem}-*.png"):
             if stale.name not in kept_names:
@@ -719,7 +734,7 @@ def apply_body_edit(conn: sqlite3.Connection, db_path: Path, match_id: int, body
             render_pngs(work_pdf, work_dir, stem)
             new_pngs = sorted(work_dir.glob(f"{stem}-*.png"))
 
-            target_dir.mkdir(parents=True, exist_ok=True)
+            ensure_private_directory(target_dir)
             final_tex, final_pdf = _commit_letter_files(
                 target_dir, stem, new_tex, work_pdf, new_pngs
             )

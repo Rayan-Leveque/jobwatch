@@ -10,7 +10,7 @@ import click
 
 from jobwatch import __version__, importing
 from jobwatch.applications import ApplicationError, record_application
-from jobwatch.auth import AuthError, create_invite
+from jobwatch.auth import AuthError, auth_required, create_invite
 from jobwatch.collectors import build_collectors
 from jobwatch.collectors.base import RawOffer, store_offers
 from jobwatch.config import Config, ConfigError, example_config_text, load_config
@@ -141,12 +141,21 @@ def init(config_path: Path | None, db_path: Path | None) -> None:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
+        target.chmod(0o600)
         config = load_config(target)
     except (OSError, ConfigError) as exc:
         _fatal(str(exc))
 
     conn = _open_db(config)
     conn.close()
+    try:
+        config.db.chmod(0o600)
+        if paths is not None:
+            paths.config.parent.chmod(0o700)
+            if paths.data_dir.exists():
+                paths.data_dir.chmod(0o700)
+    except OSError as exc:
+        _fatal(f"permissions privées impossibles : {exc}")
 
     click.echo(f"config créée : {target}")
     click.echo(f"base de données initialisée : {config.db}")
@@ -205,13 +214,18 @@ def run(config_path: Path | None) -> None:
 
 @cli.command("enrich")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
-def enrich_cmd(config_path: Path | None) -> None:
+@click.option(
+    "--recover-wttj",
+    is_flag=True,
+    help="retente une fois les échecs WTTJ antérieurs, y compris ceux au plafond",
+)
+def enrich_cmd(config_path: Path | None, recover_wttj: bool) -> None:
     """Récupère et résume les offres collectées sans contenu stocké."""
     config = _require_config(config_path)
     conn = _open_db(config)
     try:
         try:
-            result = enrich(conn, config.enrich)
+            result = enrich(conn, config.enrich, recover_wttj=recover_wttj)
         except EnrichError as exc:
             _fatal(str(exc))
     finally:
@@ -632,10 +646,28 @@ def apps(config_path: Path | None) -> None:
     show_default=True,
     help="cookie réservé à HTTPS ; désactiver explicitement pour un accès HTTP privé",
 )
-def serve(config_path: Path | None, host: str, port: int, secure_cookie: bool) -> None:
+@click.option(
+    "--allow-open",
+    is_flag=True,
+    help="autorise explicitement une instance nommée sans compte (développement local uniquement)",
+)
+def serve(
+    config_path: Path | None,
+    host: str,
+    port: int,
+    secure_cookie: bool,
+    allow_open: bool,
+) -> None:
     """Sert un tableau de bord web local."""
     config = _require_config(config_path)
     conn = _open_db(config)
+    if _current_instance() is not None and not auth_required(conn) and not allow_open:
+        conn.close()
+        _fatal(
+            "cette instance nommée n'a pas de compte protégé ; lancez d'abord "
+            f"'jw --instance {_current_instance()} account invite EMAIL' "
+            "ou utilisez --allow-open uniquement pour un développement local"
+        )
     conn.close()
     try:
         serve_http(

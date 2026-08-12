@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from jobwatch.enrich import MAX_FETCH_ATTEMPTS
 from jobwatch.library import list_library
+from jobwatch.profile import profile_details
 from jobwatch.serve_queries import (
     FIELD_LABELS,
     Summary,
@@ -789,6 +790,8 @@ def render_page(
     track: str = "engineer",
     draft_enabled: bool = False,
     csrf_token: str = "",
+    account_id: int | None = None,
+    identity_sub: str = "",
 ) -> str:
     """Rend la page HTML complète d'un onglet depuis l'état actuel de la base."""
     priority = _priority_matches(conn, track)
@@ -843,6 +846,19 @@ def render_page(
     swipe_fab, swipe_popup = _swipe_invites(track, deck_count)
     total = len(priority) + len(new) + len(seen) + len(later) + len(discarded) + len(applied)
     stamp = datetime.now(UTC).astimezone().strftime("%d/%m/%Y %H:%M")
+    details = profile_details(conn, account_id) if account_id is not None else None
+    profile_link = (
+        '<a class="manage-link" href="/profile">Personnaliser mes lettres →</a>'
+        if account_id is not None
+        else ""
+    )
+    profile_prompt = (
+        '<aside class="profile-prompt"><div><strong>Donnez un peu de contexte à vos lettres.</strong>'
+        '<span>Motivations, réalisations, ton et contraintes restent facultatifs.</span></div>'
+        '<a href="/profile">Compléter mon profil</a></aside>'
+        if draft_enabled and details is not None and not details.has_personalization
+        else ""
+    )
     return _page_template(
         body=body, total=total,
         new_count=len(new) + priority_new,
@@ -856,10 +872,13 @@ def render_page(
             if track == "all"
             else ""
         ),
+        profile_link=profile_link,
+        profile_prompt=profile_prompt,
         swipe_fab=swipe_fab,
         swipe_popup=swipe_popup,
         batch_badge=_BATCH_BADGE_HTML if draft_enabled else "",
         csrf_token=csrf_token,
+        identity_sub=identity_sub,
     )
 
 

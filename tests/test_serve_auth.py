@@ -8,7 +8,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlencode
 
-from jobwatch.auth import create_invite
+from jobwatch.auth import accept_invite, create_invite, create_session
 from jobwatch.db import connect, init_db
 from jobwatch.onboarding import complete_profile
 from jobwatch.serve import make_handler
@@ -263,6 +263,63 @@ def test_login_cookie_is_secure_by_default(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
+def test_friend_instance_cannot_use_captain_session_or_documents(tmp_path: Path) -> None:
+    instances: dict[str, tuple[Path, str, bytes]] = {}
+    password = "une très longue phrase secrète"
+    for slug, email, content in (
+        ("captain", "captain@example.com", b"CAPTAIN PRIVATE CV"),
+        ("alice", "alice@example.com", b"ALICE PRIVATE CV"),
+    ):
+        db_path = tmp_path / slug / "jobwatch.db"
+        db_path.parent.mkdir()
+        conn = connect(db_path)
+        init_db(conn)
+        invite = create_invite(conn, slug, email)
+        accept_invite(conn, invite, password, workspace_slug=slug)
+        token, _session = create_session(conn, email, password, slug)
+        document = db_path.parent / "documents" / "cv.txt"
+        document.parent.mkdir()
+        document.write_bytes(content)
+        conn.execute(
+            "INSERT INTO document_library (type, label, file_path) VALUES ('cv', 'CV', ?)",
+            (str(document),),
+        )
+        conn.commit()
+        conn.close()
+        instances[slug] = db_path, token, content
+
+    alice_db, alice_token, alice_content = instances["alice"]
+    _captain_db, captain_token, captain_content = instances["captain"]
+    server, thread = _start_server(
+        alice_db, workspace_slug="alice", secure_cookie=False
+    )
+    port = server.server_address[1]
+    try:
+        status, _headers, body = _request(
+            port,
+            "GET",
+            "/documents/1",
+            headers={"Cookie": f"id={alice_token}"},
+        )
+        assert status == 200
+        assert body.encode() == alice_content
+        assert captain_content.decode() not in body
+
+        status, _headers, body = _request(
+            port,
+            "GET",
+            "/documents/1",
+            headers={"Cookie": f"id={captain_token}"},
+        )
+        assert status == 401
+        assert "authentification requise" in body
+        assert captain_content.decode() not in body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_unknown_path_is_404_for_onboarded_session(tmp_path: Path) -> None:
     db_path = tmp_path / "jobwatch.db"
     conn = connect(db_path)
@@ -307,6 +364,115 @@ def test_unknown_path_is_404_for_onboarded_session(tmp_path: Path) -> None:
         )
         assert status == 404
         assert "Nouveaux matchs" not in body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_first_time_friend_is_guided_to_private_letter_profile(tmp_path: Path) -> None:
+    db_path = tmp_path / "alice" / "jobwatch.db"
+    db_path.parent.mkdir()
+    conn = connect(db_path)
+    init_db(conn)
+    invite = create_invite(conn, "alice", "alice@example.com")
+    conn.close()
+    server, thread = _start_server(
+        db_path, workspace_slug="alice", secure_cookie=False, onboarding_enabled=True
+    )
+    port = server.server_address[1]
+    try:
+        password = "une très longue phrase secrète"
+        encoded = urlencode(
+            {"password": password, "password_confirmation": password}
+        ).encode()
+        _status, headers, _body = _request(
+            port,
+            "POST",
+            f"/invite/{invite}",
+            body=encoded,
+            headers=_form_headers(port),
+        )
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+
+        status, _headers, body = _request(
+            port, "GET", "/onboarding", headers={"Cookie": cookie}
+        )
+        assert status == 200
+        csrf = body.split('name="csrf-token" content="', 1)[1].split('"', 1)[0]
+        onboarding_payload = json.dumps(
+            {
+                "cv_library_ids": [],
+                "intents": [
+                    {
+                        "label": "Ingénierie IA",
+                        "keywords": ["AI Engineer"],
+                        "exclude": [],
+                    }
+                ],
+            }
+        ).encode()
+        status, _headers, body = _request(
+            port,
+            "POST",
+            "/onboarding/complete",
+            body=onboarding_payload,
+            headers={
+                "Content-Type": "application/json",
+                "Cookie": cookie,
+                "X-CSRF-Token": csrf,
+            },
+        )
+        assert status == 200
+        assert json.loads(body)["next"] == "/profile?welcome=1"
+
+        status, _headers, body = _request(
+            port, "GET", "/profile?welcome=1", headers={"Cookie": cookie}
+        )
+        assert status == 200
+        assert "Tous les champs sont facultatifs" in body
+        assert "alice@example.com" in body
+        assert "Espace alice" in body
+        assert 'name="motivations"' in body
+
+        profile_payload = json.dumps(
+            {
+                "motivations": "Construire des produits IA utiles",
+                "targets": "AI Engineer dans la mobilité",
+                "highlights": "Assistant RAG déployé en production",
+                "preferred_tone": "Direct et chaleureux",
+                "constraints_text": "Disponible à partir d'octobre",
+                "reusable_details": "Engagement associatif",
+            }
+        ).encode()
+        status, _headers, body = _request(
+            port,
+            "POST",
+            "/profile",
+            body=profile_payload,
+            headers={
+                "Content-Type": "application/json",
+                "Cookie": cookie,
+                "X-CSRF-Token": csrf,
+            },
+        )
+        assert status == 200
+        assert json.loads(body) == {"ok": True, "personalized": True}
+
+        status, _headers, body = _request(port, "GET", "/", headers={"Cookie": cookie})
+        assert status == 200
+        assert "alice@example.com · espace alice" in body
+        assert 'href="/profile">Personnaliser mes lettres' in body
+
+        conn = connect(db_path)
+        stored = conn.execute(
+            "SELECT motivations, highlights FROM candidate_profile"
+        ).fetchone()
+        conn.close()
+        assert tuple(stored) == (
+            "Construire des produits IA utiles",
+            "Assistant RAG déployé en production",
+        )
     finally:
         server.shutdown()
         server.server_close()
