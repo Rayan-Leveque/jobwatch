@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from pathlib import Path
 
 import httpx
 import pytest
 
-from jobwatch.config import EnrichConfig
+from jobwatch.config import ENRICH_RUNNERS, EnrichConfig
 from jobwatch.db import connect, init_db
 from jobwatch.enrich import FIELD_UNKNOWN, EnrichError, enrich
 
@@ -634,6 +635,30 @@ def test_config_fails_loudly_when_pi_bin_missing(tmp_path, monkeypatch) -> None:
 
     with pytest.raises(ConfigError, match="pi-introuvable"):
         load_config(config_file)
+
+
+_ACTIVE_CONFIG_PATH = Path.home() / ".config" / "jobwatch" / "config.yaml"
+
+
+@pytest.mark.skipif(
+    not _ACTIVE_CONFIG_PATH.exists(),
+    reason=f"pas de config active à {_ACTIVE_CONFIG_PATH} sur cette machine",
+)
+def test_active_config_loads_without_enrichment_or_llm_calls() -> None:
+    """Charge la config de production réelle : aucune requête réseau ni appel LLM,
+    seulement la résolution de chemins/binaires que fait déjà load_config()."""
+    from jobwatch.config import load_config
+
+    config = load_config(_ACTIVE_CONFIG_PATH)
+
+    assert config.db is not None
+    if config.enrich is not None:
+        assert config.enrich.runner in ENRICH_RUNNERS
+        if config.enrich.runner == "pi":
+            assert Path(config.enrich.pi_bin).is_absolute()
+            assert os.access(config.enrich.pi_bin, os.X_OK)
+        elif config.enrich.runner == "codex":
+            assert Path(config.enrich.codex_bin).is_absolute()
 
 
 def test_summarize_codex_builds_command_and_reads_output(monkeypatch) -> None:
