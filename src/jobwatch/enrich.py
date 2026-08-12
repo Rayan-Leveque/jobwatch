@@ -52,6 +52,9 @@ log = logging.getLogger(__name__)
 MIN_MARKDOWN_LENGTH = 200
 SLEEP_MIN_SECONDS = 1.0
 SLEEP_MAX_SECONDS = 2.0
+MAX_FETCH_ATTEMPTS = 3
+FETCH_RETRY_SQL_DELAY = "-1 day"
+TERMINAL_HTTP_STATUSES = frozenset({404, 410})
 
 # Champs fixes du résumé structuré, dans l'ordre d'affichage.
 FIELD_KEYS = ("experience", "salary", "remote", "stack")
@@ -147,6 +150,25 @@ class EnrichResult:
         return " ; ".join(parts)
 
 
+@dataclass(frozen=True)
+class FetchPage:
+    """Résultat d'une voie de récupération, avant extraction du texte."""
+
+    html: str | None
+    failure_reason: str | None = None
+    terminal: bool = False
+
+
+@dataclass(frozen=True)
+class FetchOutcome:
+    """Résultat complet d'un fetch, y compris sa cause d'échec persistable."""
+
+    extraction: Extraction | None
+    fetch_method: str | None
+    html: str | None
+    failure_reason: str | None = None
+
+
 def _thousands(value: int) -> str:
     """Sépare les milliers par une espace insécable, comme en français."""
     return f"{value:,}".replace(",", " ")
@@ -157,49 +179,86 @@ def _pending_offers(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
     Une offre est active si un match new/seen/later ou une candidature la
     référence (la corbeille et les offres sans match ne coûtent aucun token).
-    Une offre dont le fetch a déjà échoué n'est jamais retentée.
+    Les échecs retryables sont repris après 24 h, jusqu'à trois tentatives.
+    Les anciennes lignes sans classification ont droit à un retry immédiat.
     """
     return conn.execute(
-        "SELECT o.id AS id, o.url AS url, "
-        "       (SELECT oc.status FROM offer_content oc WHERE oc.offer_id = o.id) "
-        "       AS content_status "
-        "FROM offer o "
+        "SELECT o.id AS id, o.url AS url, oc.status AS content_status "
+        "FROM offer o LEFT JOIN offer_content oc ON oc.offer_id = o.id "
         "WHERE (EXISTS (SELECT 1 FROM match m WHERE m.offer_id = o.id "
         "               AND m.state IN ('new', 'seen', 'later')) "
         "   OR EXISTS (SELECT 1 FROM application a WHERE a.offer_id = o.id)) "
-        "AND (NOT EXISTS (SELECT 1 FROM offer_content oc WHERE oc.offer_id = o.id) "
-        "  OR (EXISTS (SELECT 1 FROM offer_content oc WHERE oc.offer_id = o.id "
-        "              AND oc.status = 'ok') "
+        "AND (oc.id IS NULL "
+        "  OR (oc.status = 'failed' AND oc.fetch_attempts < ? "
+        "      AND (oc.failure_reason IS NULL "
+        "           OR (oc.failure_reason NOT IN ('http_404', 'http_410') "
+        "               AND oc.fetched_at <= datetime('now', ?)))) "
+        "  OR (oc.status = 'ok' "
         "      AND NOT EXISTS (SELECT 1 FROM offer_summary os "
         "                      JOIN summary_field sf ON sf.summary_id = os.id "
         "                      WHERE os.offer_id = o.id))) "
-        "ORDER BY o.id"
+        "ORDER BY o.id",
+        (MAX_FETCH_ATTEMPTS, FETCH_RETRY_SQL_DELAY),
     ).fetchall()
 
 
-def _fetch_http(url: str, client: httpx.Client) -> str | None:
+def _fetch_http(url: str, client: httpx.Client) -> FetchPage:
     try:
         response = client.get(url, follow_redirects=True)
         response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        log.warning("enrich: http fetch failed for %s: %s", url, exc)
+        return FetchPage(None, "http_timeout")
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        log.warning("enrich: http fetch failed for %s: %s", url, exc)
+        return FetchPage(
+            None,
+            f"http_{status}",
+            terminal=status in TERMINAL_HTTP_STATUSES,
+        )
     except httpx.HTTPError as exc:
         log.warning("enrich: http fetch failed for %s: %s", url, exc)
-        return None
-    return response.text
+        return FetchPage(None, "http_error")
+    return FetchPage(response.text)
 
 
-def _fetch_playwright(url: str) -> str | None:
+def _fetch_playwright(url: str) -> FetchPage:
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             try:
                 page = browser.new_page()
-                page.goto(url, timeout=30_000, wait_until="domcontentloaded")
-                return page.content()
+                response = page.goto(url, timeout=30_000, wait_until="domcontentloaded")
+                if response is not None and response.status in TERMINAL_HTTP_STATUSES:
+                    return FetchPage(None, f"http_{response.status}", terminal=True)
+                return FetchPage(page.content())
             finally:
                 browser.close()
     except Exception as exc:  # noqa: BLE001 - un site tiers cassé ne doit jamais arrêter le run
         log.warning("enrich: playwright fetch failed for %s: %s", url, exc)
-        return None
+        return FetchPage(None, "browser_error")
+
+
+def _fetch_and_extract_result(url: str, client: httpx.Client) -> FetchOutcome:
+    """Récupère puis extrait une offre, avec une cause d'échec classifiable."""
+    fetchers = (
+        ("http", lambda: _fetch_http(url, client)),
+        ("playwright", lambda: _fetch_playwright(url)),
+    )
+    failure_reasons: list[str] = []
+    for method, fetch in fetchers:
+        page = fetch()
+        if page.terminal:
+            return FetchOutcome(None, None, None, page.failure_reason)
+        if not page.html:
+            failure_reasons.append(page.failure_reason or f"{method}_empty")
+            continue
+        result = extract(page.html)
+        if len(result.markdown) >= MIN_MARKDOWN_LENGTH:
+            return FetchOutcome(result, method, page.html)
+        failure_reasons.append(f"{method}_too_short")
+    return FetchOutcome(None, None, None, "+".join(failure_reasons))
 
 
 def _fetch_and_extract(
@@ -211,18 +270,8 @@ def _fetch_and_extract(
     page trop courte est une page morte ou un mur de connexion, indépendamment
     de la qualité de l'extraction qu'on en tirera.
     """
-    fetchers = (
-        ("http", lambda: _fetch_http(url, client)),
-        ("playwright", lambda: _fetch_playwright(url)),
-    )
-    for method, fetch in fetchers:
-        html = fetch()
-        if not html:
-            continue
-        result = extract(html)
-        if len(result.markdown) >= MIN_MARKDOWN_LENGTH:
-            return result, method, html
-    return None, None, None
+    outcome = _fetch_and_extract_result(url, client)
+    return outcome.extraction, outcome.fetch_method, outcome.html
 
 
 def _store_content(
@@ -231,6 +280,7 @@ def _store_content(
     result: Extraction | None,
     fetch_method: str | None,
     html: str | None,
+    failure_reason: str | None,
 ) -> None:
     """Enregistre le bloc utile, sa provenance et le HTML brut compressé.
 
@@ -239,10 +289,12 @@ def _store_content(
     """
     conn.execute(
         "INSERT INTO offer_content (offer_id, markdown, fetch_method, extract_method, "
-        "html_gz, status) VALUES (?, ?, ?, ?, ?, ?) "
+        "html_gz, status, fetch_attempts, failure_reason) VALUES (?, ?, ?, ?, ?, ?, 1, ?) "
         "ON CONFLICT(offer_id) DO UPDATE SET markdown = excluded.markdown, "
         "fetch_method = excluded.fetch_method, extract_method = excluded.extract_method, "
-        "html_gz = excluded.html_gz, status = excluded.status, fetched_at = datetime('now')",
+        "html_gz = excluded.html_gz, status = excluded.status, "
+        "fetch_attempts = offer_content.fetch_attempts + 1, "
+        "failure_reason = excluded.failure_reason, fetched_at = datetime('now')",
         (
             offer_id,
             result.markdown if result is not None else None,
@@ -250,6 +302,7 @@ def _store_content(
             result.method if result is not None else None,
             gzip.compress(html.encode("utf-8")) if html else None,
             "ok" if result is not None else "failed",
+            failure_reason,
         ),
     )
     conn.commit()
@@ -466,14 +519,22 @@ def enrich(
     # n'a pas trouvé, sans coûter un seul token.
     jsonld_fields: dict[int, dict[str, str]] = {}
     try:
-        fetch_remaining = sum(1 for offer in offers if offer["content_status"] is None)
+        fetch_remaining = sum(1 for offer in offers if offer["content_status"] != "ok")
         for offer in offers:
             offer_id = int(offer["id"])
             url = str(offer["url"])
-            if offer["content_status"] is None:
+            if offer["content_status"] != "ok":
                 fetch_remaining -= 1
-                extracted, fetch_method, html = _fetch_and_extract(url, http_client)
-                _store_content(conn, offer_id, extracted, fetch_method, html)
+                fetch = _fetch_and_extract_result(url, http_client)
+                extracted = fetch.extraction
+                _store_content(
+                    conn,
+                    offer_id,
+                    extracted,
+                    fetch.fetch_method,
+                    fetch.html,
+                    fetch.failure_reason,
+                )
                 if extracted is None:
                     result.fetched_failed += 1
                     log.info("enrich: offre %d ECHEC fetch %s", offer_id, url)
@@ -485,7 +546,7 @@ def enrich(
                 log.info(
                     "enrich: offre %d %s/%s %d -> %d car.%s%s %s",
                     offer_id,
-                    fetch_method,
+                    fetch.fetch_method,
                     extracted.method,
                     extracted.raw_chars,
                     len(extracted.markdown),

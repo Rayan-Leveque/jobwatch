@@ -162,13 +162,14 @@ def _offer_markdown(conn: sqlite3.Connection, offer_id: int, url: str) -> str | 
     if row is None:
         conn.execute(
             "INSERT INTO offer_content (offer_id, markdown, fetch_method, extract_method, "
-            "html_gz, status) VALUES (?, ?, ?, ?, ?, 'ok')",
+            "html_gz, status, fetch_attempts) VALUES (?, ?, ?, ?, ?, 'ok', 1)",
             (offer_id, extracted.markdown, fetch_method, extracted.method, html_gz),
         )
     else:
         conn.execute(
             "UPDATE offer_content SET markdown = ?, fetch_method = ?, extract_method = ?, "
-            "html_gz = ?, status = 'ok', fetched_at = datetime('now') WHERE offer_id = ?",
+            "html_gz = ?, status = 'ok', fetch_attempts = fetch_attempts + 1, "
+            "failure_reason = NULL, fetched_at = datetime('now') WHERE offer_id = ?",
             (extracted.markdown, fetch_method, extracted.method, html_gz, offer_id),
         )
     conn.commit()

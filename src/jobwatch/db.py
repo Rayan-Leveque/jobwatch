@@ -18,6 +18,10 @@ COLUMN_MIGRATIONS = (
     ("summary_field", "quote", "TEXT"),
     ("offer_content", "extract_method", "TEXT"),
     ("offer_content", "html_gz", "BLOB"),
+    # Les lignes existantes ont déjà subi une tentative. Leur raison reste NULL :
+    # enrich leur accorde ainsi un retry legacy immédiat, puis les classifie.
+    ("offer_content", "fetch_attempts", "INTEGER NOT NULL DEFAULT 1"),
+    ("offer_content", "failure_reason", "TEXT"),
     ("career_intent", "search_id", "INTEGER REFERENCES search(id)"),
     ("search", "archived_at", "TEXT"),
 )

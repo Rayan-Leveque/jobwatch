@@ -17,13 +17,15 @@ from http.server import ThreadingHTTPServer
 from itertools import pairwise
 from pathlib import Path
 
+import httpx
 import pytest
 from test_serve import _add_content, _add_summary, _apply, _seed_offer
 
 import jobwatch.serve as serve_module
 from jobwatch.auth import create_invite
-from jobwatch.config import DraftConfig
+from jobwatch.config import DraftConfig, EnrichConfig
 from jobwatch.db import connect, init_db
+from jobwatch.enrich import FetchPage, enrich
 from jobwatch.serve import make_handler
 
 pytest.importorskip("playwright.sync_api")
@@ -263,6 +265,67 @@ def test_offer_link_is_a_header_icon_on_match_application_and_swipe_cards(
 
     page.goto(f"{url}/swipe")
     _assert_offer_link_in_header(page.locator(".swipe-card.top"))
+    page.close()
+
+
+def test_recovered_new_match_shows_summary_and_full_announcement_in_swipe(
+    browser, dashboard, monkeypatch
+) -> None:
+    """Un fetch transitoire récupéré répare réellement la carte swipe rendue."""
+    url, db_path = dashboard
+    conn = connect(db_path)
+    offer_id = int(
+        conn.execute(
+            "SELECT o.id FROM offer o JOIN company c ON c.id = o.company_id "
+            "WHERE c.name = 'NewCo'"
+        ).fetchone()["id"]
+    )
+    conn.execute(
+        "UPDATE match SET state = 'discarded' WHERE offer_id IN "
+        "(SELECT o.id FROM offer o JOIN company c ON c.id = o.company_id "
+        " WHERE c.name = 'LaterCo')"
+    )
+    conn.commit()
+    long_html = "<html><body><p>" + ("Annonce complète récupérée. " * 30) + "</p></body></html>"
+
+    def blocked_http(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="temporary block")
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._fetch_playwright", lambda url: FetchPage(None, "browser_error")
+    )
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: ({"experience": "3 ans"}, {}, ["Résumé récupéré"]),
+    )
+    client = httpx.Client(transport=httpx.MockTransport(blocked_http))
+    config = EnrichConfig(opencode_bin="opencode", model="test-model")
+    first = enrich(conn, config, client=client, sleep=lambda _seconds: None)
+    assert first.fetched_failed == 1
+
+    conn.execute(
+        "UPDATE offer_content SET fetched_at = datetime('now', '-2 days') WHERE offer_id = ?",
+        (offer_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "jobwatch.enrich._fetch_playwright", lambda url: FetchPage(long_html)
+    )
+    second = enrich(conn, config, client=client, sleep=lambda _seconds: None)
+    client.close()
+    assert second.fetched_ok == 1
+    assert second.summaries_written == 1
+    conn.close()
+
+    page = browser.new_page()
+    page.goto(f"{url}/swipe")
+    card = page.locator('.swipe-card:has(.company:text-is("NewCo"))')
+    expect(card.get_by_text("En bref", exact=True)).to_be_visible()
+    expect(card.get_by_text("Résumé récupéré", exact=True)).to_be_visible()
+    announcement = card.get_by_role("button", name="Annonce complète")
+    expect(announcement).to_be_visible()
+    announcement.click()
+    expect(card.locator(".content-panel")).to_contain_text("Annonce complète récupérée")
     page.close()
 
 

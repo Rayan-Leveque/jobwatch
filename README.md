@@ -154,9 +154,12 @@ ne coûtent aucun token. Pour chaque offre active sans texte stocké ou sans cha
 6. Patiente 1 à 2 secondes entre deux fetchs web pour ne pas marteler les sites tiers.
 
 Un échec (réseau ou LLM) est consigné en avertissement et n'interrompt jamais le traitement des
-offres suivantes ; un fetch en échec (`offer_content` en statut `failed`) n'est jamais retenté
-par un run ultérieur. Le panneau « En bref » du tableau de bord et des cartes de tri affiche
-les champs étiquetés en tête puis les puces, pour toute carte ayant un résumé.
+offres suivantes. Un fetch en échec conserve son nombre de tentatives et sa cause : les erreurs
+temporaires sont retentées après 24 heures, avec un plafond de trois tentatives, tandis que les
+réponses HTTP 404 et 410 sont terminales. Les anciennes lignes `failed` sans cause enregistrée
+reçoivent un retry immédiat afin de migrer le corpus existant vers cette politique bornée. Le
+panneau « En bref » du tableau de bord et des cartes de tri affiche les champs étiquetés en tête
+puis les puces, pour toute carte ayant un résumé.
 
 `jw enrich` nécessite le bloc `enrich` de `config.yaml` (voir la référence de configuration
 ci-dessous) ; sans lui, la commande refuse proprement avec un message clair, sans réseau ni erreur
@@ -355,7 +358,7 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `source` | Sources de job boards configurées et leur dernière exécution |
 | `company` | Sociétés (dédupliquées par nom) |
 | `offer` | Offres d'emploi (dédupliquées par URL et société+titre) |
-| `offer_content` | Texte utile de l'annonce, méthode d'extraction et HTML brut compressé, récupérés par `jw enrich` |
+| `offer_content` | Texte utile de l'annonce, méthode d'extraction, HTML brut compressé et suivi borné des échecs de fetch, récupérés par `jw enrich` |
 | `offer_summary` | Résumé factuel unique associé à une offre existante (`source` : `manual` ou `auto`) |
 | `summary_field` | Champs structurés d'un résumé (expérience, salaire, télétravail, stack) et citation vérifiée optionnelle |
 | `summary_bullet` | Bullets d'un résumé avec leur position explicite |

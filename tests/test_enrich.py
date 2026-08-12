@@ -11,7 +11,7 @@ import pytest
 
 from jobwatch.config import ENRICH_RUNNERS, EnrichConfig
 from jobwatch.db import connect, init_db
-from jobwatch.enrich import FIELD_UNKNOWN, EnrichError, enrich
+from jobwatch.enrich import FIELD_UNKNOWN, EnrichError, FetchPage, enrich
 
 
 @pytest.fixture()
@@ -218,7 +218,7 @@ def test_enrich_falls_back_to_playwright_on_http_failure(
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="boom")
 
-    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: LONG_HTML)
+    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: FetchPage(LONG_HTML))
     monkeypatch.setattr("jobwatch.enrich._summarize", lambda config, markdown: None)
 
     result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
@@ -239,7 +239,7 @@ def test_enrich_falls_back_to_playwright_on_short_text(
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=SHORT_HTML)
 
-    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: LONG_HTML)
+    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: FetchPage(LONG_HTML))
     monkeypatch.setattr("jobwatch.enrich._summarize", lambda config, markdown: None)
 
     enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
@@ -259,7 +259,9 @@ def test_enrich_marks_failed_when_all_fetches_fail(
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="boom")
 
-    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: None)
+    monkeypatch.setattr(
+        "jobwatch.enrich._fetch_playwright", lambda url: FetchPage(None, "browser_error")
+    )
 
     result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
 
@@ -299,25 +301,175 @@ def test_enrich_never_retries_processed_offers(conn: sqlite3.Connection, monkeyp
     assert conn.execute("SELECT COUNT(*) AS n FROM offer_content").fetchone()["n"] == 1
 
 
-def test_enrich_never_retries_failed_offers(conn: sqlite3.Connection, monkeypatch) -> None:
-    _seed_offer(conn)
+@pytest.mark.parametrize(
+    ("http_failure", "browser_page", "failure_reason"),
+    (
+        ("403", FetchPage(None, "browser_error"), "http_403+browser_error"),
+        ("timeout", FetchPage(None, "browser_error"), "http_timeout+browser_error"),
+        ("short", FetchPage(None), "http_too_short+playwright_empty"),
+        ("short", FetchPage(SHORT_HTML), "http_too_short+playwright_too_short"),
+    ),
+)
+def test_enrich_retries_transient_failure_after_delay_then_succeeds(
+    conn: sqlite3.Connection,
+    monkeypatch,
+    http_failure: str,
+    browser_page: FetchPage,
+    failure_reason: str,
+) -> None:
+    offer_id = _seed_offer(conn)
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(500, text="boom")
+        if calls > 1:
+            return httpx.Response(200, text=LONG_HTML)
+        if http_failure == "timeout":
+            raise httpx.ReadTimeout("temporary timeout", request=request)
+        if http_failure == "short":
+            return httpx.Response(200, text=SHORT_HTML)
+        return httpx.Response(403, text="temporary block")
 
-    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: None)
+    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", lambda url: browser_page)
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize",
+        lambda config, markdown: ({"experience": "3 ans"}, {}, ["Résumé récupéré"]),
+    )
 
     first = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
     assert first.fetched_failed == 1
-    assert calls == 1
+    failed = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(failed) == ("failed", 1, failure_reason)
 
+    conn.execute(
+        "UPDATE offer_content SET fetched_at = datetime('now', '-2 days') WHERE offer_id = ?",
+        (offer_id,),
+    )
+    conn.commit()
     second = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert second.fetched_ok == 1
+    assert second.summaries_written == 1
+    recovered = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason, markdown "
+        "FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert recovered["status"] == "ok"
+    assert recovered["fetch_attempts"] == 2
+    assert recovered["failure_reason"] is None
+    assert "Ingénieur IA Paris" in recovered["markdown"]
+
+
+def test_enrich_does_not_retry_before_delay(conn: sqlite3.Connection, monkeypatch) -> None:
+    offer_id = _seed_offer(conn)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(403, text="temporary block")
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._fetch_playwright", lambda url: FetchPage(None, "browser_error")
+    )
+
+    first = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+    second = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert first.fetched_failed == 1
     assert second.fetched_failed == 0
     assert calls == 1
-    assert conn.execute("SELECT COUNT(*) AS n FROM offer_content").fetchone()["n"] == 1
+    attempts = conn.execute(
+        "SELECT fetch_attempts FROM offer_content WHERE offer_id = ?", (offer_id,)
+    ).fetchone()["fetch_attempts"]
+    assert attempts == 1
+
+
+def test_enrich_stops_at_attempt_ceiling(conn: sqlite3.Connection) -> None:
+    offer_id = _seed_offer(conn)
+    conn.execute(
+        "INSERT INTO offer_content "
+        "(offer_id, status, fetch_attempts, failure_reason, fetched_at) "
+        "VALUES (?, 'failed', 3, 'browser_error', datetime('now', '-2 days'))",
+        (offer_id,),
+    )
+    conn.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("attempt ceiling must prevent every fetch")
+
+    result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert result.fetched_ok == 0
+    assert result.fetched_failed == 0
+    assert conn.execute(
+        "SELECT fetch_attempts FROM offer_content WHERE offer_id = ?", (offer_id,)
+    ).fetchone()["fetch_attempts"] == 3
+
+
+@pytest.mark.parametrize("status_code", (404, 410))
+def test_enrich_marks_terminal_http_failures_without_retrying(
+    conn: sqlite3.Connection, monkeypatch, status_code: int
+) -> None:
+    offer_id = _seed_offer(conn)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status_code, text="gone")
+
+    def unexpected_browser(_url: str) -> FetchPage:
+        raise AssertionError("terminal HTTP failures must not launch a browser")
+
+    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", unexpected_browser)
+
+    first = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+    conn.execute(
+        "UPDATE offer_content SET fetched_at = datetime('now', '-2 days') WHERE offer_id = ?",
+        (offer_id,),
+    )
+    conn.commit()
+    second = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert first.fetched_failed == 1
+    assert second.fetched_failed == 0
+    assert calls == 1
+    failed = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(failed) == ("failed", 1, f"http_{status_code}")
+
+
+def test_enrich_retries_unclassified_legacy_failure_immediately(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    offer_id = _seed_offer(conn)
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, status, fetch_attempts, failure_reason) "
+        "VALUES (?, 'failed', 1, NULL)",
+        (offer_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr("jobwatch.enrich._summarize", lambda config, markdown: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=LONG_HTML)
+
+    result = enrich(conn, _config(), client=_http_client(handler), sleep=_no_sleep)
+
+    assert result.fetched_ok == 1
+    recovered = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(recovered) == ("ok", 2, None)
 
 
 def test_enrich_sleeps_between_offers(conn: sqlite3.Connection, monkeypatch) -> None:
