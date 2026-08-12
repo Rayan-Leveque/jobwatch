@@ -513,6 +513,10 @@ def test_manual_onboarding_reaches_unified_dashboard(browser, onboarding_instanc
 
     page.locator("#confirm").click()
 
+    page.wait_for_url(f"{url}/profile?welcome=1")
+    assert page.get_by_role("heading", name="Des lettres qui parlent vraiment de vous.").is_visible()
+    assert page.get_by_label("Vos motivations").is_visible()
+    page.get_by_role("link", name="Passer pour l’instant").click()
     page.wait_for_url(f"{url}/")
     assert page.get_by_role("link", name=re.compile("Modifier mes catégories")).is_visible()
     assert page.locator(".track-tabs").count() == 0
@@ -848,5 +852,7 @@ def test_onboarding_refuses_to_drop_an_incomplete_category(browser, onboarding_i
     page.locator(".intent").nth(1).locator(".keywords").fill("Product Owner")
     page.locator("#confirm").click()
 
+    page.wait_for_url(f"{url}/profile?welcome=1")
+    page.get_by_role("link", name="Passer pour l’instant").click()
     page.wait_for_url(f"{url}/")
     page.close()

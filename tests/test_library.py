@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,8 @@ def test_save_upload_writes_file_and_library_row(conn: sqlite3.Connection, tmp_p
     assert file_path.parent == documents_dir(db_path)
     assert file_path.read_bytes() == data
     assert file_path.name.endswith("_cv.pdf")
+    assert stat.S_IMODE(file_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(file_path.stat().st_mode) == 0o600
 
 
 def test_save_upload_blank_label_falls_back_to_sanitized_filename(

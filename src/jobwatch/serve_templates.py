@@ -167,7 +167,12 @@ def _password_field(
     </button></span></label>"""
 
 
-def _auth_page(title: str, body: str) -> str:
+def _auth_page(title: str, body: str, *, workspace_slug: str | None = None) -> str:
+    workspace = (
+        f'<p class="auth-workspace">Espace {html.escape(workspace_slug)}</p>'
+        if workspace_slug
+        else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -181,6 +186,7 @@ body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24
   border-radius:24px; background:#fffefa; box-shadow:0 24px 70px rgba(52,46,34,.13); }}
 .auth-brand {{ color:#42752d; font-size:.78rem; font-weight:800; letter-spacing:.16em;
   text-transform:uppercase; }}
+.auth-workspace {{ margin:8px 0 0; color:#686d76; font-size:.78rem; font-weight:700; }}
 h1 {{ margin:12px 0 24px; font-size:clamp(1.8rem,8vw,2.5rem); line-height:1.05; }}
 form {{ display:grid; gap:18px; }}
 label {{ display:grid; gap:8px; color:#686d76; font-size:.86rem; font-weight:650; }}
@@ -203,7 +209,7 @@ button {{ margin-top:4px; padding:14px 18px; border:0; border-radius:12px;
   background:rgba(182,60,84,.10); }}
 .auth-link {{ display:inline-flex; padding:12px 16px; border-radius:12px; color:#fff;
   background:#42752d; font-weight:750; text-decoration:none; }}
-</style></head><body><main class="auth-card"><div class="auth-brand">jobwatch</div>
+</style></head><body><main class="auth-card"><div class="auth-brand">jobwatch</div>{workspace}
 <h1>{html.escape(title)}</h1>{body}</main><script>
 document.querySelectorAll('[data-password-target]').forEach(button => {{
   button.addEventListener('click', () => {{
@@ -309,6 +315,15 @@ h1 span { color:var(--muted-2); font-weight:620 }
   box-shadow:0 0 0 4px var(--accent-soft) }
 .manage-link { display:inline-flex; margin-top:18px; color:var(--accent); font-size:.76rem;
   font-weight:780; text-decoration:none }
+.manage-links { display:flex; flex-wrap:wrap; gap:8px 18px }
+.profile-prompt { display:flex; align-items:center; justify-content:space-between; gap:14px;
+  margin:18px 0 0; padding:15px 16px; border:1px solid var(--line); border-radius:var(--radius-md);
+  background:var(--surface); box-shadow:var(--card-shadow) }
+.profile-prompt div { min-width:0; display:grid; gap:3px }
+.profile-prompt strong { font-size:.82rem }
+.profile-prompt span { color:var(--muted); font-size:.73rem }
+.profile-prompt a { flex:none; color:var(--accent); font-size:.74rem; font-weight:790;
+  text-decoration:none }
 .stats { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin:24px 0 22px }
 .stat { min-width:0; padding:14px 13px 13px; border:1px solid var(--line); border-radius:var(--radius-md);
   background:linear-gradient(145deg, var(--surface-2), var(--surface)); box-shadow:var(--card-shadow) }
@@ -688,6 +703,7 @@ a { color:var(--blue) }
   .topbar-tools { width:100%; }
   .swipe-fab { flex:1; }
   .logout-button { margin-left:auto; }
+  .profile-prompt { align-items:flex-start; flex-direction:column }
 }
 @media (max-width:370px) {
   .stat { padding:12px 9px }
@@ -1281,7 +1297,8 @@ def _track_nav(track: str) -> str:
 
 def _page_template(
     *, body, total, new_count, seen_count, applied_count, stamp, track,
-    category_link="", swipe_fab="", swipe_popup="", batch_badge="", csrf_token="",
+    category_link="", profile_link="", profile_prompt="", swipe_fab="", swipe_popup="",
+    batch_badge="", csrf_token="", identity_sub="",
 ) -> str:
     logout_button = (
         '<button class="logout-button" type="button" aria-label="Déconnexion" '
@@ -1293,6 +1310,7 @@ def _page_template(
         if csrf_token
         else ""
     )
+    identity_copy = html.escape(identity_sub) if identity_sub else "Suivi de vos offres"
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -1320,7 +1338,7 @@ def _page_template(
       <div class="identity">
         <div class="monogram" aria-hidden="true">JW</div>
         <div class="identity-copy"><span class="identity-name">jobwatch</span>
-          <span class="identity-sub">Suivi de vos offres</span></div>
+          <span class="identity-sub">{identity_copy}</span></div>
       </div>
       <div class="topbar-tools">
       {swipe_fab}
@@ -1343,7 +1361,8 @@ def _page_template(
         Mis à jour le {stamp}</p>
     </div>
     {_track_nav(track)}
-    {category_link}
+    <div class="manage-links">{category_link}{profile_link}</div>
+    {profile_prompt}
     <div class="stats" aria-label="Vue d'ensemble">
       <div class="stat stat-new"><span class="stat-value">{new_count}</span><span class="stat-label">Nouveaux matchs</span></div>
       <div class="stat stat-seen"><span class="stat-value">{seen_count}</span><span class="stat-label">Vus</span></div>

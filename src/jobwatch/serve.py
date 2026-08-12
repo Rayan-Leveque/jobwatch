@@ -76,6 +76,8 @@ from jobwatch.onboarding import (
     profile_intents,
 )
 from jobwatch.onboarding_ui import render_onboarding
+from jobwatch.profile import ProfileError, profile_details, save_profile_details
+from jobwatch.profile_ui import render_profile
 from jobwatch.serve_queries import (
     TRACKS,
     _batch_eligible_ids,
@@ -226,7 +228,14 @@ def make_handler(
             if session is not None:
                 return session
             if path.startswith(
-                ("/draft/", "/match/", "/documents", "/onboarding/", _BUG_REPORT_PATH)
+                (
+                    "/draft/",
+                    "/match/",
+                    "/documents",
+                    "/onboarding/",
+                    "/profile",
+                    _BUG_REPORT_PATH,
+                )
             ):
                 self._send_json(401, {"error": "authentification requise"})
             else:
@@ -309,6 +318,24 @@ def make_handler(
                     "text/html; charset=utf-8",
                 )
                 return
+            if path == "/profile":
+                if session is None or workspace_slug is None:
+                    self._redirect("/")
+                    return
+                with self._db() as conn:
+                    details = profile_details(conn, session.account_id)
+                self._send_bytes(
+                    200,
+                    render_profile(
+                        details,
+                        session.csrf_token,
+                        email=session.email,
+                        workspace_slug=workspace_slug,
+                        welcome=parse_qs(parsed.query).get("welcome") == ["1"],
+                    ).encode("utf-8"),
+                    "text/html; charset=utf-8",
+                )
+                return
             status = _DRAFT_STATUS_RE.match(path)
             if status:
                 self._handle_draft_status(int(status.group(1)))
@@ -354,13 +381,24 @@ def make_handler(
         @_db_error_response()
         def _render_track_page(self, track: str, swipe: bool, session: Session | None) -> None:
             with self._db() as conn:
-                render = render_swipe_page if swipe else render_page
-                page = render(
-                    conn,
-                    track,
-                    draft_enabled=draft_config is not None,
-                    csrf_token=session.csrf_token if session is not None else "",
-                )
+                common = {
+                    "draft_enabled": draft_config is not None,
+                    "csrf_token": session.csrf_token if session is not None else "",
+                }
+                if swipe:
+                    page = render_swipe_page(conn, track, **common)
+                else:
+                    page = render_page(
+                        conn,
+                        track,
+                        account_id=session.account_id if session is not None else None,
+                        identity_sub=(
+                            f"{session.email} · espace {workspace_slug}"
+                            if session is not None and workspace_slug is not None
+                            else ""
+                        ),
+                        **common,
+                    )
             self._send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
         @_db_error_response()
@@ -607,6 +645,9 @@ def make_handler(
             if path == "/onboarding/complete":
                 self._handle_onboarding_complete(session)
                 return
+            if path == "/profile":
+                self._handle_profile_save(session)
+                return
             if path == "/logout":
                 token = session_token(self.headers.get("Cookie"))
                 if token:
@@ -765,6 +806,7 @@ def make_handler(
                 return
             with self._db() as conn:
                 try:
+                    already_complete = profile_complete(conn, session.account_id)
                     intents = complete_profile(
                         conn,
                         session.account_id,
@@ -775,7 +817,30 @@ def make_handler(
                 except OnboardingError as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
-            self._send_json(200, {"ok": True, "count": len(intents)})
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "count": len(intents),
+                    "next": "/" if already_complete else "/profile?welcome=1",
+                },
+            )
+
+        @_db_error_response("json")
+        def _handle_profile_save(self, session: Session | None) -> None:
+            if session is None:
+                self._send_json(401, {"error": "authentification requise"})
+                return
+            body = self._read_json_body()
+            with self._db() as conn:
+                try:
+                    details = save_profile_details(
+                        conn, session.account_id, session.workspace_id, body
+                    )
+                except ProfileError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+            self._send_json(200, {"ok": True, "personalized": details.has_personalization})
 
         def _handle_login(self) -> None:
             if not self._same_origin():
@@ -918,7 +983,7 @@ def make_handler(
             self._send_bytes(status, text.encode("utf-8"), "text/plain; charset=utf-8")
 
         def _send_auth_page(self, title: str, body: str, *, status: int = 200) -> None:
-            page = _auth_page(title, body)
+            page = _auth_page(title, body, workspace_slug=workspace_slug)
             self._send_bytes(status, page.encode("utf-8"), "text/html; charset=utf-8")
 
         def _redirect(self, location: str, *, headers: dict[str, str] | None = None) -> None:

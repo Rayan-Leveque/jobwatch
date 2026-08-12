@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -189,6 +190,10 @@ def test_named_instance_init_and_run_use_isolated_xdg_paths(
     assert config.exists()
     assert db.exists()
     assert f"db: {db}" in config.read_text()
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert stat.S_IMODE(config.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(db.stat().st_mode) == 0o600
+    assert stat.S_IMODE(db.parent.stat().st_mode) == 0o700
 
     run_result = runner.invoke(cli, ["--instance", "alice", "run"])
     assert run_result.exit_code == 0, run_result.output
@@ -271,6 +276,41 @@ def test_account_invite_enables_auth_and_prints_one_time_path(
     ).fetchone()[0] == "1"
     assert conn.execute("SELECT count(*) FROM account_invite").fetchone()[0] == 1
     conn.close()
+
+
+def test_named_instance_serve_refuses_unprotected_workspace(
+    runner: CliRunner, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    assert runner.invoke(cli, ["--instance", "alice", "init"]).exit_code == 0
+
+    result = runner.invoke(cli, ["--instance", "alice", "serve"])
+
+    assert result.exit_code == 1
+    assert "n'a pas de compte protégé" in result.output
+    assert "account invite" in result.output
+
+
+def test_allow_open_is_an_explicit_local_development_escape_hatch(
+    runner: CliRunner, tmp_path: Path, monkeypatch
+) -> None:
+    from jobwatch import cli as cli_module
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    assert runner.invoke(cli, ["--instance", "alice", "init"]).exit_code == 0
+    called: list[Path] = []
+    monkeypatch.setattr(
+        cli_module,
+        "serve_http",
+        lambda db_path, *_args, **_kwargs: called.append(db_path),
+    )
+
+    result = runner.invoke(cli, ["--instance", "alice", "serve", "--allow-open"])
+
+    assert result.exit_code == 0, result.output
+    assert called == [tmp_path / "data/jobwatch/instances/alice/jobwatch.db"]
 
 
 def test_run_with_no_sources_succeeds(runner: CliRunner, tmp_path: Path) -> None:

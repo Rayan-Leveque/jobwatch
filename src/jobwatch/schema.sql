@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS offer_content (
   status TEXT NOT NULL,              -- 'ok' | 'failed'
   fetch_attempts INTEGER NOT NULL DEFAULT 0,
   failure_reason TEXT,               -- NULL si succès ; ex. 'http_410' ou causes retryables
+  wttj_recovery_version INTEGER NOT NULL DEFAULT 0, -- reprise opérateur WTTJ déjà tentée
   fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS search (
@@ -192,6 +193,12 @@ CREATE TABLE IF NOT EXISTS candidate_profile (
   account_id INTEGER PRIMARY KEY REFERENCES account(id) ON DELETE CASCADE,
   workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
   cv_library_id INTEGER REFERENCES document_library(id),
+  motivations TEXT,
+  targets TEXT,
+  highlights TEXT,
+  preferred_tone TEXT,
+  constraints_text TEXT,
+  reusable_details TEXT,
   completed_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))

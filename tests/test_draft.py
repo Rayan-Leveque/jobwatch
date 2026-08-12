@@ -344,6 +344,27 @@ def test_compile_latex_returns_log_on_error(tmp_path: Path) -> None:
 # ---------------------------------------------------------------- run_job
 
 
+def test_draft_bundle_uses_optional_profile_without_inventing_missing_context() -> None:
+    personalized = draft._build_bundle(
+        "Offre réelle",
+        "CV réel",
+        ["Exemple"],
+        None,
+        profile_context=(
+            "## Motivations\n\nConstruire des produits utiles.\n\n"
+            "## Ton préféré\n\nDirect et chaleureux."
+        ),
+    )
+    without_profile = draft._build_bundle("Offre réelle", "CV réel", ["Exemple"], None)
+
+    assert "# PROFIL PERSONNEL" in personalized
+    assert "Construire des produits utiles" in personalized
+    assert "# PROFIL PERSONNEL" not in without_profile
+    prompt = draft.PROMPT.format(date="12 août 2026")
+    assert "N'invente aucun fait absent du CV et du PROFIL PERSONNEL" in prompt
+    assert "Si cette section est absente" in prompt
+
+
 @pytest.mark.skipif(not HAS_TEX, reason="lualatex/pdftoppm absents")
 def test_run_job_success_writes_files_and_library(
     db_path: Path, tmp_path: Path, monkeypatch

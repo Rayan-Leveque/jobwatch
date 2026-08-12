@@ -35,6 +35,7 @@ from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from dataclasses import field as dataclasses_field
+from urllib.parse import urlsplit
 
 import httpx
 from playwright.sync_api import sync_playwright
@@ -57,6 +58,15 @@ FETCH_RETRY_SQL_DELAY = "-1 day"
 TERMINAL_HTTP_STATUSES = frozenset({404, 410})
 MAX_SUMMARY_ATTEMPTS = 3
 SUMMARY_RETRY_SQL_DELAY = "-1 hour"
+WTTJ_RECOVERY_VERSION = 1
+WTTJ_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+}
 
 # Champs fixes du résumé structuré, dans l'ordre d'affichage.
 FIELD_KEYS = ("experience", "salary", "remote", "stack")
@@ -125,6 +135,8 @@ class EnrichResult:
     kept_chars: int = 0
     quotes_verified: int = 0
     quotes_rejected: int = 0
+    wttj_recovery_attempted: int = 0
+    wttj_recovery_recovered: int = 0
 
     def summary_line(self) -> str:
         """Bilan lisible d'un run, affiché même sans -v (donc visible en cron)."""
@@ -148,6 +160,11 @@ class EnrichResult:
             parts.append(
                 f"{self.quotes_verified} citation(s) vérifiée(s), "
                 f"{self.quotes_rejected} rejetée(s)"
+            )
+        if self.wttj_recovery_attempted:
+            parts.append(
+                f"reprise WTTJ {self.wttj_recovery_recovered}/"
+                f"{self.wttj_recovery_attempted} récupérée(s)"
             )
         return " ; ".join(parts)
 
@@ -176,7 +193,9 @@ def _thousands(value: int) -> str:
     return f"{value:,}".replace(",", " ")
 
 
-def _pending_offers(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _pending_offers(
+    conn: sqlite3.Connection, *, recover_wttj: bool = False
+) -> list[sqlite3.Row]:
     """Offres actives à traiter : texte à récupérer et/ou champs structurés absents.
 
     Une offre est active si un match new/seen/later ou une candidature la
@@ -185,51 +204,74 @@ def _pending_offers(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     Les anciennes lignes sans classification ont droit à un retry immédiat.
     """
     return conn.execute(
-        "SELECT o.id AS id, o.url AS url, oc.status AS content_status, "
-        "       oc.fetch_attempts AS fetch_attempts, oc.failure_reason AS failure_reason, "
-        "       os.id AS summary_id, os.source AS summary_source, "
-        "       os.status AS summary_status, os.attempt_count AS summary_attempts, "
-        "       CASE WHEN oc.id IS NULL OR "
+        "WITH candidates AS ("
+        " SELECT o.id AS id, o.url AS url, oc.status AS content_status, "
+        "        oc.fetch_attempts AS fetch_attempts, oc.failure_reason AS failure_reason, "
+        "        os.id AS summary_id, os.source AS summary_source, "
+        "        os.status AS summary_status, os.attempt_count AS summary_attempts, "
+        "        CASE WHEN oc.id IS NULL OR "
         "          (oc.status = 'failed' AND oc.fetch_attempts < ? "
         "           AND (oc.failure_reason IS NULL "
         "                OR (oc.failure_reason NOT IN ('http_404', 'http_410') "
         "                    AND oc.fetched_at <= datetime('now', ?)))) "
-        "       THEN 1 ELSE 0 END AS fetch_due "
-        "FROM offer o LEFT JOIN offer_content oc ON oc.offer_id = o.id "
-        "LEFT JOIN offer_summary os ON os.offer_id = o.id "
-        "WHERE (EXISTS (SELECT 1 FROM match m WHERE m.offer_id = o.id "
+        "        THEN 1 ELSE 0 END AS regular_fetch_due, "
+        "        CASE WHEN ? = 1 AND oc.status = 'failed' "
+        "          AND oc.wttj_recovery_version < ? "
+        "          AND (oc.failure_reason IS NULL "
+        "               OR oc.failure_reason NOT IN ('http_404', 'http_410')) "
+        "          AND (src.type = 'wttj' OR lower(src.name) = 'wttj' "
+        "               OR lower(o.platform) = 'wttj') "
+        "        THEN 1 ELSE 0 END AS recovery_due "
+        " FROM offer o JOIN source src ON src.id = o.source_id "
+        " LEFT JOIN offer_content oc ON oc.offer_id = o.id "
+        " LEFT JOIN offer_summary os ON os.offer_id = o.id "
+        " WHERE EXISTS (SELECT 1 FROM match m WHERE m.offer_id = o.id "
         "               AND m.state IN ('new', 'seen', 'later')) "
-        "   OR EXISTS (SELECT 1 FROM application a WHERE a.offer_id = o.id)) "
-        "AND (oc.id IS NULL "
-        "  OR (oc.status = 'failed' AND oc.fetch_attempts < ? "
-        "      AND (oc.failure_reason IS NULL "
-        "           OR (oc.failure_reason NOT IN ('http_404', 'http_410') "
-        "               AND oc.fetched_at <= datetime('now', ?)))) "
-        "  OR os.id IS NULL "
-        "  OR NOT EXISTS (SELECT 1 FROM summary_bullet sb WHERE sb.summary_id = os.id) "
-        "     AND NOT EXISTS (SELECT 1 FROM summary_field sf WHERE sf.summary_id = os.id) "
-        "  OR (oc.status = 'ok' AND os.source = 'metadata' "
-        "      AND os.attempt_count < ? "
-        "      AND (os.attempt_count = 0 OR os.attempted_at <= datetime('now', ?))) "
-        "  OR (oc.status = 'ok' AND os.source != 'metadata' "
-        "      AND NOT EXISTS (SELECT 1 FROM offer_summary os "
-        "                      JOIN summary_field sf ON sf.summary_id = os.id "
-        "                      WHERE os.offer_id = o.id))) "
-        "ORDER BY o.id",
+        "    OR EXISTS (SELECT 1 FROM application a WHERE a.offer_id = o.id)"
+        ") "
+        "SELECT *, CASE WHEN regular_fetch_due = 1 OR recovery_due = 1 "
+        "               THEN 1 ELSE 0 END AS fetch_due "
+        "FROM candidates c WHERE regular_fetch_due = 1 OR recovery_due = 1 "
+        "  OR summary_id IS NULL "
+        "  OR (NOT EXISTS (SELECT 1 FROM summary_bullet sb WHERE sb.summary_id = c.summary_id) "
+        "      AND NOT EXISTS (SELECT 1 FROM summary_field sf WHERE sf.summary_id = c.summary_id)) "
+        "  OR (content_status = 'ok' AND summary_source = 'metadata' "
+        "      AND summary_attempts < ? "
+        "      AND (summary_attempts = 0 OR EXISTS ("
+        "          SELECT 1 FROM offer_summary retry_summary "
+        "          WHERE retry_summary.id = c.summary_id "
+        "            AND retry_summary.attempted_at <= datetime('now', ?)))) "
+        "  OR (content_status = 'ok' AND summary_source != 'metadata' "
+        "      AND NOT EXISTS (SELECT 1 FROM summary_field sf "
+        "                      WHERE sf.summary_id = c.summary_id)) "
+        "ORDER BY id",
         (
             MAX_FETCH_ATTEMPTS,
             FETCH_RETRY_SQL_DELAY,
-            MAX_FETCH_ATTEMPTS,
-            FETCH_RETRY_SQL_DELAY,
+            int(recover_wttj),
+            WTTJ_RECOVERY_VERSION,
             MAX_SUMMARY_ATTEMPTS,
             SUMMARY_RETRY_SQL_DELAY,
         ),
     ).fetchall()
 
 
+def _source_http_headers(url: str) -> dict[str, str] | None:
+    """Imite un navigateur uniquement pour le domaine WTTJ qui bloque le client brut."""
+    try:
+        hostname = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return None
+    if hostname in ("welcometothejungle.com", "www.welcometothejungle.com"):
+        return WTTJ_HTTP_HEADERS
+    return None
+
+
 def _fetch_http(url: str, client: httpx.Client) -> FetchPage:
     try:
-        response = client.get(url, follow_redirects=True)
+        response = client.get(
+            url, follow_redirects=True, headers=_source_http_headers(url)
+        )
         response.raise_for_status()
     except httpx.TimeoutException as exc:
         log.warning("enrich: http fetch failed for %s: %s", url, exc)
@@ -306,6 +348,8 @@ def _store_content(
     fetch_method: str | None,
     html: str | None,
     failure_reason: str | None,
+    *,
+    wttj_recovery: bool = False,
 ) -> None:
     """Enregistre le bloc utile, sa provenance et le HTML brut compressé.
 
@@ -314,12 +358,16 @@ def _store_content(
     """
     conn.execute(
         "INSERT INTO offer_content (offer_id, markdown, fetch_method, extract_method, "
-        "html_gz, status, fetch_attempts, failure_reason) VALUES (?, ?, ?, ?, ?, ?, 1, ?) "
+        "html_gz, status, fetch_attempts, failure_reason, wttj_recovery_version) "
+        "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?) "
         "ON CONFLICT(offer_id) DO UPDATE SET markdown = excluded.markdown, "
         "fetch_method = excluded.fetch_method, extract_method = excluded.extract_method, "
         "html_gz = excluded.html_gz, status = excluded.status, "
         "fetch_attempts = offer_content.fetch_attempts + 1, "
-        "failure_reason = excluded.failure_reason, fetched_at = datetime('now')",
+        "failure_reason = excluded.failure_reason, "
+        "wttj_recovery_version = MAX(offer_content.wttj_recovery_version, "
+        "                            excluded.wttj_recovery_version), "
+        "fetched_at = datetime('now')",
         (
             offer_id,
             result.markdown if result is not None else None,
@@ -328,6 +376,7 @@ def _store_content(
             gzip.compress(html.encode("utf-8")) if html else None,
             "ok" if result is not None else "failed",
             failure_reason,
+            WTTJ_RECOVERY_VERSION if wttj_recovery else 0,
         ),
     )
     conn.commit()
@@ -636,6 +685,7 @@ def enrich(
     *,
     client: httpx.Client | None = None,
     sleep=time.sleep,
+    recover_wttj: bool = False,
 ) -> EnrichResult:
     """Récupère et résume les offres actives sans texte ou sans champs structurés.
 
@@ -649,7 +699,7 @@ def enrich(
             "de config.yaml (voir README.md)"
         )
 
-    offers = _pending_offers(conn)
+    offers = _pending_offers(conn, recover_wttj=recover_wttj)
     result = EnrichResult()
     if not offers:
         return result
@@ -675,6 +725,9 @@ def enrich(
                 fetch_remaining -= 1
                 fetch = _fetch_and_extract_result(url, http_client)
                 extracted = fetch.extraction
+                recovery_attempt = bool(offer["recovery_due"])
+                if recovery_attempt:
+                    result.wttj_recovery_attempted += 1
                 _store_content(
                     conn,
                     offer_id,
@@ -682,6 +735,7 @@ def enrich(
                     fetch.fetch_method,
                     fetch.html,
                     fetch.failure_reason,
+                    wttj_recovery=recovery_attempt,
                 )
                 if extracted is None:
                     result.fetched_failed += 1
@@ -696,6 +750,8 @@ def enrich(
                     log.info("enrich: offre %d ECHEC fetch %s", offer_id, url)
                     continue
                 content_status = "ok"
+                if recovery_attempt:
+                    result.wttj_recovery_recovered += 1
                 result.fetched_ok += 1
                 result.extract_methods[extracted.method] += 1
                 result.raw_chars += extracted.raw_chars

@@ -407,8 +407,8 @@ document.getElementById('confirm').addEventListener('click', async event => {{
     status.classList.add('error'); return; }}
   button.disabled = true; status.textContent = 'Enregistrement de vos catégories…';
   status.classList.remove('error');
-  try {{ await post('/onboarding/complete', {{cv_library_ids:cvLibraryIds, intents}});
-    location.href = '/'; }} catch (error) {{ status.textContent = error.message;
+  try {{ const result=await post('/onboarding/complete', {{cv_library_ids:cvLibraryIds, intents}});
+    location.href = result.next || '/'; }} catch (error) {{ status.textContent = error.message;
     status.classList.add('error'); button.disabled = false; }}
 }});
 if (initialData.editing) showIntents(initialData.intents, false);

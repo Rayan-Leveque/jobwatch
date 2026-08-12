@@ -47,6 +47,7 @@ nommée. Chaque instance possède sa configuration, sa base SQLite et son dossie
 
 ```bash
 .venv/bin/jw --instance rayan init
+.venv/bin/jw --instance rayan account invite rayan@example.com
 .venv/bin/jw --instance rayan run
 .venv/bin/jw --instance rayan serve --port 8765
 
@@ -64,9 +65,15 @@ propriétaire valable 48 heures. Ouvrez ce chemin sur le serveur de l'instance p
 de passe. Une instance n'accepte qu'une seule adresse propriétaire : offres, documents et
 candidatures y sont communs, donc une deuxième personne a besoin de sa propre `--instance`.
 Tant que l'invitation n'a pas été acceptée, la relancer avec une autre adresse remplace la
-précédente ; une fois le compte créé, l'adresse ne change plus. Les pages, documents et actions deviennent alors inaccessibles sans session. Le cookie
+précédente ; une fois le compte créé, l'adresse ne change plus. Les pages, documents et actions
+deviennent alors inaccessibles sans session. Une instance nommée refuse de démarrer tant que
+`account invite` n'a pas activé cette protection. `--allow-open` conserve un échappatoire explicite
+pour un développement local, jamais pour une personne invitée. Une installation historique lancée
+sans `--instance` garde son fonctionnement existant. Le cookie
 est réservé à HTTPS par défaut. Pour un serveur HTTP strictement local ou privé, lancez
 explicitement `jw --instance alice serve --no-secure-cookie`; ne publiez jamais ce mode sur Internet.
+Les nouvelles configurations, bases et pièces uploadées reçoivent des permissions privées pour le
+compte système qui exécute Jobwatch (`0600` pour les fichiers, `0700` pour les dossiers d'instance).
 
 À la première connexion d'une instance nommée, jobwatch ouvre un parcours de démarrage : importez
 un ou plusieurs CV PDF pour obtenir des catégories proposées ensemble, ou créez-les manuellement.
@@ -79,6 +86,80 @@ et relance le matching ; le lien « Modifier mes catégories » reste ensuite di
 tableau de bord. Le bloc `draft` doit être configuré pour l'analyse des CV par IA ; le parcours
 manuel reste toujours disponible. Chaque fichier CV est vérifié côté serveur comme un PDF et
 limité à 10 Mio ; l'exemple de lettre est limité à 10 Mio et doit porter l'extension `.tex`.
+
+Après la première confirmation, une étape facultative « Profil de candidature » guide l'utilisateur
+pour renseigner ses motivations, ses cibles, ses réalisations, son ton, ses contraintes et des
+informations personnelles réutilisables. Le lien « Personnaliser mes lettres » permet de les modifier
+ensuite. Ces éléments restent dans l'instance et ne sont transmis au modèle que lors d'une demande
+de lettre. Une fiche vide est valide : la rédaction retombe sobrement sur le CV et l'offre. Le prompt
+interdit d'inventer un fait absent de ces sources. Chaque brouillon reste prévisualisable et son corps
+peut être corrigé avec « Modifier le texte » avant de le choisir dans le formulaire Candidater.
+
+### Déployer une instance par ami
+
+Le modèle d'isolation supporté est volontairement simple : **une personne = une instance nommée =
+une base = un processus = une URL**. Les tables d'offres et de documents ne portent pas encore de
+propriétaire. Il ne faut donc jamais ajouter deux comptes à une base, copier la base historique dans
+l'instance d'un ami, ni mettre deux personnes derrière le processus existant du capitaine.
+
+Pour chaque personne :
+
+```bash
+# 1. Créer des chemins et une base entièrement neufs.
+.venv/bin/jw --instance alice init
+
+# 2. Remplir uniquement la nouvelle config. Ne pas copier celle du capitaine.
+$EDITOR ~/.config/jobwatch/instances/alice/config.yaml
+
+# 3. Activer l'auth avant de rendre le serveur joignable.
+.venv/bin/jw --instance alice account invite alice@example.com
+
+# 4. Lancer un processus dédié derrière HTTPS.
+.venv/bin/jw --instance alice serve --host 127.0.0.1 --port 8766
+```
+
+Le chemin `/invite/...` affiché à l'étape 3 est à compléter avec l'URL publique propre à Alice.
+Utilisez de préférence un nom d'hôte distinct par personne, par exemple
+`https://alice.jobs.example/invite/...`, dirigé par le reverse proxy vers `127.0.0.1:8766`.
+Les préfixes de chemin ne sont pas supportés : l'application utilise des routes à la racine. Un simple
+partage du port ou de l'URL du capitaine n'isole rien. Les cookies ne sont pas séparés par port ; des
+noms d'hôte distincts évitent aussi qu'une session d'une instance gêne la connexion à une autre.
+
+Avant d'envoyer une invitation, vérifiez pour cette instance :
+
+- la config `sources` et ses identifiants, créés avec le minimum de droits possible ;
+- le bloc `enrich` et Chromium si les résumés sont activés ;
+- le bloc `draft`, `lualatex`, `pdftotext` et `pdftoppm` si les lettres sont activées ;
+- le canal `notify`, sa destination et l'absence de secret du capitaine dans la nouvelle config ;
+- un processus supervisé distinct, son port, son cron `run`/`enrich` et ses journaux ;
+- HTTPS jusqu'au navigateur, avec le cookie sécurisé par défaut ;
+- une sauvegarde testée du dossier `~/.local/share/jobwatch/instances/alice/`.
+
+Un domaine public, les certificats TLS, la configuration du reverse proxy, les identifiants des
+job boards et ceux du runner LLM sont des prérequis opérateur externes au dépôt. Jobwatch ne peut pas
+les créer. Sur un réseau privé chiffré comme Tailscale, HTTP avec `--no-secure-cookie` reste une
+exception explicite ; il faut tout de même une instance et une invitation distinctes par personne.
+
+#### Sauvegarde, migration et retour arrière
+
+Arrêtez le processus de l'instance avant une copie cohérente, puis sauvegardez tout son dossier de
+données et sa config :
+
+```bash
+systemctl --user stop jobwatch-alice.service
+mkdir -p ~/.local/share/jobwatch/backups
+cp -a ~/.local/share/jobwatch/instances/alice \
+  ~/.local/share/jobwatch/backups/alice-$(date +%F-%H%M%S)
+cp -a ~/.config/jobwatch/instances/alice/config.yaml \
+  ~/.local/share/jobwatch/backups/alice-config-$(date +%F-%H%M%S).yaml
+systemctl --user start jobwatch-alice.service
+```
+
+Les migrations SQLite sont additives et idempotentes au démarrage. Pour revenir au code précédent,
+arrêtez le service, remettez la version de code antérieure et redémarrez ; les colonnes ajoutées sont
+ignorées. Si une opération de données doit aussi être annulée, arrêtez le service et restaurez le
+dossier d'instance sauvegardé avant l'opération. Ne restaurez jamais la sauvegarde d'une personne dans
+l'instance d'une autre.
 
 ### Cron
 
@@ -166,6 +247,21 @@ lieu, contrat, source, catégorie et fit). Sa provenance est affichée explicite
 par un résumé fondé sur l'annonce dès que du contenu réel devient disponible. Une annonce absente
 n'est jamais fabriquée : la carte explique son retrait terminal, l'épuisement des tentatives ou la
 prochaine tentative prévue.
+
+WTTJ bloque le client HTTP générique tout en servant la même annonce à un navigateur. Jobwatch envoie
+donc des en-têtes de navigateur uniquement aux URL exactes `welcometothejungle.com`, puis conserve le
+repli Playwright. Les autres sources gardent le chemin HTTP générique. Pour les anciennes offres WTTJ
+déjà arrivées au plafond avant cette correction, l'opérateur peut lancer une reprise bornée après
+sauvegarde :
+
+```bash
+.venv/bin/jw --instance alice enrich --recover-wttj
+```
+
+Cette option ne cible que les offres WTTJ actives en échec non terminal, tente chaque ligne une seule
+fois pour cette version de reprise et affiche les nombres récupérés et tentés dans son bilan. La
+relancer est idempotent et annonce zéro nouvelle tentative. Une réponse 404 ou 410 n'est jamais
+contournée et le résumé limité reste explicite si la page demeure irrécupérable.
 
 `jw enrich` nécessite le bloc `enrich` de `config.yaml` (voir la référence de configuration
 ci-dessous) ; sans lui, la commande refuse proprement avec un message clair, sans réseau ni erreur
@@ -275,7 +371,7 @@ lance un job en arrière-plan (table `draft_job`) :
    de `jw enrich` (HTTP puis Playwright). Si la page est irrécupérable, la lettre est générée à
    partir du titre, de la société et du résumé, avec un avertissement affiché sur la carte.
 2. Le LLM (bloc `draft` : runner `opencode` ou `codex`, comme pour `enrich`) reçoit l'offre, le texte du CV choisi (extrait via
-   `pdftotext` pour un PDF) et des lettres exemples `.tex`, puis rédige le document LaTeX complet,
+   `pdftotext` pour un PDF), le profil facultatif et des lettres exemples `.tex`, puis rédige le document LaTeX complet,
    sans image, daté du jour, en encadrant le corps de la lettre (de la formule d'ouverture à la
    formule de clôture, hors date, en-tête et signature) par les marqueurs de commentaire LaTeX
    `% JOBWATCH:BODY_START` / `% JOBWATCH:BODY_END`. Les lettres exemples sont résolues dans cet
@@ -378,7 +474,7 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `workspace`, `account`, `membership` | Instance, compte propriétaire unique et droits, préparant le passage au multi-utilisateur |
 | `account_invite`, `web_session` | Invitations à durée limitée et sessions web opaques |
 | `instance_setting`, `login_throttle` | Réglages de l'instance (dont `auth_required`) et compteur d'échecs de connexion par email/adresse |
-| `candidate_profile`, `candidate_profile_document`, `career_intent` | Profil d'onboarding, CV analysés et catégories métier confirmées d'un compte |
+| `candidate_profile`, `candidate_profile_document`, `career_intent` | Profil d'onboarding, contexte facultatif des lettres, CV analysés et catégories métier confirmées d'un compte |
 
 ## Feuille de route
 
