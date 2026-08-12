@@ -610,6 +610,33 @@ def test_manual_onboarding_reaches_unified_dashboard(browser, onboarding_instanc
     page.close()
 
 
+def test_onboarding_seniority_range_error_leaves_confirm_button_usable(
+    browser, onboarding_instance
+) -> None:
+    url, invite = onboarding_instance
+    page = browser.new_page()
+    _sign_in_to_onboarding(page, url, invite)
+    page.get_by_role("button", name=re.compile(r"^Créer mes catégories")).click()
+    page.get_by_label("Du niveau").select_option("4")
+    page.get_by_label("Au niveau").select_option("2")
+    page.locator(".intent-label").fill("Ingénierie IA")
+    page.locator(".keywords").fill("AI Engineer, LLM Engineer")
+
+    page.locator("#confirm").click()
+
+    assert (
+        page.locator("#intent-status").inner_text()
+        == "Le niveau minimum doit précéder le niveau maximum."
+    )
+    assert page.locator("#confirm").is_enabled()
+
+    page.get_by_label("Du niveau").select_option("2")
+    page.locator("#confirm").click()
+
+    page.wait_for_url(f"{url}/profile?welcome=1")
+    page.close()
+
+
 def test_preferences_filter_feed_and_toggle_letter_workflow_without_data_loss(
     browser, preferences_instance
 ) -> None:
