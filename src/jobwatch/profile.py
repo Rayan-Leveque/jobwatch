@@ -5,6 +5,14 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import asdict, dataclass
 
+from jobwatch.seniority import (
+    DEFAULT_MAX_LEVEL,
+    DEFAULT_MIN_LEVEL,
+    excluded_match_count,
+    reclassify_recent_matches,
+    validate_range,
+)
+
 MAX_PROFILE_FIELD_LENGTH = 3_000
 
 
@@ -27,6 +35,13 @@ class ProfileDetails:
 
 
 PROFILE_COLUMNS = tuple(ProfileDetails.__dataclass_fields__)
+
+
+@dataclass(frozen=True)
+class ProfilePreferences:
+    seniority_min: int = DEFAULT_MIN_LEVEL
+    seniority_max: int = DEFAULT_MAX_LEVEL
+    cover_letters_enabled: bool = True
 
 
 def _clean_value(value: object, label: str) -> str:
@@ -53,6 +68,25 @@ def profile_details(conn: sqlite3.Connection, account_id: int) -> ProfileDetails
     return ProfileDetails(**{column: str(row[column] or "") for column in PROFILE_COLUMNS})
 
 
+def profile_preferences(conn: sqlite3.Connection, account_id: int) -> ProfilePreferences:
+    row = conn.execute(
+        "SELECT seniority_min, seniority_max, cover_letters_enabled "
+        "FROM candidate_profile WHERE account_id = ?",
+        (account_id,),
+    ).fetchone()
+    if row is None:
+        return ProfilePreferences()
+    return ProfilePreferences(
+        seniority_min=int(row["seniority_min"]),
+        seniority_max=int(row["seniority_max"]),
+        cover_letters_enabled=bool(row["cover_letters_enabled"]),
+    )
+
+
+def profile_excluded_count(conn: sqlite3.Connection, account_id: int) -> int:
+    return excluded_match_count(conn, account_id)
+
+
 def save_profile_details(
     conn: sqlite3.Connection,
     account_id: int,
@@ -77,17 +111,44 @@ def save_profile_details(
         "constraints_text": "vos contraintes",
         "reusable_details": "vos informations réutilisables",
     }
+    current_details = profile_details(conn, account_id)
+    current_preferences = profile_preferences(conn, account_id)
     values = {
-        column: _clean_value(payload.get(column), labels[column])
+        column: _clean_value(payload.get(column, getattr(current_details, column)), labels[column])
         for column in PROFILE_COLUMNS
     }
+    try:
+        seniority_min, seniority_max = validate_range(
+            payload.get("seniority_min", current_preferences.seniority_min),
+            payload.get("seniority_max", current_preferences.seniority_max),
+        )
+    except ValueError as exc:
+        raise ProfileError(str(exc)) from exc
+    cover_letters_enabled = payload.get(
+        "cover_letters_enabled", current_preferences.cover_letters_enabled
+    )
+    if not isinstance(cover_letters_enabled, bool):
+        raise ProfileError("le choix de génération de lettres est invalide")
     conn.execute(
         "UPDATE candidate_profile SET motivations = ?, targets = ?, highlights = ?, "
         "preferred_tone = ?, constraints_text = ?, reusable_details = ?, "
+        "seniority_min = ?, seniority_max = ?, cover_letters_enabled = ?, "
         "updated_at = datetime('now') WHERE account_id = ? AND workspace_id = ?",
-        (*values.values(), account_id, workspace_id),
+        (
+            *values.values(),
+            seniority_min,
+            seniority_max,
+            int(cover_letters_enabled),
+            account_id,
+            workspace_id,
+        ),
     )
     conn.commit()
+    if (
+        seniority_min != current_preferences.seniority_min
+        or seniority_max != current_preferences.seniority_max
+    ):
+        reclassify_recent_matches(conn, account_id)
     return ProfileDetails(**values)
 
 

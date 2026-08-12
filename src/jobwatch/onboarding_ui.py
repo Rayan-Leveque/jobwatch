@@ -6,6 +6,8 @@ import html
 import json
 
 from jobwatch.onboarding import MAX_INTENTS
+from jobwatch.profile import ProfilePreferences
+from jobwatch.seniority import SENIORITY_LEVELS
 
 
 def _script_json(value: object) -> str:
@@ -21,7 +23,9 @@ def render_onboarding(
     csrf_token: str,
     initial_intents: list[dict[str, object]] | None = None,
     cv_library_ids: list[int] | None = None,
+    preferences: ProfilePreferences | None = None,
 ) -> str:
+    preferences = preferences or ProfilePreferences()
     csrf = html.escape(csrf_token, quote=True)
     editing = initial_intents is not None
     initial_data = _script_json(
@@ -29,6 +33,9 @@ def render_onboarding(
             "editing": editing,
             "intents": initial_intents or [],
             "cvLibraryIds": cv_library_ids or [],
+            "seniorityMin": preferences.seniority_min,
+            "seniorityMax": preferences.seniority_max,
+            "coverLettersEnabled": preferences.cover_letters_enabled,
         }
     )
     choice_hidden = " hidden" if editing else ""
@@ -46,6 +53,18 @@ def render_onboarding(
     back_link = '<a class="back-link" href="/">← Tableau de bord</a>' if editing else ""
     mode_back_hidden = " hidden" if editing else ""
     max_intents = MAX_INTENTS
+    minimum_options = "".join(
+        f'<option value="{value}"{" selected" if value == preferences.seniority_min else ""}>'
+        f"{html.escape(label)}</option>"
+        for value, label in SENIORITY_LEVELS
+    )
+    maximum_options = "".join(
+        f'<option value="{value}"{" selected" if value == preferences.seniority_max else ""}>'
+        f"{html.escape(label)}</option>"
+        for value, label in SENIORITY_LEVELS
+    )
+    yes_checked = " checked" if preferences.cover_letters_enabled else ""
+    no_checked = "" if preferences.cover_letters_enabled else " checked"
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -81,6 +100,20 @@ h1 {{ max-width:620px; margin:0; font-size:clamp(2.2rem,9vw,4.2rem); line-height
 .choice:hover {{ border-color:rgba(66,117,45,.45); background:rgba(66,117,45,.06); }}
 .choice strong {{ display:block; margin-bottom:7px; font-size:1.05rem; }}
 .choice span {{ display:block; color:var(--muted); font-size:.88rem; line-height:1.45; }}
+.preference-box {{ min-width:0; margin:16px 0 0; padding:17px; border:1px solid var(--line);
+  border-radius:17px; background:var(--surface-2) }}
+.preference-box legend {{ padding:0 5px; font-weight:800 }}
+.preference-help {{ margin:4px 0 13px; color:var(--muted); font-size:.82rem; line-height:1.45 }}
+.radio-row {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px }}
+.radio-choice {{ display:flex; align-items:flex-start; gap:9px; min-width:0; padding:11px;
+  border:1px solid var(--line); border-radius:11px; background:var(--surface) }}
+.radio-choice input {{ width:auto; margin-top:3px; accent-color:var(--green) }}
+.radio-choice span {{ min-width:0; line-height:1.4 }}
+.seniority-box {{ margin-bottom:16px }} .seniority-grid {{ display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px }}
+.select-label {{ display:grid; gap:7px; min-width:0; color:var(--muted); font-size:.78rem;
+  font-weight:750 }} select {{ width:100%; min-width:0; padding:12px 13px; border:1px solid var(--line);
+  border-radius:11px; color:var(--fg); background:var(--surface); font:inherit }}
 .drop {{ display:grid; place-items:center; min-height:210px; padding:24px; border:1.5px dashed
   rgba(66,117,45,.35); border-radius:17px; background:rgba(66,117,45,.045); text-align:center; }}
 .drop.drag {{ border-color:var(--green); background:rgba(66,117,45,.09); }}
@@ -125,7 +158,7 @@ input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-rad
 .mode-back:hover {{ border-color:rgba(66,117,45,.45); background:rgba(66,117,45,.06); }}
 .back-link {{ display:inline-flex; margin:0 0 26px; color:var(--muted); font-size:.82rem;
   font-weight:700; text-decoration:none; }}
-@media (max-width:520px) {{ .panel {{ padding:16px; }} .choice-grid {{ grid-template-columns:1fr; }} }}
+@media (max-width:520px) {{ .panel {{ padding:16px; }} .choice-grid,.radio-row,.seniority-grid {{ grid-template-columns:1fr; }} }}
 </style></head><body><div class="ambient"></div><main>
 <div class="brand"><span class="brand-mark">JW</span>jobwatch</div>
 {back_link}
@@ -143,6 +176,17 @@ input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-rad
     <button class="choice" id="choose-manual" type="button"><strong>Créer mes catégories</strong>
       <span>Renseignez vous-même les métiers et mots-clés à surveiller.</span></button>
   </div>
+  <fieldset class="preference-box">
+    <legend>Lettres de motivation</legend>
+    <p class="preference-help">Souhaitez-vous afficher les outils de génération de lettres ?
+      Vous pourrez changer ce choix plus tard sans perdre de brouillon.</p>
+    <div class="radio-row">
+      <label class="radio-choice"><input type="radio" name="cover_letters_enabled"
+        value="true"{yes_checked}><span>Oui, activer la génération</span></label>
+      <label class="radio-choice"><input type="radio" name="cover_letters_enabled"
+        value="false"{no_checked}><span>Non, masquer ce parcours</span></label>
+    </div>
+  </fieldset>
 </section>
 <section id="upload-step" hidden>
   <p class="eyebrow">Étape 2 · Vos CV</p>
@@ -193,6 +237,17 @@ input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-rad
   <p class="lead" id="intent-lead">{lead}</p>
   <button class="wizard-action mode-back" id="back-to-choice-intents" type="button"{mode_back_hidden}>← Modifier mon choix</button>
   <div class="panel action-panel">
+    <fieldset class="preference-box seniority-box">
+      <legend>Séniorité recherchée</legend>
+      <p class="preference-help">Choisissez la plage que vous êtes prêt à considérer. Les offres
+        sans niveau explicite restent visibles : Jobwatch n’invente pas leur séniorité.</p>
+      <div class="seniority-grid">
+        <label class="select-label" for="seniority-min">Du niveau
+          <select id="seniority-min">{minimum_options}</select></label>
+        <label class="select-label" for="seniority-max">Au niveau
+          <select id="seniority-max">{maximum_options}</select></label>
+      </div>
+    </fieldset>
     <p class="analysis-note">jobwatch cherchera les offres correspondant aux mots-clés de chaque
     catégorie. Toutes les offres seront réunies dans votre tableau de bord, avec leur catégorie.</p>
     <div class="intent-list" id="intent-list"></div>
@@ -271,6 +326,8 @@ let pendingIntents = [];
 const showExampleStep = intents => {{
   pendingIntents = intents;
   document.getElementById('upload-step').hidden = true;
+  const lettersEnabled = document.querySelector('[name="cover_letters_enabled"]:checked').value === 'true';
+  if (!lettersEnabled) {{ showIntents(intents, true); return; }}
   document.getElementById('example-step').hidden = false;
   document.getElementById('step-3').classList.add('active'); window.scrollTo(0,0);
 }};
@@ -407,7 +464,16 @@ document.getElementById('confirm').addEventListener('click', async event => {{
     status.classList.add('error'); return; }}
   button.disabled = true; status.textContent = 'Enregistrement de vos catégories…';
   status.classList.remove('error');
-  try {{ const result=await post('/onboarding/complete', {{cv_library_ids:cvLibraryIds, intents}});
+  const seniorityMin=Number(document.getElementById('seniority-min').value);
+  const seniorityMax=Number(document.getElementById('seniority-max').value);
+  if (seniorityMin > seniorityMax) {{
+    status.textContent='Le niveau minimum doit précéder le niveau maximum.';
+    status.classList.add('error'); return;
+  }}
+  const coverLettersEnabled=document.querySelector('[name="cover_letters_enabled"]:checked').value==='true';
+  try {{ const result=await post('/onboarding/complete', {{cv_library_ids:cvLibraryIds, intents,
+      seniority_min:seniorityMin, seniority_max:seniorityMax,
+      cover_letters_enabled:coverLettersEnabled}});
     location.href = result.next || '/'; }} catch (error) {{ status.textContent = error.message;
     status.classList.add('error'); button.disabled = false; }}
 }});

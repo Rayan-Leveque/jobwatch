@@ -34,6 +34,9 @@ COLUMN_MIGRATIONS = (
     ("candidate_profile", "preferred_tone", "TEXT"),
     ("candidate_profile", "constraints_text", "TEXT"),
     ("candidate_profile", "reusable_details", "TEXT"),
+    ("candidate_profile", "seniority_min", "INTEGER NOT NULL DEFAULT 0"),
+    ("candidate_profile", "seniority_max", "INTEGER NOT NULL DEFAULT 5"),
+    ("candidate_profile", "cover_letters_enabled", "INTEGER NOT NULL DEFAULT 1"),
 )
 
 

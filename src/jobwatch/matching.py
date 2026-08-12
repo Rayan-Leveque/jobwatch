@@ -6,6 +6,7 @@ import json
 import sqlite3
 
 from jobwatch.config import SearchConfig
+from jobwatch.seniority import assess_new_match
 
 OFFER_WINDOW_DAYS = 60
 
@@ -144,6 +145,13 @@ def run_matching(conn: sqlite3.Connection) -> list[int]:
                 "INSERT INTO match (search_id, offer_id) VALUES (?, ?)",
                 (search_id, offer["id"]),
             )
-            new_match_ids.append(int(cur.lastrowid))
+            match_id = int(cur.lastrowid)
+            assess_new_match(conn, match_id)
+            excluded = conn.execute(
+                "SELECT 1 FROM match_seniority WHERE match_id = ? AND status = 'excluded'",
+                (match_id,),
+            ).fetchone()
+            if excluded is None:
+                new_match_ids.append(match_id)
     conn.commit()
     return new_match_ids

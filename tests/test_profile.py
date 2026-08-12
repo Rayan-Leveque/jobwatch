@@ -11,6 +11,7 @@ from jobwatch.profile import (
     ProfileError,
     draft_profile_context,
     profile_details,
+    profile_preferences,
     save_profile_details,
 )
 from jobwatch.profile_ui import render_profile
@@ -119,6 +120,57 @@ def test_profile_rejects_oversized_values(profile_db) -> None:
             workspace_id,
             {"highlights": "x" * (MAX_PROFILE_FIELD_LENGTH + 1)},
         )
+
+
+def test_preferences_are_account_scoped_and_preserve_personalization(profile_db) -> None:
+    conn, account_id, workspace_id = profile_db
+    save_profile_details(
+        conn,
+        account_id,
+        workspace_id,
+        {
+            "motivations": "Contexte conservé",
+            "seniority_min": 2,
+            "seniority_max": 3,
+            "cover_letters_enabled": False,
+        },
+    )
+    other_workspace = int(
+        conn.execute("INSERT INTO workspace (slug, name) VALUES ('bob', 'Bob')").lastrowid
+    )
+    other_account = int(
+        conn.execute("INSERT INTO account (email) VALUES ('bob@example.com')").lastrowid
+    )
+    conn.execute(
+        "INSERT INTO candidate_profile (account_id, workspace_id, completed_at) "
+        "VALUES (?, ?, datetime('now'))",
+        (other_account, other_workspace),
+    )
+    conn.commit()
+
+    alice = profile_preferences(conn, account_id)
+    bob = profile_preferences(conn, other_account)
+    assert (alice.seniority_min, alice.seniority_max, alice.cover_letters_enabled) == (
+        2,
+        3,
+        False,
+    )
+    assert (bob.seniority_min, bob.seniority_max, bob.cover_letters_enabled) == (0, 5, True)
+    assert profile_details(conn, account_id).motivations == "Contexte conservé"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"seniority_min": 4, "seniority_max": 2},
+        {"seniority_min": -1, "seniority_max": 2},
+        {"cover_letters_enabled": "non"},
+    ],
+)
+def test_profile_rejects_invalid_preferences(profile_db, payload) -> None:
+    conn, account_id, workspace_id = profile_db
+    with pytest.raises(ProfileError):
+        save_profile_details(conn, account_id, workspace_id, payload)
 
 
 def test_profile_page_guides_empty_user_and_escapes_identity() -> None:

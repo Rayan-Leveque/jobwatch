@@ -199,6 +199,9 @@ CREATE TABLE IF NOT EXISTS candidate_profile (
   preferred_tone TEXT,
   constraints_text TEXT,
   reusable_details TEXT,
+  seniority_min INTEGER NOT NULL DEFAULT 0,
+  seniority_max INTEGER NOT NULL DEFAULT 5,
+  cover_letters_enabled INTEGER NOT NULL DEFAULT 1,
   completed_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -221,3 +224,18 @@ CREATE TABLE IF NOT EXISTS career_intent (
   UNIQUE(account_id, label)
 );
 CREATE INDEX IF NOT EXISTS idx_career_intent_account ON career_intent(account_id, position);
+
+-- Évaluation explicable et propre à chaque compte. Une offre non classifiable
+-- reste visible ; une exclusion ne modifie ni l'offre, ni son score, ni son état.
+CREATE TABLE IF NOT EXISTS match_seniority (
+  match_id INTEGER NOT NULL REFERENCES match(id) ON DELETE CASCADE,
+  account_id INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,              -- 'compatible' | 'excluded' | 'unclassified'
+  level INTEGER,                     -- rang 0..5 ; NULL quand aucune exigence explicite
+  reason TEXT NOT NULL,
+  evidence TEXT,
+  evaluated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (match_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS idx_match_seniority_account_status
+  ON match_seniority(account_id, status, match_id);

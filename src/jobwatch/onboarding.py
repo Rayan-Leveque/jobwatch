@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from jobwatch import draft
 from jobwatch.config import DraftConfig, SearchConfig
 from jobwatch.matching import run_matching
+from jobwatch.seniority import (
+    DEFAULT_MAX_LEVEL,
+    DEFAULT_MIN_LEVEL,
+    reclassify_recent_matches,
+    validate_range,
+)
 
 log = logging.getLogger(__name__)
 
@@ -333,6 +339,10 @@ def complete_profile(
     workspace_id: int,
     cv_library_ids: list[int],
     rows: object,
+    *,
+    seniority_min: int = DEFAULT_MIN_LEVEL,
+    seniority_max: int = DEFAULT_MAX_LEVEL,
+    cover_letters_enabled: bool = True,
 ) -> list[CareerIntent]:
     if not isinstance(rows, list):
         raise OnboardingError("les pistes doivent être une liste")
@@ -342,6 +352,12 @@ def complete_profile(
         raise OnboardingError("CV invalide")
     if len(cv_library_ids) != len(set(cv_library_ids)):
         raise OnboardingError("un même CV ne peut être sélectionné qu'une fois")
+    try:
+        seniority_min, seniority_max = validate_range(seniority_min, seniority_max)
+    except ValueError as exc:
+        raise OnboardingError(str(exc)) from exc
+    if not isinstance(cover_letters_enabled, bool):
+        raise OnboardingError("le choix de génération de lettres est invalide")
     intents = validate_intents(rows)
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -370,12 +386,22 @@ def complete_profile(
         primary_cv_id = cv_library_ids[0] if cv_library_ids else None
         conn.execute(
             "INSERT INTO candidate_profile "
-            "(account_id, workspace_id, cv_library_id, completed_at) "
-            "VALUES (?, ?, ?, datetime('now')) "
+            "(account_id, workspace_id, cv_library_id, seniority_min, seniority_max, "
+            "cover_letters_enabled, completed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, datetime('now')) "
             "ON CONFLICT(account_id) DO UPDATE SET cv_library_id = excluded.cv_library_id, "
+            "seniority_min = excluded.seniority_min, seniority_max = excluded.seniority_max, "
+            "cover_letters_enabled = excluded.cover_letters_enabled, "
             "workspace_id = excluded.workspace_id, completed_at = datetime('now'), "
             "updated_at = datetime('now')",
-            (account_id, workspace_id, primary_cv_id),
+            (
+                account_id,
+                workspace_id,
+                primary_cv_id,
+                seniority_min,
+                seniority_max,
+                int(cover_letters_enabled),
+            ),
         )
         conn.execute("DELETE FROM candidate_profile_document WHERE account_id = ?", (account_id,))
         conn.executemany(
@@ -409,6 +435,7 @@ def complete_profile(
         raise
     try:
         run_matching(conn)
+        reclassify_recent_matches(conn, account_id)
     except sqlite3.Error:
         # Le profil est déjà enregistré : la mise en correspondance repassera au
         # prochain 'jw run', inutile de faire échouer un enregistrement réussi.

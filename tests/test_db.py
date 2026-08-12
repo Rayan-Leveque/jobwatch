@@ -30,6 +30,7 @@ EXPECTED_TABLES = {
     "event",
     "document",
     "bug_report",
+    "match_seniority",
 }
 
 
@@ -209,6 +210,43 @@ def test_init_db_twice_is_idempotent(conn: sqlite3.Connection) -> None:
         "SELECT count(*) FROM sqlite_master WHERE type = 'table' "
         "AND name IN ('offer_summary', 'summary_bullet')"
     ).fetchone()[0] == 2
+
+
+def test_init_db_adds_backward_compatible_candidate_preferences_idempotently() -> None:
+    conn = connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE workspace (id INTEGER PRIMARY KEY, slug TEXT UNIQUE, name TEXT NOT NULL);
+        CREATE TABLE account (id INTEGER PRIMARY KEY, email TEXT UNIQUE);
+        CREATE TABLE document_library (id INTEGER PRIMARY KEY);
+        CREATE TABLE candidate_profile (
+          account_id INTEGER PRIMARY KEY,
+          workspace_id INTEGER NOT NULL,
+          cv_library_id INTEGER,
+          completed_at TEXT,
+          created_at TEXT,
+          updated_at TEXT
+        );
+        INSERT INTO workspace VALUES (1, 'legacy', 'Legacy');
+        INSERT INTO account VALUES (1, 'legacy@example.com');
+        INSERT INTO candidate_profile
+          (account_id, workspace_id, completed_at, created_at, updated_at)
+        VALUES (1, 1, datetime('now'), datetime('now'), datetime('now'));
+        """
+    )
+
+    init_db(conn)
+    init_db(conn)
+
+    row = conn.execute(
+        "SELECT seniority_min, seniority_max, cover_letters_enabled "
+        "FROM candidate_profile WHERE account_id = 1"
+    ).fetchone()
+    assert tuple(row) == (0, 5, 1)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'match_seniority'"
+    ).fetchone()[0] == 1
+    conn.close()
 
 
 def test_init_db_migrates_v03_database_repeatably() -> None:
