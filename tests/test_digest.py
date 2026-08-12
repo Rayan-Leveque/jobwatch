@@ -73,3 +73,40 @@ def test_digest_skips_matches_of_an_archived_search() -> None:
 
     assert sorted(groups) == ["Ops"]
     conn.close()
+
+
+def test_digest_skips_explicit_seniority_exclusion() -> None:
+    conn = connect(":memory:")
+    init_db(conn)
+    conn.execute("INSERT INTO workspace (slug, name) VALUES ('alice', 'Alice')")
+    conn.execute("INSERT INTO account (email) VALUES ('alice@example.com')")
+    conn.execute("INSERT INTO source (type, name) VALUES ('test', 'test')")
+    conn.execute("INSERT INTO company (name) VALUES ('Acme')")
+    conn.execute(
+        "INSERT INTO search (name, include_json, exclude_json, locations_json) "
+        "VALUES ('IA', '[]', '[]', '[]')"
+    )
+    for index, status in enumerate(("excluded", "compatible"), start=1):
+        offer_id = int(
+            conn.execute(
+                "INSERT INTO offer (source_id, company_id, title, url) "
+                "VALUES (1, 1, ?, ?)",
+                (f"AI Engineer {index}", f"https://example.com/{index}"),
+            ).lastrowid
+        )
+        match_id = int(
+            conn.execute(
+                "INSERT INTO match (search_id, offer_id) VALUES (1, ?)", (offer_id,)
+            ).lastrowid
+        )
+        conn.execute(
+            "INSERT INTO match_seniority "
+            "(match_id, account_id, status, level, reason) VALUES (?, 1, ?, 4, 'test')",
+            (match_id, status),
+        )
+    conn.commit()
+
+    groups = _collect_unnotified(conn)
+
+    assert [str(row["title"]) for row in groups["IA"]] == ["AI Engineer 2"]
+    conn.close()

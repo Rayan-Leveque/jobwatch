@@ -988,8 +988,8 @@ _JS = """\
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
-          cv_library_id: toId(form.elements.cv_library_id.value),
-          cover_letter_library_id: toId(form.elements.cover_letter_library_id.value),
+          cv_library_id: toId(form.elements.cv_library_id?.value),
+          cover_letter_library_id: toId(form.elements.cover_letter_library_id?.value),
         }),
       }).then(resp => {
         if (!resp.ok) return;

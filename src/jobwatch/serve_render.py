@@ -447,10 +447,22 @@ def _document_field(match_id: int, doc_type: str, name: str, label: str, rows: l
 def _card_actions(
     row: sqlite3.Row,
     library: dict[str, list[sqlite3.Row]],
+    cover_letters_enabled: bool,
 ) -> str:
     match_id = int(row["id"])
     prev_state = html.escape(str(row["state"]), quote=True)
     form_id = f"apply-form-{match_id}"
+    cover_letter_field = (
+        _document_field(
+            match_id,
+            "cover_letter",
+            "cover_letter_library_id",
+            "Lettre de motivation",
+            library["cover_letter"],
+        )
+        if cover_letters_enabled
+        else ""
+    )
     return (
         '<div class="card-actions">'
         f'<button class="card-action action-later" type="button" data-match-id="{match_id}" '
@@ -462,7 +474,7 @@ def _card_actions(
         "</div>"
         f'<form class="apply-form" id="{form_id}" data-match-id="{match_id}" hidden>'
         f'{_document_field(match_id, "cv", "cv_library_id", "CV", library["cv"])}'
-        f'{_document_field(match_id, "cover_letter", "cover_letter_library_id", "Lettre de motivation", library["cover_letter"])}'
+        f"{cover_letter_field}"
         '<button class="card-action apply-submit" type="submit">Enregistrer la candidature</button>'
         "</form>"
     )
@@ -628,6 +640,7 @@ def _match_card(
     job: sqlite3.Row | None,
     track: str,
     draft_enabled: bool,
+    cover_letters_enabled: bool,
     actions: bool = False,
 ) -> str:
     cls = _row_class(row["state"])
@@ -648,7 +661,7 @@ def _match_card(
         [summary_button, content_button, letter_button],
         [summary_panel, content_panel, letter_panel],
     )
-    actions_html = _card_actions(row, library) if actions else ""
+    actions_html = _card_actions(row, library, cover_letters_enabled) if actions else ""
     return (
         f'<article class="row row-{cls}" '
         f'data-search="{html.escape(_search_haystack(row), quote=True)}"><div class="body">'
@@ -668,6 +681,7 @@ def _application_card(
     job: sqlite3.Row | None,
     track: str,
     draft_enabled: bool,
+    cover_letters_enabled: bool,
 ) -> str:
     status = str(row["status"] or "")
     cls = status if status in STATUS_LABELS else "unknown"
@@ -737,15 +751,32 @@ def _card(
     drafts: dict[int, sqlite3.Row],
     track: str,
     draft_enabled: bool,
+    cover_letters_enabled: bool,
 ) -> str:
     summary = summaries.get(int(row["offer_id"])) or Summary()
     content = contents.get(int(row["offer_id"]))
     if key == "applied":
         job = drafts.get(int(row["match_id"])) if row["match_id"] is not None else None
-        return _application_card(row, summary, content, library, job, track, draft_enabled)
+        return _application_card(
+            row,
+            summary,
+            content,
+            library,
+            job,
+            track,
+            draft_enabled,
+            cover_letters_enabled,
+        )
     job = drafts.get(int(row["id"]))
     return _match_card(
-        row, summary, content, library, job, track, draft_enabled,
+        row,
+        summary,
+        content,
+        library,
+        job,
+        track,
+        draft_enabled,
+        cover_letters_enabled,
         actions=key in ACTIONABLE_SECTIONS,
     )
 
@@ -763,10 +794,21 @@ def _section(
     drafts: dict[int, sqlite3.Row],
     track: str,
     draft_enabled: bool,
+    cover_letters_enabled: bool,
 ) -> str:
     if rows:
         cards = "\n".join(
-            _card(row, key, summaries, contents, library, drafts, track, draft_enabled)
+            _card(
+                row,
+                key,
+                summaries,
+                contents,
+                library,
+                drafts,
+                track,
+                draft_enabled,
+                cover_letters_enabled,
+            )
             for row in rows
         )
     else:
@@ -792,11 +834,12 @@ def render_page(
     csrf_token: str = "",
     account_id: int | None = None,
     identity_sub: str = "",
+    cover_letters_enabled: bool = True,
 ) -> str:
     """Rend la page HTML complète d'un onglet depuis l'état actuel de la base."""
-    priority = _priority_matches(conn, track)
-    new = _matches(conn, "new", track)
-    seen = _matches(conn, "seen", track)
+    priority = _priority_matches(conn, track, account_id)
+    new = _matches(conn, "new", track, account_id)
+    seen = _matches(conn, "seen", track, account_id)
     later = _later_matches(conn, track)
     discarded = _discarded_matches(conn, track)
     applied = _applications(conn, track)
@@ -811,7 +854,7 @@ def render_page(
         | {int(row["match_id"]) for row in applied if row["match_id"] is not None}
     )
     drafts = _draft_rows(conn, match_ids) if draft_enabled else {}
-    extra = (drafts, track, draft_enabled)
+    extra = (drafts, track, draft_enabled, cover_letters_enabled)
     body = "\n".join(
         (
             _section(
@@ -994,9 +1037,11 @@ def render_swipe_page(
     track: str = "engineer",
     draft_enabled: bool = False,
     csrf_token: str = "",
+    account_id: int | None = None,
+    cover_letters_enabled: bool = True,
 ) -> str:
     """Rend la page de tri type swipe : une carte 'new' à la fois, bilan à la fin."""
-    deck = _swipe_deck(conn, track)
+    deck = _swipe_deck(conn, track, account_id)
     offer_ids = sorted({int(row["offer_id"]) for row in deck})
     summaries = _summary_bullets(conn, offer_ids)
     contents = _offer_contents(conn, offer_ids)
@@ -1029,6 +1074,10 @@ def render_swipe_page(
         batch = (
             '<p class="empty-note">Uploadez d\'abord un CV dans la bibliothèque '
             "(formulaire Candidater du tableau de bord) pour générer les lettres.</p>"
+        )
+    elif not cover_letters_enabled:
+        batch = (
+            '<p class="empty-note">Génération de lettres désactivée dans vos préférences.</p>'
         )
     else:
         batch = (

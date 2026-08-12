@@ -77,8 +77,10 @@ compte système qui exécute Jobwatch (`0600` pour les fichiers, `0700` pour les
 
 À la première connexion d'une instance nommée, jobwatch ouvre un parcours de démarrage : importez
 un ou plusieurs CV PDF pour obtenir des catégories proposées ensemble, ou créez-les manuellement.
-Dans le parcours CV, une étape optionnelle propose ensuite de partager une lettre de motivation
-(de préférence au format `.tex`) comme exemple de style personnel (`document_library`, type
+Le parcours demande aussi la plage de séniorité acceptée, de `Stage` à `Lead / management`, et si
+la génération de lettres de motivation doit être affichée. Dans le parcours CV, l'étape facultative
+de partage d'une lettre n'apparaît que si cette génération est activée. Elle permet de fournir
+une lettre (de préférence au format `.tex`) comme exemple de style personnel (`document_library`, type
 `letter_example`) ; sans envoi, la génération de lettres retombe sur un modèle générique fourni
 avec jobwatch. Avant confirmation, chaque catégorie peut être renommée, ajoutée ou supprimée et
 ses mots-clés modifiés. La confirmation enregistre les catégories comme recherches SQLite actives
@@ -87,13 +89,17 @@ tableau de bord. Le bloc `draft` doit être configuré pour l'analyse des CV par
 manuel reste toujours disponible. Chaque fichier CV est vérifié côté serveur comme un PDF et
 limité à 10 Mio ; l'exemple de lettre est limité à 10 Mio et doit porter l'extension `.tex`.
 
-Après la première confirmation, une étape facultative « Profil de candidature » guide l'utilisateur
+Après la première confirmation, la page « Profil de candidature » permet de modifier la plage de
+séniorité et le choix de génération, puis guide facultativement l'utilisateur
 pour renseigner ses motivations, ses cibles, ses réalisations, son ton, ses contraintes et des
 informations personnelles réutilisables. Le lien « Personnaliser mes lettres » permet de les modifier
 ensuite. Ces éléments restent dans l'instance et ne sont transmis au modèle que lors d'une demande
 de lettre. Une fiche vide est valide : la rédaction retombe sobrement sur le CV et l'offre. Le prompt
 interdit d'inventer un fait absent de ces sources. Chaque brouillon reste prévisualisable et son corps
 peut être corrigé avec « Modifier le texte » avant de le choisir dans le formulaire Candidater.
+La désactivation masque l'onglet Lettre, les actions groupées et les champs lettre du formulaire
+Candidater, sans supprimer les `draft_job`, documents ou informations de personnalisation. Une
+réactivation restaure ces éléments.
 
 ### Déployer une instance par ami
 
@@ -283,9 +289,19 @@ n'apparaît que dans l'onglet `Chef de projet / PO` ; l'onglet `Ingénieur IA` m
 reste. Une instance nommée dont le profil est confirmé affiche à la place un flux unifié de toutes
 ses catégories ; chaque carte indique la recherche correspondante et le tableau de bord propose
 « Modifier mes catégories ». Chaque vue porte ses propres sections et compteurs.
+Pour un compte ayant choisi une plage de séniorité, Jobwatch classe seulement les exigences
+explicites : contrat ou intitulé `stage`/`alternance`, niveau écrit dans l'intitulé, ou nombre
+d'années présent dans le champ Expérience ou le texte de l'annonce. Les seuils sont 0 à 2 ans
+pour junior, 3 à 4 ans pour intermédiaire/confirmé, 5 à 7 ans pour senior et 8 ans ou plus pour
+lead/management. Une offre explicitement hors plage est conservée en base avec une raison séparée,
+mais masquée des sections `new`/`seen`, du swipe et du digest. Une offre ambiguë reste visible :
+Jobwatch ne lui invente jamais un niveau. Les décisions `later`, `discarded` et les candidatures
+restent intactes lors d'un changement de plage ; seuls les matchs `new`/`seen` des 60 derniers jours
+sont réévalués.
 La section `Priorité haute` regroupe les matchs high avant `Nouveaux matchs` et `Vus`. Sous les
 actions, une carte réunit ses contenus dans un lecteur à trois onglets : « En bref », « Annonce »
-et, lorsque `draft` est configuré, « Lettre ». Une seule vue peut être ouverte à la fois. La
+et, lorsque `draft` est configuré et que l'utilisateur a activé la fonction, « Lettre ». Une seule
+vue peut être ouverte à la fois. La
 génération, le suivi et la régénération d'une lettre vivent dans l'onglet « Lettre », tandis que
 « Plus tard », « Candidater » et « Écarter » restent des décisions séparées.
 
@@ -362,7 +378,8 @@ directement à ce bilan, ce qui permet de lancer la génération groupée à tou
 
 ## Génération de lettre de motivation
 
-Quand le bloc `draft` de `config.yaml` est renseigné, chaque carte (hors `Corbeille`) affiche un
+Quand le bloc `draft` de `config.yaml` est renseigné et que la préférence du compte est activée,
+chaque carte (hors `Corbeille`) affiche un
 onglet « Lettre ». Il contient le bouton « Générer la lettre » et un mini-formulaire : un menu CV (bibliothèque de documents,
 dernier choix mémorisé par onglet côté client) et un champ consigne optionnel. La soumission
 lance un job en arrière-plan (table `draft_job`) :
@@ -466,6 +483,7 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `summary_bullet` | Bullets d'un résumé avec leur position explicite |
 | `search` | Recherches enregistrées (mots-clés, localisations, contrat) ; `archived_at` marque une catégorie retirée, masquée du tableau de bord et du digest |
 | `match` | Paire offre/recherche avec état et statut de notification |
+| `match_seniority` | Évaluation explicable par compte (`compatible`, `excluded` ou `unclassified`) sans modification de l'offre, du fit ou de la décision |
 | `application` | Votre candidature pour une offre |
 | `event` | Historique d'une candidature (applied, interview, rejected, offer, ...) |
 | `document` | Fichiers CV et lettre de motivation attachés à une candidature |
@@ -474,7 +492,11 @@ créée depuis un match, et son statut actuel est le dernier événement de son 
 | `workspace`, `account`, `membership` | Instance, compte propriétaire unique et droits, préparant le passage au multi-utilisateur |
 | `account_invite`, `web_session` | Invitations à durée limitée et sessions web opaques |
 | `instance_setting`, `login_throttle` | Réglages de l'instance (dont `auth_required`) et compteur d'échecs de connexion par email/adresse |
-| `candidate_profile`, `candidate_profile_document`, `career_intent` | Profil d'onboarding, contexte facultatif des lettres, CV analysés et catégories métier confirmées d'un compte |
+| `candidate_profile`, `candidate_profile_document`, `career_intent` | Préférences de séniorité et de génération, contexte facultatif des lettres, CV analysés et catégories métier confirmées d'un compte |
+
+La migration est additive et idempotente au prochain `jw` : les profils existants reçoivent la
+plage complète `Stage` à `Lead / management` et conservent la génération de lettres activée. Ce
+repli reproduit le comportement antérieur jusqu'à ce que leur propriétaire modifie ses préférences.
 
 ## Feuille de route
 

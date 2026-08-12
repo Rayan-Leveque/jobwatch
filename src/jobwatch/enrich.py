@@ -44,6 +44,7 @@ from jobwatch import llm_runner
 from jobwatch.config import EnrichConfig
 from jobwatch.extraction import Extraction, extract
 from jobwatch.llm_runner import LLMRunnerError, run_codex, run_opencode, run_pi
+from jobwatch.seniority import reclassify_all_profiles
 
 OPENCODE_TOOLS = llm_runner.OPENCODE_TOOLS
 opencode_sandbox = llm_runner.opencode_sandbox
@@ -843,4 +844,5 @@ def enrich(
         if owned_client:
             http_client.close()
 
+    reclassify_all_profiles(conn)
     return result

@@ -26,6 +26,8 @@ def _collect_unnotified(conn: sqlite3.Connection) -> dict[str, list[sqlite3.Row]
         "JOIN offer o ON o.id = m.offer_id "
         "JOIN company c ON c.id = o.company_id "
         "WHERE m.notified_at IS NULL AND m.state = 'new' "
+        "AND NOT EXISTS (SELECT 1 FROM match_seniority ms "
+        "                WHERE ms.match_id = m.id AND ms.status = 'excluded') "
         "ORDER BY s.name, m.id"
     ).fetchall()
     groups: dict[str, list[sqlite3.Row]] = {}

@@ -139,6 +139,93 @@ def onboarding_instance(tmp_path: Path):
     thread.join(timeout=5)
 
 
+@pytest.fixture()
+def preferences_instance(tmp_path: Path):
+    """Instance isolée avec offres explicites, offre ambiguë et brouillon existant."""
+    db_path = tmp_path / "jw.db"
+    conn = connect(db_path)
+    init_db(conn)
+    senior_match, senior_offer = _seed_offer(
+        conn,
+        company="Smile",
+        title="Product Owner IA H/F - Asnières-sur-Seine",
+        search="production-like",
+        collected_at="2026-08-12 10:00:00",
+    )
+    compatible_match, compatible_offer = _seed_offer(
+        conn,
+        company="Novaspace",
+        title="AI Solutions engineer",
+        search="production-like",
+        collected_at="2026-08-12 10:01:00",
+    )
+    _unknown_match, unknown_offer = _seed_offer(
+        conn,
+        company="Thales",
+        title="AI Research Engineer",
+        search="production-like",
+        collected_at="2026-08-12 10:02:00",
+    )
+    _later_match, _later_offer = _seed_offer(
+        conn,
+        company="LaterCo",
+        title="AI Delivery Engineer",
+        search="production-like",
+        state="later",
+        collected_at="2026-08-12 10:03:00",
+    )
+    for offer_id, value, quote in (
+        (
+            senior_offer,
+            "6 ans ou plus",
+            "Vous avez 6 ans ou plus d’expérience en gestion de produit.",
+        ),
+        (
+            compatible_offer,
+            "2+ ans",
+            "2+ years' experience in AI/LLM implementation.",
+        ),
+        (unknown_offer, "non précisé", None),
+    ):
+        summary_id = _add_summary(conn, offer_id, "Résumé de test")
+        conn.execute(
+            "INSERT INTO summary_field (summary_id, key, value, quote) "
+            "VALUES (?, 'experience', ?, ?)",
+            (summary_id, value, quote),
+        )
+        _add_content(conn, offer_id, quote or "Aucune exigence de séniorité indiquée.")
+    conn.execute(
+        "INSERT INTO draft_job (match_id, track, status, error) "
+        "VALUES (?, 'engineer', 'failed', 'échec conservé')",
+        (compatible_match,),
+    )
+    conn.commit()
+    invite = create_invite(conn, "alice", "alice@example.com")
+    conn.close()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        make_handler(
+            db_path,
+            DraftConfig(model="test-model"),
+            workspace_slug="alice",
+            secure_cookie=False,
+            onboarding_enabled=True,
+        ),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield (
+        f"http://127.0.0.1:{server.server_address[1]}",
+        invite,
+        db_path,
+        senior_match,
+        compatible_match,
+    )
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
 def _open_page(browser, url: str, dismiss_popup: bool = True):
     page = browser.new_page()
     page.goto(url)
@@ -514,12 +601,119 @@ def test_manual_onboarding_reaches_unified_dashboard(browser, onboarding_instanc
     page.locator("#confirm").click()
 
     page.wait_for_url(f"{url}/profile?welcome=1")
-    assert page.get_by_role("heading", name="Des lettres qui parlent vraiment de vous.").is_visible()
+    assert page.get_by_role("heading", name="Des offres adaptées à votre recherche.").is_visible()
     assert page.get_by_label("Vos motivations").is_visible()
     page.get_by_role("link", name="Passer pour l’instant").click()
     page.wait_for_url(f"{url}/")
     assert page.get_by_role("link", name=re.compile("Modifier mes catégories")).is_visible()
     assert page.locator(".track-tabs").count() == 0
+    page.close()
+
+
+def test_onboarding_seniority_range_error_leaves_confirm_button_usable(
+    browser, onboarding_instance
+) -> None:
+    url, invite = onboarding_instance
+    page = browser.new_page()
+    _sign_in_to_onboarding(page, url, invite)
+    page.get_by_role("button", name=re.compile(r"^Créer mes catégories")).click()
+    page.get_by_label("Du niveau").select_option("4")
+    page.get_by_label("Au niveau").select_option("2")
+    page.locator(".intent-label").fill("Ingénierie IA")
+    page.locator(".keywords").fill("AI Engineer, LLM Engineer")
+
+    page.locator("#confirm").click()
+
+    assert (
+        page.locator("#intent-status").inner_text()
+        == "Le niveau minimum doit précéder le niveau maximum."
+    )
+    assert page.locator("#confirm").is_enabled()
+
+    page.get_by_label("Du niveau").select_option("2")
+    page.locator("#confirm").click()
+
+    page.wait_for_url(f"{url}/profile?welcome=1")
+    page.close()
+
+
+def test_preferences_filter_feed_and_toggle_letter_workflow_without_data_loss(
+    browser, preferences_instance
+) -> None:
+    url, invite, db_path, senior_match, compatible_match = preferences_instance
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    _sign_in_to_onboarding(page, url, invite)
+    page.get_by_label("Non, masquer ce parcours").check()
+    page.locator("#choose-manual").click()
+    page.locator("#intent-step").wait_for(state="visible")
+    page.get_by_label("Du niveau").select_option("2")
+    page.get_by_label("Au niveau").select_option("2")
+    page.locator(".intent-label").fill("Ingénierie IA")
+    page.locator(".keywords").fill("AI, IA")
+    page.locator("#confirm").click()
+
+    page.wait_for_url(f"{url}/profile?welcome=1")
+    assert page.get_by_label("Du niveau").input_value() == "2"
+    assert page.get_by_label("Au niveau").input_value() == "2"
+    assert page.get_by_label("Non, masquer ce parcours pour le moment").is_checked()
+    page.get_by_role("link", name="Passer pour l’instant").click()
+    page.wait_for_url(f"{url}/")
+    popup = page.locator("#swipe-popup")
+    if popup.is_visible():
+        page.locator(".swipe-popup-later").click()
+        popup.wait_for(state="hidden")
+
+    assert _card(page, "Smile").count() == 0
+    assert _card(page, "Novaspace").count() >= 1
+    assert _card(page, "Thales").count() >= 1
+    assert page.locator(".letter-toggle").count() == 0
+    assert page.locator('.doc-field[data-doc-type="cover_letter"]').count() == 0
+    disabled_status = page.evaluate(
+        """async matchId => {
+          const csrf = document.querySelector('meta[name="csrf-token"]').content;
+          const response = await fetch(`/match/${matchId}/draft`, {
+            method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},
+            body:JSON.stringify({cv_library_id:1,track:'engineer'})
+          });
+          return response.status;
+        }""",
+        compatible_match,
+    )
+    assert disabled_status == 403
+
+    page.locator('[data-section="later"] > summary').click()
+    later = page.locator('[data-section="later"] .row:has(.company:text-is("LaterCo"))')
+    later.locator(".action-apply").click()
+    form = later.locator(".apply-form")
+    form.wait_for(state="visible")
+    assert form.locator('.doc-field[data-doc-type="cv"]').count() == 1
+    assert form.locator('.doc-field[data-doc-type="cover_letter"]').count() == 0
+    form.locator(".apply-submit").click()
+    page.locator(".undo-toast").wait_for(state="visible", timeout=5000)
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT COUNT(*) AS n FROM application").fetchone()["n"] == 1
+    assert conn.execute("SELECT COUNT(*) AS n FROM draft_job").fetchone()["n"] == 1
+    assert conn.execute(
+        "SELECT state FROM match WHERE id = ?", (senior_match,)
+    ).fetchone()["state"] == "new"
+    conn.close()
+
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(f"{url}/profile")
+    _assert_no_horizontal_overflow(page)
+    page.get_by_label("Au niveau").select_option("4")
+    page.get_by_label("Oui, afficher la génération de lettres").check()
+    page.get_by_role("button", name="Enregistrer mon profil").click()
+    page.wait_for_url(f"{url}/")
+    assert _card(page, "Smile").count() >= 1
+    assert _card(page, "Novaspace").locator(".letter-toggle").count() >= 1
+    assert page.locator('.doc-field[data-doc-type="cover_letter"]').count() >= 1
+    _assert_no_horizontal_overflow(page)
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT COUNT(*) AS n FROM draft_job").fetchone()["n"] == 1
+    conn.close()
     page.close()
 
 

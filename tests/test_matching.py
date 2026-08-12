@@ -10,6 +10,10 @@ import pytest
 from jobwatch.config import SearchConfig
 from jobwatch.db import connect, init_db
 from jobwatch.matching import offer_matches_search, run_matching, sync_searches
+from jobwatch.onboarding import complete_profile
+from jobwatch.profile import save_profile_details
+from jobwatch.seniority import reclassify_all_profiles
+from jobwatch.serve_render import render_page
 
 MATCH_QUERY = "SELECT * FROM match WHERE search_id = ? AND offer_id = ?"
 
@@ -67,6 +71,158 @@ def _insert_offer(
         (source_id, company_id, title, url, location, contract, collected_at),
     )
     return int(cur.lastrowid)
+
+
+def _add_experience(conn: sqlite3.Connection, offer_id: int, value: str, content: str) -> None:
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, markdown, status, fetch_attempts) "
+        "VALUES (?, ?, 'ok', 1)",
+        (offer_id, content),
+    )
+    summary_id = int(
+        conn.execute(
+            "INSERT INTO offer_summary (offer_id, source) VALUES (?, 'auto')", (offer_id,)
+        ).lastrowid
+    )
+    conn.execute(
+        "INSERT INTO summary_field (summary_id, key, value, quote) "
+        "VALUES (?, 'experience', ?, ?)",
+        (summary_id, value, content),
+    )
+
+
+def _insert_owner(conn: sqlite3.Connection) -> tuple[int, int]:
+    workspace_id = int(
+        conn.execute("INSERT INTO workspace (slug, name) VALUES ('alice', 'Alice')").lastrowid
+    )
+    account_id = int(
+        conn.execute("INSERT INTO account (email) VALUES ('alice@example.com')").lastrowid
+    )
+    conn.execute(
+        "INSERT INTO membership (account_id, workspace_id, role) VALUES (?, ?, 'owner')",
+        (account_id, workspace_id),
+    )
+    return account_id, workspace_id
+
+
+def test_junior_profile_filters_explicit_senior_offer_but_keeps_compatible_and_unknown(
+    conn: sqlite3.Connection,
+) -> None:
+    account_id, workspace_id = _insert_owner(conn)
+    senior_id = _insert_offer(
+        conn, "Product Owner IA H/F - Asnières-sur-Seine", "https://a/senior"
+    )
+    compatible_id = _insert_offer(conn, "AI Solutions engineer", "https://a/junior")
+    unknown_id = _insert_offer(conn, "AI Product Owner", "https://a/unknown")
+    _add_experience(
+        conn,
+        senior_id,
+        "6 ans ou plus",
+        "Vous avez 6 ans ou plus d’expérience en gestion de produit.",
+    )
+    _add_experience(
+        conn,
+        compatible_id,
+        "2+ ans",
+        "2+ years' experience in AI/LLM implementation.",
+    )
+    _add_experience(conn, unknown_id, "non précisé", "Vous rejoignez une équipe produit.")
+    conn.commit()
+
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [],
+        [{"label": "Ingénierie IA", "keywords": ["AI", "IA"], "exclude": []}],
+        seniority_min=2,
+        seniority_max=2,
+        cover_letters_enabled=False,
+    )
+
+    page = render_page(conn, track="all", account_id=account_id)
+    assert "Product Owner IA H/F - Asnières-sur-Seine" not in page
+    assert "AI Solutions engineer" in page
+    assert "AI Product Owner" in page
+    assessments = {
+        int(row["offer_id"]): (str(row["status"]), str(row["reason"]))
+        for row in conn.execute(
+            "SELECT m.offer_id, ms.status, ms.reason FROM match_seniority ms "
+            "JOIN match m ON m.id = ms.match_id WHERE ms.account_id = ?",
+            (account_id,),
+        )
+    }
+    assert assessments[senior_id][0] == "excluded"
+    assert assessments[compatible_id][0] == "compatible"
+    assert assessments[unknown_id][0] == "unclassified"
+    assert "aucune exigence explicite" in assessments[unknown_id][1].lower()
+
+
+def test_seniority_change_reclassifies_recent_feed_without_destroying_decisions(
+    conn: sqlite3.Connection,
+) -> None:
+    account_id, workspace_id = _insert_owner(conn)
+    new_offer_id = _insert_offer(conn, "AI Engineer", "https://a/new")
+    later_offer_id = _insert_offer(conn, "AI Platform Engineer", "https://a/later")
+    _add_experience(conn, new_offer_id, "5 ans minimum", "Au moins 5 ans d’expérience.")
+    _add_experience(conn, later_offer_id, "6 ans", "6 ans d’expérience sont requis.")
+    conn.commit()
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [],
+        [{"label": "IA", "keywords": ["AI"], "exclude": []}],
+    )
+    later_match_id = int(
+        conn.execute("SELECT id FROM match WHERE offer_id = ?", (later_offer_id,)).fetchone()["id"]
+    )
+    conn.execute("UPDATE match SET state = 'later' WHERE id = ?", (later_match_id,))
+    conn.commit()
+
+    save_profile_details(
+        conn,
+        account_id,
+        workspace_id,
+        {"seniority_min": 2, "seniority_max": 2, "cover_letters_enabled": False},
+    )
+
+    page = render_page(conn, track="all", account_id=account_id)
+    assert "AI Engineer" not in page
+    assert "AI Platform Engineer" in page
+    assert conn.execute("SELECT COUNT(*) AS n FROM match").fetchone()["n"] == 2
+    assert conn.execute(
+        "SELECT state FROM match WHERE id = ?", (later_match_id,)
+    ).fetchone()["state"] == "later"
+
+
+def test_later_experience_enrichment_reclassifies_previous_unknown_match(
+    conn: sqlite3.Connection,
+) -> None:
+    account_id, workspace_id = _insert_owner(conn)
+    offer_id = _insert_offer(conn, "AI Engineer", "https://a/enriched-later")
+    conn.commit()
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [],
+        [{"label": "IA", "keywords": ["AI"], "exclude": []}],
+        seniority_min=2,
+        seniority_max=2,
+    )
+    assert "AI Engineer" in render_page(conn, track="all", account_id=account_id)
+
+    _add_experience(
+        conn,
+        offer_id,
+        "5 ans minimum",
+        "Vous justifiez d’au moins 5 ans d’expérience en intelligence artificielle.",
+    )
+    conn.commit()
+    assert reclassify_all_profiles(conn) >= 1
+
+    assert "AI Engineer" not in render_page(conn, track="all", account_id=account_id)
 
 
 def test_sync_searches_inserts_new(conn: sqlite3.Connection) -> None:

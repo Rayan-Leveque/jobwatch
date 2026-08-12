@@ -41,7 +41,23 @@ def _track_params(track: str) -> tuple[str, ...]:
     return PROJECT_TITLE_PATTERNS if track in ("engineer", "project") else ()
 
 
-def _matches(conn: sqlite3.Connection, state: str, track: str) -> list[sqlite3.Row]:
+def _seniority_filter(account_id: int | None) -> tuple[str, tuple[int, ...]]:
+    if account_id is None:
+        return "", ()
+    return (
+        (
+            "AND NOT EXISTS (SELECT 1 FROM match_seniority ms "
+            "                WHERE ms.match_id = m.id AND ms.account_id = ? "
+            "                AND ms.status = 'excluded') "
+        ),
+        (account_id,),
+    )
+
+
+def _matches(
+    conn: sqlite3.Connection, state: str, track: str, account_id: int | None = None
+) -> list[sqlite3.Row]:
+    seniority_sql, seniority_params = _seniority_filter(account_id)
     return conn.execute(
         "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
         "       s.name AS search_name, "
@@ -54,15 +70,19 @@ def _matches(conn: sqlite3.Connection, state: str, track: str) -> list[sqlite3.R
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = ? AND (m.fit IS NULL OR m.fit != 'high') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+        f"{seniority_sql}"
         f"{_track_filter(track)}"
         "ORDER BY CASE m.fit WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
         "         WHEN 'low' THEN 2 ELSE 3 END, "
         "         o.collected_at DESC, m.id DESC",
-        (state, *_track_params(track)),
+        (state, *seniority_params, *_track_params(track)),
     ).fetchall()
 
 
-def _priority_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
+def _priority_matches(
+    conn: sqlite3.Connection, track: str, account_id: int | None = None
+) -> list[sqlite3.Row]:
+    seniority_sql, seniority_params = _seniority_filter(account_id)
     return conn.execute(
         "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
         "       s.name AS search_name, "
@@ -75,9 +95,10 @@ def _priority_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.fit = 'high' AND m.state IN ('new', 'seen') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+        f"{seniority_sql}"
         f"{_track_filter(track)}"
         "ORDER BY o.collected_at DESC, m.id DESC",
-        _track_params(track),
+        (*seniority_params, *_track_params(track)),
     ).fetchall()
 
 
@@ -271,8 +292,11 @@ def _draft_rows(conn: sqlite3.Connection, match_ids: list[int]) -> dict[int, sql
     return drafts
 
 
-def _swipe_deck(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
+def _swipe_deck(
+    conn: sqlite3.Connection, track: str, account_id: int | None = None
+) -> list[sqlite3.Row]:
     """Offres 'new' de la piste à trier : fit high d'abord, puis par date de collecte."""
+    seniority_sql, seniority_params = _seniority_filter(account_id)
     return conn.execute(
         "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
         "       s.name AS search_name, c.name AS company, o.title AS title, "
@@ -284,10 +308,11 @@ def _swipe_deck(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
         "LEFT JOIN company c ON c.id = o.company_id "
         "WHERE m.state = 'new' AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+        f"{seniority_sql}"
         f"{_track_filter(track)}"
         "ORDER BY CASE WHEN m.fit = 'high' THEN 0 ELSE 1 END, "
         "         o.collected_at DESC, m.id DESC",
-        _track_params(track),
+        (*seniority_params, *_track_params(track)),
     ).fetchall()
 
 

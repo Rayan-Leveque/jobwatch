@@ -76,7 +76,13 @@ from jobwatch.onboarding import (
     profile_intents,
 )
 from jobwatch.onboarding_ui import render_onboarding
-from jobwatch.profile import ProfileError, profile_details, save_profile_details
+from jobwatch.profile import (
+    ProfileError,
+    profile_details,
+    profile_excluded_count,
+    profile_preferences,
+    save_profile_details,
+)
 from jobwatch.profile_ui import render_profile
 from jobwatch.serve_queries import (
     TRACKS,
@@ -218,6 +224,15 @@ def make_handler(
                         session = None
                 return required, session, token
 
+        def _cover_letter_preference_enabled(self, session: Session | None) -> bool:
+            if session is None:
+                return True
+            with self._db() as conn:
+                return profile_preferences(conn, session.account_id).cover_letters_enabled
+
+        def _draft_enabled(self, session: Session | None) -> bool:
+            return draft_config is not None and self._cover_letter_preference_enabled(session)
+
         def _require_session(self, path: str) -> Session | None:
             required, session, _token = self._authentication()
             if not required:
@@ -295,6 +310,7 @@ def make_handler(
                 with self._db() as conn:
                     intents = profile_intents(conn, session.account_id) if editing else None
                     cv_library_ids = profile_cv_library_ids(conn, session.account_id)
+                    preferences = profile_preferences(conn, session.account_id)
                 initial_intents = (
                     [
                         {
@@ -314,6 +330,7 @@ def make_handler(
                         session.csrf_token,
                         initial_intents=initial_intents,
                         cv_library_ids=cv_library_ids,
+                        preferences=preferences,
                     ).encode("utf-8"),
                     "text/html; charset=utf-8",
                 )
@@ -324,14 +341,18 @@ def make_handler(
                     return
                 with self._db() as conn:
                     details = profile_details(conn, session.account_id)
+                    preferences = profile_preferences(conn, session.account_id)
+                    excluded_count = profile_excluded_count(conn, session.account_id)
                 self._send_bytes(
                     200,
                     render_profile(
                         details,
                         session.csrf_token,
+                        preferences=preferences,
                         email=session.email,
                         workspace_slug=workspace_slug,
                         welcome=parse_qs(parsed.query).get("welcome") == ["1"],
+                        excluded_count=excluded_count,
                     ).encode("utf-8"),
                     "text/html; charset=utf-8",
                 )
@@ -381,9 +402,16 @@ def make_handler(
         @_db_error_response()
         def _render_track_page(self, track: str, swipe: bool, session: Session | None) -> None:
             with self._db() as conn:
+                cover_letters_enabled = (
+                    profile_preferences(conn, session.account_id).cover_letters_enabled
+                    if session is not None
+                    else True
+                )
                 common = {
-                    "draft_enabled": draft_config is not None,
+                    "draft_enabled": draft_config is not None and cover_letters_enabled,
+                    "cover_letters_enabled": cover_letters_enabled,
                     "csrf_token": session.csrf_token if session is not None else "",
+                    "account_id": session.account_id if session is not None else None,
                 }
                 if swipe:
                     page = render_swipe_page(conn, track, **common)
@@ -391,7 +419,6 @@ def make_handler(
                     page = render_page(
                         conn,
                         track,
-                        account_id=session.account_id if session is not None else None,
                         identity_sub=(
                             f"{session.email} · espace {workspace_slug}"
                             if session is not None and workspace_slug is not None
@@ -416,11 +443,17 @@ def make_handler(
             self._send_json(200, counts)
 
         @_db_error_response()
-        def _handle_batch_post(self) -> None:
-            if draft_config is None:
+        def _handle_batch_post(self, session: Session | None) -> None:
+            if not self._draft_enabled(session):
                 self._send_json(
-                    503,
-                    {"error": "génération non configurée : renseignez le bloc 'draft' de config.yaml"},
+                    403 if draft_config is not None else 503,
+                    {
+                        "error": (
+                            "génération désactivée dans vos préférences"
+                            if draft_config is not None
+                            else "génération non configurée : renseignez le bloc 'draft' de config.yaml"
+                        )
+                    },
                 )
                 return
             body = self._read_json_body()
@@ -532,11 +565,17 @@ def make_handler(
             self._send_bytes(200, data, content_type)
 
         @_db_error_response()
-        def _handle_draft_post(self, match_id: int) -> None:
-            if draft_config is None:
+        def _handle_draft_post(self, match_id: int, session: Session | None) -> None:
+            if not self._draft_enabled(session):
                 self._send_json(
-                    503,
-                    {"error": "génération non configurée : renseignez le bloc 'draft' de config.yaml"},
+                    403 if draft_config is not None else 503,
+                    {
+                        "error": (
+                            "génération désactivée dans vos préférences"
+                            if draft_config is not None
+                            else "génération non configurée : renseignez le bloc 'draft' de config.yaml"
+                        )
+                    },
                 )
                 return
             body = self._read_json_body()
@@ -590,11 +629,17 @@ def make_handler(
             self._send_json(200, {"body": body_text})
 
         @_db_error_response()
-        def _handle_letter_body_post(self, match_id: int) -> None:
-            if draft_config is None:
+        def _handle_letter_body_post(self, match_id: int, session: Session | None) -> None:
+            if not self._draft_enabled(session):
                 self._send_json(
-                    503,
-                    {"error": "génération non configurée : renseignez le bloc 'draft' de config.yaml"},
+                    403 if draft_config is not None else 503,
+                    {
+                        "error": (
+                            "génération désactivée dans vos préférences"
+                            if draft_config is not None
+                            else "génération non configurée : renseignez le bloc 'draft' de config.yaml"
+                        )
+                    },
                 )
                 return
             body = self._read_json_body()
@@ -661,18 +706,18 @@ def make_handler(
                 self._handle_bug_report(session)
                 return
             if path == _UPLOAD_PATH:
-                self._handle_upload()
+                self._handle_upload(session)
                 return
             if path == "/draft/batch":
-                self._handle_batch_post()
+                self._handle_batch_post(session)
                 return
             draft_post = _DRAFT_POST_RE.match(path)
             if draft_post:
-                self._handle_draft_post(int(draft_post.group(1)))
+                self._handle_draft_post(int(draft_post.group(1)), session)
                 return
             letter_body_post = _LETTER_BODY_RE.match(path)
             if letter_body_post:
-                self._handle_letter_body_post(int(letter_body_post.group(1)))
+                self._handle_letter_body_post(int(letter_body_post.group(1)), session)
                 return
             match = _MATCH_ACTION_RE.match(path)
             if not match:
@@ -680,14 +725,23 @@ def make_handler(
                 return
             match_id = int(match.group(1))
             action = match.group(2)
-            self._handle_match_action(match_id, action)
+            self._handle_match_action(match_id, action, session)
 
         @_db_error_response()
-        def _handle_match_action(self, match_id: int, action: str) -> None:
+        def _handle_match_action(
+            self, match_id: int, action: str, session: Session | None
+        ) -> None:
             body = self._read_json_body() if action in ("restore", "apply") else None
             request = parse_match_action(action, body)
             if isinstance(request, MatchActionResult):
                 self._send_json(400, {"error": request.error})
+                return
+            if (
+                action == "apply"
+                and request.cover_letter_library_id is not None
+                and not self._cover_letter_preference_enabled(session)
+            ):
+                self._send_json(400, {"error": "les lettres sont désactivées dans vos préférences"})
                 return
             with self._db() as conn:
                 result = apply_match_action(conn, match_id, request)
@@ -736,7 +790,7 @@ def make_handler(
             self._send_json(201, {"ok": True, "id": report_id})
 
         @_db_error_response()
-        def _handle_upload(self) -> None:
+        def _handle_upload(self, session: Session | None) -> None:
             body = self._read_json_body()
             fields = body if isinstance(body, dict) else {}
             filename = fields.get("filename")
@@ -750,6 +804,12 @@ def make_handler(
                 return
             if label is not None and not isinstance(label, str):
                 self._send_json(400, {"error": "champ label invalide"})
+                return
+            if (
+                doc_type in ("cover_letter", "letter_example")
+                and not self._cover_letter_preference_enabled(session)
+            ):
+                self._send_json(400, {"error": "les lettres sont désactivées dans vos préférences"})
                 return
             with self._db() as conn:
                 try:
@@ -807,12 +867,23 @@ def make_handler(
             with self._db() as conn:
                 try:
                     already_complete = profile_complete(conn, session.account_id)
+                    current_preferences = profile_preferences(conn, session.account_id)
                     intents = complete_profile(
                         conn,
                         session.account_id,
                         session.workspace_id,
                         cv_library_ids,
                         fields.get("intents"),
+                        seniority_min=fields.get(
+                            "seniority_min", current_preferences.seniority_min
+                        ),
+                        seniority_max=fields.get(
+                            "seniority_max", current_preferences.seniority_max
+                        ),
+                        cover_letters_enabled=fields.get(
+                            "cover_letters_enabled",
+                            current_preferences.cover_letters_enabled,
+                        ),
                     )
                 except OnboardingError as exc:
                     self._send_json(400, {"error": str(exc)})
