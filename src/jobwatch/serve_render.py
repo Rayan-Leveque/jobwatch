@@ -14,6 +14,7 @@ import unicodedata
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
+from jobwatch.enrich import MAX_FETCH_ATTEMPTS
 from jobwatch.library import list_library
 from jobwatch.serve_queries import (
     FIELD_LABELS,
@@ -24,6 +25,7 @@ from jobwatch.serve_queries import (
     _draft_rows,
     _later_matches,
     _matches,
+    _offer_content_failures,
     _offer_contents,
     _priority_matches,
     _summary_bullets,
@@ -157,6 +159,15 @@ def _summary_fields_html(fields: list[tuple[str, str]]) -> str:
     return f'<div class="summary-fields">{"".join(rows)}</div>'
 
 
+def _summary_provenance_html(summary: Summary) -> str:
+    if summary.source == "metadata":
+        label = "Résumé limité - basé uniquement sur les métadonnées enregistrées"
+        return f'<p class="summary-provenance limited">{label}</p>'
+    if summary.source == "auto":
+        return '<p class="summary-provenance grounded">Résumé basé sur le texte de l’annonce</p>'
+    return '<p class="summary-provenance manual">Résumé importé ou saisi manuellement</p>'
+
+
 def _summary_panel(row: sqlite3.Row, summary: Summary, prefix: str) -> tuple[str, str]:
     if not summary:
         return "", ""
@@ -171,6 +182,7 @@ def _summary_panel(row: sqlite3.Row, summary: Summary, prefix: str) -> tuple[str
     panel = (
         f'<div class="summary-panel" id="{panel_id}" hidden>'
         f'<div class="summary-title">En bref</div>'
+        f"{_summary_provenance_html(summary)}"
         f"{_summary_fields_html(summary.fields)}{bullets_html}</div>"
     )
     return button, panel
@@ -893,7 +905,32 @@ def _swipe_invites(track: str, deck_count: int) -> tuple[str, str]:
     return fab, popup
 
 
-def _swipe_card(row: sqlite3.Row, summary: Summary, content: str | None) -> str:
+def _unavailable_announcement_html(failure: tuple[str, int] | None) -> str:
+    if failure is None:
+        message = "Annonce complète pas encore récupérée. Aucun texte d’annonce n’a été inventé."
+    else:
+        reason, attempts = failure
+        if reason in ("http_404", "http_410"):
+            code = reason.removeprefix("http_")
+            message = f"Annonce complète indisponible : l’offre a été retirée (HTTP {code})."
+        elif attempts >= MAX_FETCH_ATTEMPTS:
+            message = (
+                f"Annonce complète indisponible après {attempts} tentatives. "
+                "Aucun texte d’annonce n’a été inventé."
+            )
+        else:
+            message = (
+                "Annonce complète temporairement indisponible : une nouvelle tentative est prévue."
+            )
+    return f'<p class="content-unavailable">{html.escape(message)}</p>'
+
+
+def _swipe_card(
+    row: sqlite3.Row,
+    summary: Summary,
+    content: str | None,
+    content_failure: tuple[str, int] | None,
+) -> str:
     company = html.escape(str(row["company"] or "Société inconnue"))
     title = html.escape(str(row["title"] or ""))
     pill = _fit_pill(row["fit"])
@@ -905,6 +942,7 @@ def _swipe_card(row: sqlite3.Row, summary: Summary, content: str | None) -> str:
         bullets_html = f"<ul>{items}</ul>" if items else ""
         summary_html = (
             '<div class="swipe-summary"><div class="summary-title">En bref</div>'
+            f"{_summary_provenance_html(summary)}"
             f"{_summary_fields_html(summary.fields)}{bullets_html}</div>"
         )
     content_html = ""
@@ -924,6 +962,7 @@ def _swipe_card(row: sqlite3.Row, summary: Summary, content: str | None) -> str:
         f'<div class="role">{title}</div>'
         f'<div class="meta">{meta}</div>'
         f"{summary_html}{content_html}"
+        f"{_unavailable_announcement_html(content_failure) if not content else ''}"
         "</div>"
         '<div class="swipe-stamp stamp-right" aria-hidden="true">À candidater</div>'
         '<div class="swipe-stamp stamp-left" aria-hidden="true">Écartée</div>'
@@ -942,11 +981,13 @@ def render_swipe_page(
     offer_ids = sorted({int(row["offer_id"]) for row in deck})
     summaries = _summary_bullets(conn, offer_ids)
     contents = _offer_contents(conn, offer_ids)
+    failures = _offer_content_failures(conn, offer_ids)
     cards = "\n".join(
         _swipe_card(
             row,
             summaries.get(int(row["offer_id"])) or Summary(),
             contents.get(int(row["offer_id"])),
+            failures.get(int(row["offer_id"])),
         )
         for row in deck
     )

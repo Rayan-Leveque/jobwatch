@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS offer (
 CREATE INDEX IF NOT EXISTS idx_offer_company_title ON offer(company_id, title);
 CREATE TABLE IF NOT EXISTS offer_summary (
   id INTEGER PRIMARY KEY,
-  offer_id INTEGER NOT NULL UNIQUE REFERENCES offer(id) ON DELETE CASCADE
+  offer_id INTEGER NOT NULL UNIQUE REFERENCES offer(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'ready', -- 'ready' | 'limited_no_content' | 'limited_retryable'
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  attempted_at TEXT
 );
 CREATE TABLE IF NOT EXISTS summary_field (
   summary_id INTEGER NOT NULL REFERENCES offer_summary(id) ON DELETE CASCADE,

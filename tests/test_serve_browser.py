@@ -329,6 +329,48 @@ def test_recovered_new_match_shows_summary_and_full_announcement_in_swipe(
     page.close()
 
 
+def test_terminal_offer_swipe_shows_limited_provenance_and_announcement_reason(
+    browser, dashboard, monkeypatch
+) -> None:
+    url, db_path = dashboard
+    conn = connect(db_path)
+    conn.execute(
+        "UPDATE match SET state = 'discarded' WHERE offer_id IN "
+        "(SELECT o.id FROM offer o JOIN company c ON c.id = o.company_id "
+        " WHERE c.name = 'LaterCo')"
+    )
+    conn.commit()
+
+    def gone(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(410, text="gone")
+
+    monkeypatch.setattr(
+        "jobwatch.enrich._fetch_playwright",
+        lambda url: (_ for _ in ()).throw(AssertionError("410 is terminal")),
+    )
+    client = httpx.Client(transport=httpx.MockTransport(gone))
+    result = enrich(
+        conn,
+        EnrichConfig(runner="pi", pi_bin="pi", model="test-model"),
+        client=client,
+        sleep=lambda _seconds: None,
+    )
+    client.close()
+    assert result.fetched_failed == 1
+    conn.close()
+
+    page = browser.new_page()
+    page.goto(f"{url}/swipe")
+    card = page.locator('.swipe-card:has(.company:text-is("NewCo"))')
+    expect(card.get_by_text("En bref", exact=True)).to_be_visible()
+    expect(card.locator(".summary-provenance.limited")).to_have_text(
+        "Résumé limité - basé uniquement sur les métadonnées enregistrées"
+    )
+    expect(card.locator(".content-unavailable")).to_contain_text("HTTP 410")
+    expect(card.get_by_role("button", name="Annonce complète")).to_have_count(0)
+    page.close()
+
+
 def test_swipe_announcement_touch_scroll_preserves_horizontal_swipe(
     browser, dashboard
 ) -> None:

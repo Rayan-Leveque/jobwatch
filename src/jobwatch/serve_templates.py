@@ -437,6 +437,10 @@ h1 span { color:var(--muted-2); font-weight:620 }
   text-transform:uppercase }
 .summary-panel ul { margin:9px 0 0; padding-left:19px; color:var(--muted); font-size:.76rem }
 .summary-panel li + li { margin-top:6px }
+.summary-provenance { margin:7px 0 0; color:var(--muted); font-size:.67rem; line-height:1.35 }
+.summary-provenance.limited { color:var(--amber) }
+.content-unavailable { margin:12px 0 0; padding:10px 11px; border:1px solid var(--amber-soft);
+  border-radius:10px; color:var(--amber); background:var(--amber-soft); font-size:.7rem; line-height:1.4 }
 .summary-fields { display:grid; gap:5px; margin:10px 0 2px }
 .summary-field { display:flex; gap:8px; align-items:baseline; font-size:.76rem }
 .sf-label { flex:none; min-width:132px; color:var(--muted-2); font-size:.63rem;
