@@ -406,10 +406,14 @@ def make_handler(
             if session is not None and onboarding_enabled:
                 with self._db() as conn:
                     needs_onboarding = not profile_complete(conn, session.account_id)
+                    split_tracks = conn.execute(
+                        "SELECT value FROM instance_setting WHERE key = 'dashboard_tracks'"
+                    ).fetchone()
                 if needs_onboarding:
                     self._redirect("/onboarding")
                     return
-                track = "all"
+                if split_tracks is None or split_tracks["value"] != "split":
+                    track = "all"
             self._render_track_page(track, swipe, session)
 
         @_db_error_response()

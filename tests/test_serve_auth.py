@@ -415,6 +415,61 @@ def test_unknown_path_is_404_for_onboarded_session(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
+def test_migrated_instance_can_keep_two_dashboard_tracks(tmp_path: Path) -> None:
+    db_path = tmp_path / "jobwatch.db"
+    conn = connect(db_path)
+    init_db(conn)
+    invite = create_invite(conn, "rayan", "rayan@example.com")
+    conn.execute(
+        "INSERT INTO instance_setting (key, value) VALUES ('dashboard_tracks', 'split')"
+    )
+    conn.commit()
+    conn.close()
+    server, thread = _start_server(
+        db_path, workspace_slug="rayan", secure_cookie=False, onboarding_enabled=True
+    )
+    port = server.server_address[1]
+    try:
+        password = "une très longue phrase secrète"
+        encoded = urlencode(
+            {"password": password, "password_confirmation": password}
+        ).encode()
+        _status, headers, _body = _request(
+            port,
+            "POST",
+            f"/invite/{invite}",
+            body=encoded,
+            headers=_form_headers(port),
+        )
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        conn = connect(db_path)
+        account_id = int(conn.execute("SELECT id FROM account").fetchone()["id"])
+        workspace_id = int(conn.execute("SELECT id FROM workspace").fetchone()["id"])
+        complete_profile(
+            conn,
+            account_id,
+            workspace_id,
+            [],
+            [{"label": "Ingénieur IA", "keywords": ["AI"], "exclude": []}],
+        )
+        conn.close()
+
+        status, _headers, engineer = _request(port, "GET", "/", headers={"Cookie": cookie})
+        assert status == 200
+        assert 'href="/" aria-current="page">Ingénieur IA</a>' in engineer
+        assert 'href="/po">Chef de projet / PO</a>' in engineer
+
+        status, _headers, project = _request(
+            port, "GET", "/po", headers={"Cookie": cookie}
+        )
+        assert status == 200
+        assert 'href="/po" aria-current="page">Chef de projet / PO</a>' in project
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_first_time_friend_is_guided_to_private_letter_profile(tmp_path: Path) -> None:
     db_path = tmp_path / "alice" / "jobwatch.db"
     db_path.parent.mkdir()
