@@ -8,6 +8,7 @@ import json
 from jobwatch.onboarding import MAX_INTENTS
 from jobwatch.profile import ProfilePreferences
 from jobwatch.seniority import SENIORITY_LEVELS
+from jobwatch.seniority_ui import seniority_level_labels_html, seniority_sync_script
 
 
 def _script_json(value: object) -> str:
@@ -54,12 +55,7 @@ def render_onboarding(
     mode_back_hidden = " hidden" if editing else ""
     max_intents = MAX_INTENTS
     range_max = len(SENIORITY_LEVELS) - 1
-    level_labels = "".join(
-        f'<span data-level="{value}" style="--level-position:calc('
-        f'{value / range_max * 100}% + {13 - value / range_max * 26}px)">'
-        f"{html.escape(label)}</span>"
-        for value, label in SENIORITY_LEVELS
-    )
+    level_labels = seniority_level_labels_html(range_max)
     yes_checked = " checked" if preferences.cover_letters_enabled else ""
     no_checked = "" if preferences.cover_letters_enabled else " checked"
     return f"""<!DOCTYPE html>
@@ -278,24 +274,7 @@ input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-rad
 </main><script id="initial-data" type="application/json">{initial_data}</script><script>
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
 const initialData = JSON.parse(document.getElementById('initial-data').textContent);
-const seniorityLabels={json.dumps([label for _value, label in SENIORITY_LEVELS], ensure_ascii=False)};
-const seniorityMin=document.getElementById('seniority-min');
-const seniorityMax=document.getElementById('seniority-max');
-const syncSeniority=(changed)=>{{
-  if(Number(seniorityMin.value)>Number(seniorityMax.value)) {{
-    if(changed===seniorityMin) seniorityMax.value=seniorityMin.value;
-    else seniorityMin.value=seniorityMax.value;
-  }}
-  const low=Number(seniorityMin.value),high=Number(seniorityMax.value),steps=seniorityLabels.length-1;
-  const range=document.getElementById('seniority-range');
-  const lowRatio=low/steps,spanRatio=(high-low)/steps;
-  range.style.setProperty('--range-left',`calc(${{lowRatio*100}}% + ${{13-lowRatio*26}}px)`);
-  range.style.setProperty('--range-width',`calc(${{spanRatio*100}}% - ${{spanRatio*26}}px)`);
-  document.getElementById('seniority-summary').textContent=low===high
-    ? seniorityLabels[low] : `${{seniorityLabels[low]}} à ${{seniorityLabels[high]}}`;
-}};
-[seniorityMin,seniorityMax].forEach(input=>input.addEventListener('input',()=>syncSeniority(input)));
-syncSeniority();
+{seniority_sync_script(min_id='seniority-min', max_id='seniority-max')}
 const fileInput = document.getElementById('cv-file');
 const fileList = document.getElementById('file-list');
 const analyze = document.getElementById('analyze');

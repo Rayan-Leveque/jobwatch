@@ -330,9 +330,6 @@ h1 span { color:var(--muted-2); font-weight:620 }
   transition:color .18s ease, background .18s ease }
 .track-tab.active { color:var(--accent-ink); background:var(--accent);
   box-shadow:0 0 0 4px var(--accent-soft) }
-.manage-link { display:inline-flex; margin-top:18px; color:var(--accent); font-size:.76rem;
-  font-weight:780; text-decoration:none }
-.manage-links { display:flex; flex-wrap:wrap; gap:8px 18px }
 .profile-prompt { display:flex; align-items:center; justify-content:space-between; gap:14px;
   margin:18px 0 0; padding:15px 16px; border:1px solid var(--line); border-radius:var(--radius-md);
   background:var(--surface); box-shadow:var(--card-shadow) }
@@ -1308,10 +1305,9 @@ def _track_nav(track: str) -> str:
 
 def _page_template(
     *, body, total, new_count, seen_count, applied_count, stamp, track,
-    category_link="", profile_link="", profile_prompt="", swipe_fab="", swipe_popup="",
-    batch_badge="", csrf_token="", identity_sub="", identity_email="", identity_workspace="",
+    profile_prompt="", swipe_fab="", swipe_popup="",
+    batch_badge="", csrf_token="", identity_email="", identity_workspace="",
 ) -> str:
-    identity_copy = html.escape(identity_sub) if identity_sub else "Suivi de vos offres"
     if csrf_token and identity_email:
         email = html.escape(identity_email)
         workspace = html.escape(identity_workspace)
@@ -1325,9 +1321,9 @@ def _page_template(
             <button class="user-menu-item" type="button" data-logout><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4"/><path d="m15 8 4 4-4 4M9 12h10"/></svg>Se déconnecter</button>
           </div></details>'''
     else:
-        identity = f'''<div class="identity"><div class="monogram" aria-hidden="true">JW</div>
+        identity = '''<div class="identity"><div class="monogram" aria-hidden="true">JW</div>
           <div class="identity-copy"><span class="identity-name">jobwatch</span>
-            <span class="identity-sub">{identity_copy}</span></div></div>'''
+            <span class="identity-sub">Suivi de vos offres</span></div></div>'''
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -1373,7 +1369,6 @@ def _page_template(
         Mis à jour le {stamp}</p>
     </div>
     {_track_nav(track)}
-    <div class="manage-links">{category_link}{profile_link}</div>
     {profile_prompt}
     <div class="stats" aria-label="Vue d'ensemble">
       <div class="stat stat-new"><span class="stat-value">{new_count}</span><span class="stat-label">Nouveaux matchs</span></div>

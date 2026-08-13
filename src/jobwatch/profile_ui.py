@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import html
-import json
 import sqlite3
 
 from jobwatch.onboarding import CareerIntent
 from jobwatch.profile import MAX_PROFILE_FIELD_LENGTH, ProfileDetails, ProfilePreferences
 from jobwatch.seniority import SENIORITY_LEVELS
+from jobwatch.seniority_ui import seniority_level_labels_html, seniority_sync_script
 from jobwatch.serve_templates import _csrf_head
 
 
@@ -50,12 +50,7 @@ def render_profile(
         else "Ajustez ce que Jobwatch vous montre et les outils de candidature que vous utilisez."
     )
     range_max = len(SENIORITY_LEVELS) - 1
-    level_labels = "".join(
-        f'<span data-level="{value}" style="--level-position:calc('
-        f'{value / range_max * 100}% + {13 - value / range_max * 26}px)">'
-        f"{html.escape(label)}</span>"
-        for value, label in SENIORITY_LEVELS
-    )
+    level_labels = seniority_level_labels_html(range_max)
     yes_checked = " checked" if preferences.cover_letters_enabled else ""
     no_checked = "" if preferences.cover_letters_enabled else " checked"
     disabled = "" if preferences.cover_letters_enabled else " disabled"
@@ -328,24 +323,7 @@ cvFile.addEventListener('change',async()=>{{
   }} catch(error) {{ uploadStatus.textContent=error.message||'Import impossible.';
     uploadStatus.classList.add('error'); }}
 }});
-const seniorityLabels={json.dumps([label for _value, label in SENIORITY_LEVELS], ensure_ascii=False)};
-const seniorityMin=document.getElementById('seniority_min');
-const seniorityMax=document.getElementById('seniority_max');
-const syncSeniority=(changed)=>{{
-  if(Number(seniorityMin.value)>Number(seniorityMax.value)) {{
-    if(changed===seniorityMin) seniorityMax.value=seniorityMin.value;
-    else seniorityMin.value=seniorityMax.value;
-  }}
-  const low=Number(seniorityMin.value),high=Number(seniorityMax.value),steps=seniorityLabels.length-1;
-  const range=document.getElementById('seniority-range');
-  const lowRatio=low/steps,spanRatio=(high-low)/steps;
-  range.style.setProperty('--range-left',`calc(${{lowRatio*100}}% + ${{13-lowRatio*26}}px)`);
-  range.style.setProperty('--range-width',`calc(${{spanRatio*100}}% - ${{spanRatio*26}}px)`);
-  document.getElementById('seniority-summary').textContent=low===high
-    ? seniorityLabels[low] : `${{seniorityLabels[low]}} à ${{seniorityLabels[high]}}`;
-}};
-[seniorityMin,seniorityMax].forEach(input=>input.addEventListener('input',()=>syncSeniority(input)));
-syncSeniority();
+{seniority_sync_script(min_id='seniority_min', max_id='seniority_max')}
 document.getElementById('logout').addEventListener('click', async event => {{
   event.currentTarget.disabled=true;
   try {{ const response=await fetch('/logout',{{method:'POST'}});

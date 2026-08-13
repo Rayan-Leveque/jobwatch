@@ -508,7 +508,8 @@ def test_first_time_friend_is_guided_to_private_letter_profile(tmp_path: Path) -
         assert status == 200
         assert "alice@example.com" in body
         assert "Espace alice" in body
-        assert 'href="/options">Gérer mes options' in body
+        assert 'href="/options">' in body
+        assert "manage-link" not in body
 
         conn = connect(db_path)
         stored = conn.execute(
