@@ -600,40 +600,36 @@ def test_manual_onboarding_reaches_unified_dashboard(browser, onboarding_instanc
 
     page.locator("#confirm").click()
 
-    page.wait_for_url(f"{url}/profile?welcome=1")
-    assert page.get_by_role("heading", name="Des offres adaptées à votre recherche.").is_visible()
+    page.wait_for_url(f"{url}/options?welcome=1")
+    assert page.get_by_role("heading", name="Adaptez Jobwatch à votre recherche.").is_visible()
+    assert page.locator('.category-list li:has-text("Ingénierie IA")').is_visible()
+    assert page.locator('.keyword-list span:has-text("AI Engineer")').is_visible()
+    page.get_by_role("tab", name="Lettres").click()
     assert page.get_by_label("Vos motivations").is_visible()
     page.get_by_role("link", name="Passer pour l’instant").click()
     page.wait_for_url(f"{url}/")
-    assert page.get_by_role("link", name=re.compile("Modifier mes catégories")).is_visible()
+    assert page.get_by_role("link", name=re.compile("Modifier mes catégories")).count() == 0
     assert page.locator(".track-tabs").count() == 0
     page.close()
 
 
-def test_onboarding_seniority_range_error_leaves_confirm_button_usable(
+def test_onboarding_seniority_slider_keeps_a_valid_range(
     browser, onboarding_instance
 ) -> None:
     url, invite = onboarding_instance
     page = browser.new_page()
     _sign_in_to_onboarding(page, url, invite)
     page.get_by_role("button", name=re.compile(r"^Créer mes catégories")).click()
-    page.get_by_label("Du niveau").select_option("4")
-    page.get_by_label("Au niveau").select_option("2")
+    page.get_by_label("Niveau minimum").fill("4")
+    page.get_by_label("Niveau maximum").fill("2")
     page.locator(".intent-label").fill("Ingénierie IA")
     page.locator(".keywords").fill("AI Engineer, LLM Engineer")
 
+    assert page.get_by_label("Niveau minimum").input_value() == "2"
+    assert page.locator("#seniority-summary").inner_text() == "Junior"
     page.locator("#confirm").click()
 
-    assert (
-        page.locator("#intent-status").inner_text()
-        == "Le niveau minimum doit précéder le niveau maximum."
-    )
-    assert page.locator("#confirm").is_enabled()
-
-    page.get_by_label("Du niveau").select_option("2")
-    page.locator("#confirm").click()
-
-    page.wait_for_url(f"{url}/profile?welcome=1")
+    page.wait_for_url(f"{url}/options?welcome=1")
     page.close()
 
 
@@ -646,15 +642,16 @@ def test_preferences_filter_feed_and_toggle_letter_workflow_without_data_loss(
     page.get_by_label("Non, masquer ce parcours").check()
     page.locator("#choose-manual").click()
     page.locator("#intent-step").wait_for(state="visible")
-    page.get_by_label("Du niveau").select_option("2")
-    page.get_by_label("Au niveau").select_option("2")
+    page.get_by_label("Niveau minimum").fill("2")
+    page.get_by_label("Niveau maximum").fill("2")
     page.locator(".intent-label").fill("Ingénierie IA")
     page.locator(".keywords").fill("AI, IA")
     page.locator("#confirm").click()
 
-    page.wait_for_url(f"{url}/profile?welcome=1")
-    assert page.get_by_label("Du niveau").input_value() == "2"
-    assert page.get_by_label("Au niveau").input_value() == "2"
+    page.wait_for_url(f"{url}/options?welcome=1")
+    assert page.locator('.category-list li:has-text("Ingénierie IA")').is_visible()
+    assert page.get_by_label("Niveau minimum").input_value() == "2"
+    assert page.get_by_label("Niveau maximum").input_value() == "2"
     assert page.get_by_label("Non, masquer ce parcours pour le moment").is_checked()
     page.get_by_role("link", name="Passer pour l’instant").click()
     page.wait_for_url(f"{url}/")
@@ -700,11 +697,15 @@ def test_preferences_filter_feed_and_toggle_letter_workflow_without_data_loss(
     conn.close()
 
     page.set_viewport_size({"width": 390, "height": 844})
-    page.goto(f"{url}/profile")
+    page.locator(".user-menu > summary").click()
+    assert page.get_by_text("alice@example.com", exact=True).is_visible()
+    page.get_by_role("link", name="Options", exact=True).click()
+    page.wait_for_url(f"{url}/options")
     _assert_no_horizontal_overflow(page)
-    page.get_by_label("Au niveau").select_option("4")
+    page.get_by_label("Niveau maximum").fill("4")
+    page.get_by_role("tab", name="Lettres").click()
     page.get_by_label("Oui, afficher la génération de lettres").check()
-    page.get_by_role("button", name="Enregistrer mon profil").click()
+    page.get_by_role("button", name="Enregistrer mes options").click()
     page.wait_for_url(f"{url}/")
     assert _card(page, "Smile").count() >= 1
     assert _card(page, "Novaspace").locator(".letter-toggle").count() >= 1
@@ -714,6 +715,33 @@ def test_preferences_filter_feed_and_toggle_letter_workflow_without_data_loss(
     conn = connect(db_path)
     assert conn.execute("SELECT COUNT(*) AS n FROM draft_job").fetchone()["n"] == 1
     conn.close()
+
+    page.locator(".user-menu > summary").click()
+    page.get_by_role("link", name="Options", exact=True).click()
+    assert page.get_by_label("Niveau maximum").input_value() == "4"
+    page.get_by_role("tab", name="Lettres").click()
+    assert page.get_by_label("Oui, afficher la génération de lettres").is_checked()
+    page.get_by_role("tab", name="CV", exact=True).click()
+    page.locator("#cv-file").set_input_files(
+        {"name": "cv-options.pdf", "mimeType": "application/pdf", "buffer": b"%PDF-1.4\n%%EOF"}
+    )
+    page.locator("#upload-status").wait_for(state="visible")
+    assert page.locator("#upload-status").inner_text() == "CV ajouté."
+    assert page.locator('#cv-list li:has-text("cv-options.pdf")').is_visible()
+    assert page.locator('#cv-list a[href^="/documents/"]').is_visible()
+    page.reload()
+    assert page.get_by_role("tab", name="CV", exact=True).get_attribute("aria-selected") == "true"
+    assert page.locator('#cv-list li:has-text("cv-options.pdf")').is_visible()
+    page.get_by_role("tab", name="Recherche").click()
+    assert page.get_by_label("Niveau maximum").input_value() == "4"
+    document_href = page.locator('#cv-list li:has-text("cv-options.pdf") a').get_attribute("href")
+    conn = connect(db_path)
+    conn.execute("DELETE FROM web_session")
+    conn.commit()
+    conn.close()
+    page.goto(f"{url}{document_href}")
+    page.wait_for_url(f"{url}/login")
+    assert page.get_by_role("heading", name="Connexion").is_visible()
     page.close()
 
 
@@ -1046,7 +1074,7 @@ def test_onboarding_refuses_to_drop_an_incomplete_category(browser, onboarding_i
     page.locator(".intent").nth(1).locator(".keywords").fill("Product Owner")
     page.locator("#confirm").click()
 
-    page.wait_for_url(f"{url}/profile?welcome=1")
+    page.wait_for_url(f"{url}/options?welcome=1")
     page.get_by_role("link", name="Passer pour l’instant").click()
     page.wait_for_url(f"{url}/")
     page.close()

@@ -89,11 +89,11 @@ tableau de bord. Le bloc `draft` doit être configuré pour l'analyse des CV par
 manuel reste toujours disponible. Chaque fichier CV est vérifié côté serveur comme un PDF et
 limité à 10 Mio ; l'exemple de lettre est limité à 10 Mio et doit porter l'extension `.tex`.
 
-Après la première confirmation, la page « Profil de candidature » permet de modifier la plage de
+Après la première confirmation, la page « Options » permet de modifier les catégories, la plage de
 séniorité et le choix de génération, puis guide facultativement l'utilisateur
 pour renseigner ses motivations, ses cibles, ses réalisations, son ton, ses contraintes et des
-informations personnelles réutilisables. Le lien « Personnaliser mes lettres » permet de les modifier
-ensuite. Ces éléments restent dans l'instance et ne sont transmis au modèle que lors d'une demande
+informations personnelles réutilisables. Le menu du compte, dans la barre supérieure, donne accès
+à cette page et à la déconnexion. Ces éléments restent dans l'instance et ne sont transmis au modèle que lors d'une demande
 de lettre. Une fiche vide est valide : la rédaction retombe sobrement sur le CV et l'offre. Le prompt
 interdit d'inventer un fait absent de ces sources. Chaque brouillon reste prévisualisable et son corps
 peut être corrigé avec « Modifier le texte » avant de le choisir dans le formulaire Candidater.
