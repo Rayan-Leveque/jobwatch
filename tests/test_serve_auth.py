@@ -457,13 +457,13 @@ def test_migrated_instance_can_keep_two_dashboard_tracks(tmp_path: Path) -> None
         status, _headers, engineer = _request(port, "GET", "/", headers={"Cookie": cookie})
         assert status == 200
         assert 'href="/" aria-current="page">Ingénieur IA</a>' in engineer
-        assert 'href="/po">Chef de projet / PO</a>' in engineer
+        assert 'href="/po">Chef de projet IA</a>' in engineer
 
         status, _headers, project = _request(
             port, "GET", "/po", headers={"Cookie": cookie}
         )
         assert status == 200
-        assert 'href="/po" aria-current="page">Chef de projet / PO</a>' in project
+        assert 'href="/po" aria-current="page">Chef de projet IA</a>' in project
     finally:
         server.shutdown()
         server.server_close()

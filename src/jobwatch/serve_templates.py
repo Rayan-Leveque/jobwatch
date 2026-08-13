@@ -1286,7 +1286,7 @@ _JS = """\
 
 _TRACK_TABS = (
     ("engineer", "/", "Ingénieur IA"),
-    ("project", "/po", "Chef de projet / PO"),
+    ("project", "/po", "Chef de projet IA"),
 )
 
 
