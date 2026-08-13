@@ -696,6 +696,14 @@ def test_preferences_filter_feed_and_toggle_letter_workflow_without_data_loss(
     ).fetchone()["state"] == "new"
     conn.close()
 
+    page.goto(f"{url}/options")
+    content_box = page.locator(".settings-content").bounding_box()
+    actions_box = page.locator(".actions").bounding_box()
+    assert content_box is not None and actions_box is not None
+    assert abs(actions_box["x"] - content_box["x"]) < 1
+    assert abs(actions_box["width"] - content_box["width"]) < 1
+    page.goto(f"{url}/")
+
     page.set_viewport_size({"width": 390, "height": 844})
     page.locator(".user-menu > summary").click()
     assert page.get_by_text("alice@example.com", exact=True).is_visible()

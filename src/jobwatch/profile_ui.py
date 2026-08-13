@@ -277,10 +277,11 @@ textarea:focus {{ outline:3px solid rgba(112,82,200,.24); border-color:#7052c8 }
       <section class="security-card"><div class="security-row"><div><strong>Compte connecté</strong>
         <span>{html.escape(email)} · Espace {html.escape(workspace_slug)}</span></div>
         <button class="logout" id="logout" type="button">Se déconnecter</button></div></section>
-    </div></div></div>
+    </div>
     <div class="actions"><p class="status" id="status" aria-live="polite"></p>
       <a class="skip" href="/">{'Passer pour l’instant' if welcome else 'Annuler'}</a>
       <button id="save" type="submit">Enregistrer mes options</button></div>
+    </div></div>
   </form>
   <p class="privacy">Ces informations restent dans la base SQLite de cet espace. Elles sont
     envoyées au modèle de rédaction uniquement quand vous demandez une lettre.</p>
