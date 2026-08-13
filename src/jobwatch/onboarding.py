@@ -41,6 +41,7 @@ class OnboardingError(Exception):
 
 
 MAX_INTENTS = 4
+DASHBOARD_TRACKS_KEY = "dashboard_tracks"
 
 
 @dataclass(frozen=True)
@@ -304,6 +305,11 @@ def _sync_intent_searches(
 
 def sync_profile_searches(conn: sqlite3.Connection) -> bool:
     """Maintient les recherches de l'instance sur le profil confirmé, si présent."""
+    dashboard_tracks = conn.execute(
+        "SELECT value FROM instance_setting WHERE key = ?", (DASHBOARD_TRACKS_KEY,)
+    ).fetchone()
+    if dashboard_tracks is not None and dashboard_tracks["value"] == "split":
+        return False
     account = conn.execute(
         "SELECT account_id FROM candidate_profile WHERE completed_at IS NOT NULL "
         "ORDER BY updated_at DESC LIMIT 1"
@@ -412,7 +418,23 @@ def complete_profile(
                 for position, cv_library_id in enumerate(cv_library_ids)
             ],
         )
-        search_ids = _sync_intent_searches(conn, account_id, intents)
+        dashboard_tracks = conn.execute(
+            "SELECT value FROM instance_setting WHERE key = ?", (DASHBOARD_TRACKS_KEY,)
+        ).fetchone()
+        split_tracks = dashboard_tracks is not None and dashboard_tracks["value"] == "split"
+        if split_tracks:
+            owned_search_ids = sorted(
+                search_id for search_id in owned.values() if search_id is not None
+            )
+            if owned_search_ids:
+                conn.execute(
+                    "UPDATE search SET active = 0, archived_at = COALESCE(archived_at, datetime('now')) "
+                    f"WHERE id IN ({','.join('?' for _ in owned_search_ids)})",
+                    owned_search_ids,
+                )
+            search_ids: list[int | None] = [None] * len(intents)
+        else:
+            search_ids = _sync_intent_searches(conn, account_id, intents)
         conn.execute("DELETE FROM career_intent WHERE account_id = ?", (account_id,))
         conn.executemany(
             "INSERT INTO career_intent (account_id, label, keywords_json, exclude_json, "
@@ -434,7 +456,8 @@ def complete_profile(
         conn.rollback()
         raise
     try:
-        run_matching(conn)
+        if not split_tracks:
+            run_matching(conn)
         reclassify_recent_matches(conn, account_id)
     except sqlite3.Error:
         # Le profil est déjà enregistré : la mise en correspondance repassera au

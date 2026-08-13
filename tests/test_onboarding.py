@@ -333,6 +333,33 @@ def test_matching_failure_after_save_keeps_the_profile(tmp_path, monkeypatch) ->
     conn.close()
 
 
+def test_split_dashboard_does_not_create_category_matches(tmp_path) -> None:
+    conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
+    conn.execute(
+        "INSERT INTO instance_setting (key, value) VALUES ('dashboard_tracks', 'split')"
+    )
+    conn.commit()
+    match_count = conn.execute("SELECT COUNT(*) FROM match").fetchone()[0]
+
+    complete_profile(
+        conn,
+        account_id,
+        workspace_id,
+        [cv_id],
+        [
+            {"label": "Ingénieur IA", "keywords": ["AI Engineer"], "exclude": []},
+            {"label": "Chef de projet IA", "keywords": ["chef de projet"], "exclude": []},
+        ],
+    )
+
+    assert conn.execute("SELECT COUNT(*) FROM match").fetchone()[0] == match_count
+    assert conn.execute(
+        "SELECT COUNT(*) FROM career_intent WHERE search_id IS NOT NULL"
+    ).fetchone()[0] == 0
+    assert sync_profile_searches(conn) is False
+    conn.close()
+
+
 def test_deleted_category_frees_its_name_for_a_later_rename(tmp_path) -> None:
     conn, account_id, workspace_id, cv_id = _profile_db(tmp_path)
     complete_profile(
