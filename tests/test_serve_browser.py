@@ -725,8 +725,7 @@ def test_preferences_filter_feed_and_toggle_letter_workflow_without_data_loss(
     page.locator("#cv-file").set_input_files(
         {"name": "cv-options.pdf", "mimeType": "application/pdf", "buffer": b"%PDF-1.4\n%%EOF"}
     )
-    page.locator("#upload-status").wait_for(state="visible")
-    assert page.locator("#upload-status").inner_text() == "CV ajouté."
+    expect(page.locator("#upload-status")).to_have_text("CV ajouté.")
     assert page.locator('#cv-list li:has-text("cv-options.pdf")').is_visible()
     assert page.locator('#cv-list a[href^="/documents/"]').is_visible()
     page.reload()
