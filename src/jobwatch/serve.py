@@ -61,7 +61,7 @@ from jobwatch.auth_http import (
 )
 from jobwatch.config import DraftConfig
 from jobwatch.db import connect
-from jobwatch.library import LibraryError, save_upload
+from jobwatch.library import LibraryError, list_library, save_upload
 from jobwatch.match_actions import (
     MatchActionResult,
     apply_match_action,
@@ -242,16 +242,22 @@ def make_handler(
                 return None
             if session is not None:
                 return session
-            if path.startswith(
+            if self.command == "GET" and (
+                self.headers.get("Sec-Fetch-Mode") == "navigate"
+                or self.headers.get("Sec-Fetch-Dest") == "document"
+            ):
+                self._redirect("/login")
+                return None
+            json_route = path.startswith(
                 (
                     "/draft/",
                     "/match/",
                     "/documents",
                     "/onboarding/",
-                    "/profile",
                     _BUG_REPORT_PATH,
                 )
-            ):
+            ) or (self.command != "GET" and path in ("/profile", "/options"))
+            if json_route:
                 self._send_json(401, {"error": "authentification requise"})
             else:
                 self._redirect("/login")
@@ -336,6 +342,9 @@ def make_handler(
                 )
                 return
             if path == "/profile":
+                self._redirect("/options")
+                return
+            if path == "/options":
                 if session is None or workspace_slug is None:
                     self._redirect("/")
                     return
@@ -343,6 +352,8 @@ def make_handler(
                     details = profile_details(conn, session.account_id)
                     preferences = profile_preferences(conn, session.account_id)
                     excluded_count = profile_excluded_count(conn, session.account_id)
+                    cv_documents = list_library(conn, "cv")
+                    career_intents = profile_intents(conn, session.account_id)
                 self._send_bytes(
                     200,
                     render_profile(
@@ -353,6 +364,8 @@ def make_handler(
                         workspace_slug=workspace_slug,
                         welcome=parse_qs(parsed.query).get("welcome") == ["1"],
                         excluded_count=excluded_count,
+                        cv_documents=cv_documents,
+                        career_intents=career_intents,
                     ).encode("utf-8"),
                     "text/html; charset=utf-8",
                 )
@@ -419,11 +432,8 @@ def make_handler(
                     page = render_page(
                         conn,
                         track,
-                        identity_sub=(
-                            f"{session.email} · espace {workspace_slug}"
-                            if session is not None and workspace_slug is not None
-                            else ""
-                        ),
+                        identity_email=session.email if session is not None else "",
+                        identity_workspace=workspace_slug if session is not None else "",
                         **common,
                     )
             self._send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
@@ -690,7 +700,7 @@ def make_handler(
             if path == "/onboarding/complete":
                 self._handle_onboarding_complete(session)
                 return
-            if path == "/profile":
+            if path in ("/profile", "/options"):
                 self._handle_profile_save(session)
                 return
             if path == "/logout":
@@ -893,7 +903,7 @@ def make_handler(
                 {
                     "ok": True,
                     "count": len(intents),
-                    "next": "/" if already_complete else "/profile?welcome=1",
+                    "next": "/" if already_complete else "/options?welcome=1",
                 },
             )
 

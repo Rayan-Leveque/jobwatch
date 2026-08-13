@@ -833,7 +833,8 @@ def render_page(
     draft_enabled: bool = False,
     csrf_token: str = "",
     account_id: int | None = None,
-    identity_sub: str = "",
+    identity_email: str = "",
+    identity_workspace: str = "",
     cover_letters_enabled: bool = True,
 ) -> str:
     """Rend la page HTML complète d'un onglet depuis l'état actuel de la base."""
@@ -890,15 +891,10 @@ def render_page(
     total = len(priority) + len(new) + len(seen) + len(later) + len(discarded) + len(applied)
     stamp = datetime.now(UTC).astimezone().strftime("%d/%m/%Y %H:%M")
     details = profile_details(conn, account_id) if account_id is not None else None
-    profile_link = (
-        '<a class="manage-link" href="/profile">Personnaliser mes lettres →</a>'
-        if account_id is not None
-        else ""
-    )
     profile_prompt = (
         '<aside class="profile-prompt"><div><strong>Donnez un peu de contexte à vos lettres.</strong>'
         '<span>Motivations, réalisations, ton et contraintes restent facultatifs.</span></div>'
-        '<a href="/profile">Compléter mon profil</a></aside>'
+        '<a href="/options">Compléter mon profil</a></aside>'
         if draft_enabled and details is not None and not details.has_personalization
         else ""
     )
@@ -909,19 +905,13 @@ def render_page(
         applied_count=len(applied),
         stamp=stamp,
         track=track,
-        category_link=(
-            '<a class="manage-link" href="/onboarding?edit=1">'
-            "Modifier mes catégories →</a>"
-            if track == "all"
-            else ""
-        ),
-        profile_link=profile_link,
         profile_prompt=profile_prompt,
         swipe_fab=swipe_fab,
         swipe_popup=swipe_popup,
         batch_badge=_BATCH_BADGE_HTML if draft_enabled else "",
         csrf_token=csrf_token,
-        identity_sub=identity_sub,
+        identity_email=identity_email,
+        identity_workspace=identity_workspace,
     )
 
 

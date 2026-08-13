@@ -84,16 +84,17 @@ une lettre (de préférence au format `.tex`) comme exemple de style personnel (
 `letter_example`) ; sans envoi, la génération de lettres retombe sur un modèle générique fourni
 avec jobwatch. Avant confirmation, chaque catégorie peut être renommée, ajoutée ou supprimée et
 ses mots-clés modifiés. La confirmation enregistre les catégories comme recherches SQLite actives
-et relance le matching ; le lien « Modifier mes catégories » reste ensuite disponible depuis le
-tableau de bord. Le bloc `draft` doit être configuré pour l'analyse des CV par IA ; le parcours
-manuel reste toujours disponible. Chaque fichier CV est vérifié côté serveur comme un PDF et
-limité à 10 Mio ; l'exemple de lettre est limité à 10 Mio et doit porter l'extension `.tex`.
+et relance le matching ; le lien « Modifier » de l'onglet Recherche de la page « Options » reste
+ensuite disponible pour reprendre ce parcours. Le bloc `draft` doit être configuré pour l'analyse
+des CV par IA ; le parcours manuel reste toujours disponible. Chaque fichier CV est vérifié côté
+serveur comme un PDF et limité à 10 Mio ; l'exemple de lettre est limité à 10 Mio et doit porter
+l'extension `.tex`.
 
-Après la première confirmation, la page « Profil de candidature » permet de modifier la plage de
+Après la première confirmation, la page « Options » permet de modifier les catégories, la plage de
 séniorité et le choix de génération, puis guide facultativement l'utilisateur
 pour renseigner ses motivations, ses cibles, ses réalisations, son ton, ses contraintes et des
-informations personnelles réutilisables. Le lien « Personnaliser mes lettres » permet de les modifier
-ensuite. Ces éléments restent dans l'instance et ne sont transmis au modèle que lors d'une demande
+informations personnelles réutilisables. Le menu du compte, dans la barre supérieure, donne accès
+à cette page et à la déconnexion. Ces éléments restent dans l'instance et ne sont transmis au modèle que lors d'une demande
 de lettre. Une fiche vide est valide : la rédaction retombe sobrement sur le CV et l'offre. Le prompt
 interdit d'inventer un fait absent de ces sources. Chaque brouillon reste prévisualisable et son corps
 peut être corrigé avec « Modifier le texte » avant de le choisir dans le formulaire Candidater.
@@ -287,8 +288,8 @@ sur `/` et `Chef de projet / PO` sur `/po`. Toute offre ou candidature dont le t
 contient « chef de projet », « chef de produit », « product owner » ou « product manager »
 n'apparaît que dans l'onglet `Chef de projet / PO` ; l'onglet `Ingénieur IA` montre tout le
 reste. Une instance nommée dont le profil est confirmé affiche à la place un flux unifié de toutes
-ses catégories ; chaque carte indique la recherche correspondante et le tableau de bord propose
-« Modifier mes catégories ». Chaque vue porte ses propres sections et compteurs.
+ses catégories ; chaque carte indique la recherche correspondante et la page « Options »
+(onglet Recherche) propose de les modifier. Chaque vue porte ses propres sections et compteurs.
 Pour un compte ayant choisi une plage de séniorité, Jobwatch classe seulement les exigences
 explicites : contrat ou intitulé `stage`/`alternance`, niveau écrit dans l'intitulé, ou nombre
 d'années présent dans le champ Expérience ou le texte de l'annonce. Les seuils sont 0 à 2 ans

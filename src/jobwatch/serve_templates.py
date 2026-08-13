@@ -274,6 +274,23 @@ html[data-theme="light"] .ambient::after { background:radial-gradient(circle, rg
 .topbar { min-height:48px; display:flex; align-items:center; justify-content:space-between;
   gap:16px; margin-bottom:30px }
 .identity { display:flex; align-items:center; gap:11px; min-width:0 }
+.user-menu { position:relative; min-width:0 }
+.user-menu > summary { display:flex; align-items:center; gap:11px; min-width:0; padding:5px 9px 5px 5px;
+  border:1px solid transparent; border-radius:15px; cursor:pointer; list-style:none }
+.user-menu > summary::-webkit-details-marker { display:none }
+.user-menu > summary::after { content:""; width:7px; height:7px; flex:none; margin-left:2px;
+  border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor;
+  transform:rotate(45deg) translateY(-2px); color:var(--muted) }
+.user-menu[open] > summary { border-color:var(--line); background:var(--surface) }
+.user-menu-panel { position:absolute; z-index:70; top:calc(100% + 8px); left:0; width:min(280px,calc(100vw - 32px));
+  padding:7px; border:1px solid var(--line); border-radius:15px; background:var(--surface);
+  box-shadow:var(--shadow) }
+.user-menu-item { width:100%; min-height:42px; display:flex; align-items:center; gap:10px; padding:0 11px;
+  border:0; border-radius:10px; color:var(--fg); background:transparent; font:inherit;
+  font-size:.78rem; font-weight:730; text-decoration:none; cursor:pointer }
+.user-menu-item:hover { background:var(--surface-hover) }
+.user-menu-item svg { width:18px; height:18px; flex:none; color:var(--muted) }
+.user-menu-divider { height:1px; margin:6px 4px; background:var(--line) }
 .monogram { width:38px; height:38px; display:grid; place-items:center; border-radius:12px;
   color:var(--accent-ink); background:var(--accent); font-size:.9rem; font-weight:850;
   letter-spacing:-.04em; box-shadow:0 0 0 5px var(--accent-soft) }
@@ -313,9 +330,6 @@ h1 span { color:var(--muted-2); font-weight:620 }
   transition:color .18s ease, background .18s ease }
 .track-tab.active { color:var(--accent-ink); background:var(--accent);
   box-shadow:0 0 0 4px var(--accent-soft) }
-.manage-link { display:inline-flex; margin-top:18px; color:var(--accent); font-size:.76rem;
-  font-weight:780; text-decoration:none }
-.manage-links { display:flex; flex-wrap:wrap; gap:8px 18px }
 .profile-prompt { display:flex; align-items:center; justify-content:space-between; gap:14px;
   margin:18px 0 0; padding:15px 16px; border:1px solid var(--line); border-radius:var(--radius-md);
   background:var(--surface); box-shadow:var(--card-shadow) }
@@ -602,11 +616,6 @@ h1 span { color:var(--muted-2); font-weight:620 }
   font-variant-numeric:tabular-nums; }
 @media (hover:hover) { .swipe-fab:hover { background:var(--surface-hover) } }
 .topbar-tools { display:flex; align-items:center; gap:10px }
-.logout-button { height:48px; display:flex; align-items:center; justify-content:center; gap:8px;
-  padding:0 13px; border:1px solid var(--line); border-radius:15px; color:var(--fg);
-  background:color-mix(in srgb, var(--surface) 86%, transparent); box-shadow:var(--card-shadow);
-  font-weight:700; cursor:pointer; }
-.logout-button svg { width:19px; height:19px; }
 .swipe-popup { position:fixed; inset:0; z-index:60; display:flex; align-items:flex-end;
   justify-content:center; padding:16px; background:rgba(0,0,0,.45);
   -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
@@ -702,7 +711,6 @@ a { color:var(--blue) }
   .topbar { flex-wrap:wrap; }
   .topbar-tools { width:100%; }
   .swipe-fab { flex:1; }
-  .logout-button { margin-left:auto; }
   .profile-prompt { align-items:flex-start; flex-direction:column }
 }
 @media (max-width:370px) {
@@ -1297,20 +1305,25 @@ def _track_nav(track: str) -> str:
 
 def _page_template(
     *, body, total, new_count, seen_count, applied_count, stamp, track,
-    category_link="", profile_link="", profile_prompt="", swipe_fab="", swipe_popup="",
-    batch_badge="", csrf_token="", identity_sub="",
+    profile_prompt="", swipe_fab="", swipe_popup="",
+    batch_badge="", csrf_token="", identity_email="", identity_workspace="",
 ) -> str:
-    logout_button = (
-        '<button class="logout-button" type="button" aria-label="Déconnexion" '
-        'onclick="fetch(\'/logout\',{method:\'POST\'}).then(()=>location.href=\'/login\')">'
-        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
-        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-        '<path d="M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4"/>'
-        '<path d="m15 8 4 4-4 4M9 12h10"/></svg><span>Déconnexion</span></button>'
-        if csrf_token
-        else ""
-    )
-    identity_copy = html.escape(identity_sub) if identity_sub else "Suivi de vos offres"
+    if csrf_token and identity_email:
+        email = html.escape(identity_email)
+        workspace = html.escape(identity_workspace)
+        identity = f'''<details class="user-menu"><summary aria-label="Ouvrir le menu utilisateur">
+          <div class="monogram" aria-hidden="true">{email[:1].upper()}</div>
+          <div class="identity-copy"><span class="identity-name">{email}</span>
+            <span class="identity-sub">Espace {workspace}</span></div></summary>
+          <div class="user-menu-panel">
+            <a class="user-menu-item" href="/options"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg>Options</a>
+            <div class="user-menu-divider"></div>
+            <button class="user-menu-item" type="button" data-logout><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4"/><path d="m15 8 4 4-4 4M9 12h10"/></svg>Se déconnecter</button>
+          </div></details>'''
+    else:
+        identity = '''<div class="identity"><div class="monogram" aria-hidden="true">JW</div>
+          <div class="identity-copy"><span class="identity-name">jobwatch</span>
+            <span class="identity-sub">Suivi de vos offres</span></div></div>'''
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -1335,11 +1348,7 @@ def _page_template(
 <div class="shell">
   <header>
     <div class="topbar">
-      <div class="identity">
-        <div class="monogram" aria-hidden="true">JW</div>
-        <div class="identity-copy"><span class="identity-name">jobwatch</span>
-          <span class="identity-sub">{identity_copy}</span></div>
-      </div>
+      {identity}
       <div class="topbar-tools">
       {swipe_fab}
       {batch_badge}
@@ -1351,7 +1360,6 @@ def _page_template(
           <path d="M20.2 15.1A8.4 8.4 0 0 1 8.9 3.8 8.5 8.5 0 1 0 20.2 15.1Z"/>
         </svg>
       </button>
-      {logout_button}
       </div>
     </div>
     <div class="hero">
@@ -1361,7 +1369,6 @@ def _page_template(
         Mis à jour le {stamp}</p>
     </div>
     {_track_nav(track)}
-    <div class="manage-links">{category_link}{profile_link}</div>
     {profile_prompt}
     <div class="stats" aria-label="Vue d'ensemble">
       <div class="stat stat-new"><span class="stat-value">{new_count}</span><span class="stat-label">Nouveaux matchs</span></div>
@@ -1398,7 +1405,16 @@ def _page_template(
 <script>
 {_JS}
 {_BUG_REPORT_JS}
-{_BATCH_BADGE_JS}</script></body></html>
+{_BATCH_BADGE_JS}
+document.querySelector('[data-logout]')?.addEventListener('click', async event => {{
+  const button=event.currentTarget; button.disabled=true;
+  try {{
+    const response=await fetch('/logout',{{method:'POST'}});
+    if (!response.ok) throw new Error();
+    location.href='/login';
+  }} catch (_) {{ button.disabled=false; }}
+}});
+</script></body></html>
 """
 
 

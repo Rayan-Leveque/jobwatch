@@ -216,6 +216,51 @@ def test_invite_session_csrf_and_logout_end_to_end(tmp_path: Path) -> None:
         assert status == 303
         assert headers["Location"] == "/login"
 
+        status, headers, _body = _request(
+            port, "GET", "/options", headers={"Cookie": cookie}
+        )
+        assert status == 303
+        assert headers["Location"] == "/login"
+
+        status, _headers, body = _request(
+            port,
+            "POST",
+            "/options",
+            body=b"{}",
+            headers={
+                "Content-Type": "application/json",
+                "Cookie": cookie,
+                "X-CSRF-Token": csrf,
+            },
+        )
+        assert status == 401
+        assert json.loads(body) == {"error": "authentification requise"}
+
+        for protected_path in (
+            "/options",
+            "/documents/1",
+            "/match/1/letter.pdf",
+            "/match/1/letter/1.png",
+            "/draft/batch/status?track=engineer",
+        ):
+            status, headers, _body = _request(
+                port,
+                "GET",
+                protected_path,
+                headers={"Cookie": cookie, "Sec-Fetch-Mode": "navigate"},
+            )
+            assert status == 303, protected_path
+            assert headers["Location"] == "/login"
+
+        status, _headers, body = _request(
+            port,
+            "GET",
+            "/draft/batch/status?track=engineer",
+            headers={"Cookie": cookie, "Sec-Fetch-Mode": "cors"},
+        )
+        assert status == 401
+        assert json.loads(body) == {"error": "authentification requise"}
+
         login_body = urlencode(
             {"email": "alice@example.com", "password": password}
         ).encode()
@@ -424,10 +469,10 @@ def test_first_time_friend_is_guided_to_private_letter_profile(tmp_path: Path) -
             },
         )
         assert status == 200
-        assert json.loads(body)["next"] == "/profile?welcome=1"
+        assert json.loads(body)["next"] == "/options?welcome=1"
 
         status, _headers, body = _request(
-            port, "GET", "/profile?welcome=1", headers={"Cookie": cookie}
+            port, "GET", "/options?welcome=1", headers={"Cookie": cookie}
         )
         assert status == 200
         assert "Tous les champs sont facultatifs" in body
@@ -448,7 +493,7 @@ def test_first_time_friend_is_guided_to_private_letter_profile(tmp_path: Path) -
         status, _headers, body = _request(
             port,
             "POST",
-            "/profile",
+            "/options",
             body=profile_payload,
             headers={
                 "Content-Type": "application/json",
@@ -461,8 +506,10 @@ def test_first_time_friend_is_guided_to_private_letter_profile(tmp_path: Path) -
 
         status, _headers, body = _request(port, "GET", "/", headers={"Cookie": cookie})
         assert status == 200
-        assert "alice@example.com · espace alice" in body
-        assert 'href="/profile">Personnaliser mes lettres' in body
+        assert "alice@example.com" in body
+        assert "Espace alice" in body
+        assert 'href="/options">' in body
+        assert "manage-link" not in body
 
         conn = connect(db_path)
         stored = conn.execute(

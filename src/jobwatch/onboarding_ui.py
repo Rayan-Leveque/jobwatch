@@ -8,6 +8,7 @@ import json
 from jobwatch.onboarding import MAX_INTENTS
 from jobwatch.profile import ProfilePreferences
 from jobwatch.seniority import SENIORITY_LEVELS
+from jobwatch.seniority_ui import seniority_level_labels_html, seniority_sync_script
 
 
 def _script_json(value: object) -> str:
@@ -53,16 +54,8 @@ def render_onboarding(
     back_link = '<a class="back-link" href="/">← Tableau de bord</a>' if editing else ""
     mode_back_hidden = " hidden" if editing else ""
     max_intents = MAX_INTENTS
-    minimum_options = "".join(
-        f'<option value="{value}"{" selected" if value == preferences.seniority_min else ""}>'
-        f"{html.escape(label)}</option>"
-        for value, label in SENIORITY_LEVELS
-    )
-    maximum_options = "".join(
-        f'<option value="{value}"{" selected" if value == preferences.seniority_max else ""}>'
-        f"{html.escape(label)}</option>"
-        for value, label in SENIORITY_LEVELS
-    )
+    range_max = len(SENIORITY_LEVELS) - 1
+    level_labels = seniority_level_labels_html(range_max)
     yes_checked = " checked" if preferences.cover_letters_enabled else ""
     no_checked = "" if preferences.cover_letters_enabled else " checked"
     return f"""<!DOCTYPE html>
@@ -109,11 +102,31 @@ h1 {{ max-width:620px; margin:0; font-size:clamp(2.2rem,9vw,4.2rem); line-height
   border:1px solid var(--line); border-radius:11px; background:var(--surface) }}
 .radio-choice input {{ width:auto; margin-top:3px; accent-color:var(--green) }}
 .radio-choice span {{ min-width:0; line-height:1.4 }}
-.seniority-box {{ margin-bottom:16px }} .seniority-grid {{ display:grid;
-  grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px }}
-.select-label {{ display:grid; gap:7px; min-width:0; color:var(--muted); font-size:.78rem;
-  font-weight:750 }} select {{ width:100%; min-width:0; padding:12px 13px; border:1px solid var(--line);
-  border-radius:11px; color:var(--fg); background:var(--surface); font:inherit }}
+.seniority-box {{ margin-bottom:16px }} .range-summary {{ margin:0; color:var(--fg); font-weight:790 }}
+.dual-range {{ position:relative; height:42px; margin:10px 10px 0 }}
+.range-rail,.range-selection {{ position:absolute; top:18px; right:13px; left:13px; height:6px;
+  border-radius:999px; background:var(--line) }}
+.range-selection {{ left:var(--range-left); right:auto; width:var(--range-width); background:var(--green) }}
+.range-input {{ position:absolute; inset:0; width:100%; height:42px; margin:0; padding:0;
+  appearance:none; -webkit-appearance:none; background:transparent; pointer-events:none }}
+.range-input::-webkit-slider-runnable-track {{ height:6px; background:transparent }}
+.range-input::-moz-range-track {{ height:6px; background:transparent }}
+.range-input::-webkit-slider-thumb {{ width:26px; height:26px; margin-top:-10px; border:3px solid var(--surface);
+  border-radius:50%; appearance:none; -webkit-appearance:none; background:var(--green);
+  box-shadow:0 0 0 1px var(--green),0 3px 9px rgba(25,27,31,.22); pointer-events:auto; cursor:grab }}
+.range-input::-moz-range-thumb {{ width:20px; height:20px; border:3px solid var(--surface);
+  border-radius:50%; background:var(--green); box-shadow:0 0 0 1px var(--green),0 3px 9px rgba(25,27,31,.22);
+  pointer-events:auto; cursor:grab }}
+.range-labels {{ position:relative; height:38px }}
+.range-labels span {{ position:absolute; top:8px; left:var(--level-position); width:max-content;
+  max-width:18%; color:var(--muted); font-size:.62rem; line-height:1.2; text-align:center;
+  overflow-wrap:anywhere; transform:translateX(-50%) }}
+.range-labels span::before {{ content:""; position:absolute; bottom:calc(100% + 5px); left:50%;
+  width:2px; height:6px; border-radius:2px; background:var(--line); transform:translateX(-50%) }}
+.range-labels span:first-child {{ text-align:left; transform:none }}
+.range-labels span:first-child::before {{ left:0; transform:none }}
+.range-labels span:last-child {{ text-align:right; transform:translateX(-100%) }}
+.range-labels span:last-child::before {{ right:0; left:auto; transform:none }}
 .drop {{ display:grid; place-items:center; min-height:210px; padding:24px; border:1.5px dashed
   rgba(66,117,45,.35); border-radius:17px; background:rgba(66,117,45,.045); text-align:center; }}
 .drop.drag {{ border-color:var(--green); background:rgba(66,117,45,.09); }}
@@ -158,7 +171,7 @@ input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-rad
 .mode-back:hover {{ border-color:rgba(66,117,45,.45); background:rgba(66,117,45,.06); }}
 .back-link {{ display:inline-flex; margin:0 0 26px; color:var(--muted); font-size:.82rem;
   font-weight:700; text-decoration:none; }}
-@media (max-width:520px) {{ .panel {{ padding:16px; }} .choice-grid,.radio-row,.seniority-grid {{ grid-template-columns:1fr; }} }}
+@media (max-width:520px) {{ .panel {{ padding:16px; }} .choice-grid,.radio-row {{ grid-template-columns:1fr; }} }}
 </style></head><body><div class="ambient"></div><main>
 <div class="brand"><span class="brand-mark">JW</span>jobwatch</div>
 {back_link}
@@ -241,12 +254,14 @@ input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-rad
       <legend>Séniorité recherchée</legend>
       <p class="preference-help">Choisissez la plage que vous êtes prêt à considérer. Les offres
         sans niveau explicite restent visibles : Jobwatch n’invente pas leur séniorité.</p>
-      <div class="seniority-grid">
-        <label class="select-label" for="seniority-min">Du niveau
-          <select id="seniority-min">{minimum_options}</select></label>
-        <label class="select-label" for="seniority-max">Au niveau
-          <select id="seniority-max">{maximum_options}</select></label>
-      </div>
+      <p class="range-summary" id="seniority-summary" aria-live="polite"></p>
+      <div class="dual-range" id="seniority-range">
+        <span class="range-rail" aria-hidden="true"></span><span class="range-selection" aria-hidden="true"></span>
+        <input class="range-input" id="seniority-min" type="range" min="0" max="{range_max}"
+          step="1" value="{preferences.seniority_min}" aria-label="Niveau minimum">
+        <input class="range-input" id="seniority-max" type="range" min="0" max="{range_max}"
+          step="1" value="{preferences.seniority_max}" aria-label="Niveau maximum">
+      </div><div class="range-labels" aria-hidden="true">{level_labels}</div>
     </fieldset>
     <p class="analysis-note">jobwatch cherchera les offres correspondant aux mots-clés de chaque
     catégorie. Toutes les offres seront réunies dans votre tableau de bord, avec leur catégorie.</p>
@@ -259,6 +274,7 @@ input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-rad
 </main><script id="initial-data" type="application/json">{initial_data}</script><script>
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
 const initialData = JSON.parse(document.getElementById('initial-data').textContent);
+{seniority_sync_script(min_id='seniority-min', max_id='seniority-max')}
 const fileInput = document.getElementById('cv-file');
 const fileList = document.getElementById('file-list');
 const analyze = document.getElementById('analyze');
