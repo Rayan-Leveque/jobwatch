@@ -45,3 +45,59 @@ def test_deploy_switches_release_or_rolls_back(tmp_path, healthy):
     assert "start jobwatch-collect@alice.timer" in log.read_text()
     if not healthy:
         assert "restart jobwatch@alice.service" in log.read_text()
+
+
+def test_provision_creates_traversable_parents_and_private_instances(tmp_path):
+    root = tmp_path / "opt/jobwatch"
+    binary = root / "current/.venv/bin/jw"
+    binary.parent.mkdir(parents=True)
+    binary.write_text(
+        '#!/bin/bash\nset -eu\n'
+        'if [[ "$3" == init ]]; then\n'
+        '  config="$XDG_CONFIG_HOME/jobwatch/instances/$2"\n'
+        '  data="$XDG_DATA_HOME/jobwatch/instances/$2"\n'
+        '  mkdir -p "$config" "$data"\n'
+        '  printf "sources: {}\\n" > "$config/config.yaml"\n'
+        '  touch "$data/jobwatch.db"\n'
+        'fi\n'
+    )
+    binary.chmod(0o755)
+    (root / "current/ops").mkdir()
+    (root / "current/ops/nginx.conf").write_text(
+        "server_name alice.jobs.example; proxy_pass http://127.0.0.1:8801;\n"
+    )
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    for command in ("id", "useradd", "chown", "systemctl"):
+        path = commands / command
+        path.write_text(f"#!/bin/sh\nexit {1 if command == 'id' else 0}\n")
+        path.chmod(0o755)
+    config_root = tmp_path / "etc"
+    data_root = tmp_path / "var/lib"
+    config_root.mkdir(mode=0o755)
+    data_root.mkdir(parents=True, mode=0o755)
+    script = tmp_path / "provision.sh"
+    script.write_text(
+        Path("ops/provision.sh").read_text()
+        .replace("/opt/jobwatch", str(root))
+        .replace("/etc", str(config_root))
+        .replace("/var/lib", str(data_root))
+        .replace("EUID == 0", "1 == 1")
+    )
+    for slug in ("alice", "bob"):
+        result = subprocess.run(
+            ["bash", str(script), slug, f"{slug}@example.com", f"{slug}.jobs.example", "8801"],
+            env={**os.environ, "PATH": f"{commands}:/usr/bin:/bin"},
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        for shared_root in (config_root, data_root):
+            for parent in (shared_root / "jobwatch", shared_root / "jobwatch/instances"):
+                assert parent.stat().st_mode & 0o777 == 0o755
+        config = config_root / "jobwatch/instances" / slug
+        data = data_root / "jobwatch/instances" / slug
+        assert config.stat().st_mode & 0o777 == 0o750
+        assert data.stat().st_mode & 0o777 == 0o700
+        for filename in ("config.yaml", "service.env"):
+            assert (config / filename).stat().st_mode & 0o777 == 0o640
+        assert (data / "jobwatch.db").stat().st_mode & 0o777 == 0o600

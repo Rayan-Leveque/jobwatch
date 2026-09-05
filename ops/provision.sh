@@ -17,6 +17,8 @@ test ! -e "/var/lib/jobwatch/instances/$slug"
 if id "jobwatch-$slug" >/dev/null 2>&1; then exit 1; fi
 useradd --system --user-group --no-create-home --home-dir "/var/lib/jobwatch/instances/$slug" \
     --shell /usr/sbin/nologin "jobwatch-$slug"
+install -d -m 755 /etc/jobwatch /etc/jobwatch/instances \
+    /var/lib/jobwatch /var/lib/jobwatch/instances
 export XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib
 /opt/jobwatch/current/.venv/bin/jw --instance "$slug" init --beta
 printf 'PORT=%s\n' "$port" >"/etc/jobwatch/instances/$slug/service.env"
