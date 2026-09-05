@@ -56,6 +56,8 @@ SLEEP_MAX_SECONDS = 2.0
 MAX_FETCH_ATTEMPTS = 3
 FETCH_RETRY_SQL_DELAY = "-1 day"
 TERMINAL_HTTP_STATUSES = frozenset({404, 410})
+#: Causes d'échec définitives : jamais retentées, pas de résumé « retryable ».
+TERMINAL_FAILURES = frozenset({"http_404", "http_410", "unsupported_scheme"})
 MAX_SUMMARY_ATTEMPTS = 3
 SUMMARY_RETRY_SQL_DELAY = "-1 hour"
 WTTJ_RECOVERY_VERSION = 1
@@ -127,6 +129,8 @@ class EnrichResult:
     fetched_ok: int = 0
     fetched_failed: int = 0
     summaries_written: int = 0
+    summaries_failed: int = 0
+    limited_written: int = 0
     fields_written: int = 0
     #: Nombre d'offres par méthode d'extraction retenue ('jsonld'/'readable'/'raw').
     extract_methods: Counter[str] = dataclasses_field(default_factory=Counter)
@@ -145,6 +149,10 @@ class EnrichResult:
             f"{self.summaries_written} résumé(s) généré(s)",
             f"{self.fields_written} fiche(s) de champs écrite(s)",
         ]
+        if self.limited_written:
+            parts.append(f"{self.limited_written} résumé(s) limité(s) aux métadonnées")
+        if self.summaries_failed:
+            parts.append(f"{self.summaries_failed} échec(s) de génération")
         if self.extract_methods:
             methods = ", ".join(
                 f"{name}:{count}" for name, count in sorted(self.extract_methods.items())
@@ -212,13 +220,13 @@ def _pending_offers(
         "        CASE WHEN oc.id IS NULL OR "
         "          (oc.status = 'failed' AND oc.fetch_attempts < ? "
         "           AND (oc.failure_reason IS NULL "
-        "                OR (oc.failure_reason NOT IN ('http_404', 'http_410') "
+        "                OR (oc.failure_reason NOT IN ('http_404', 'http_410', 'unsupported_scheme') "
         "                    AND oc.fetched_at <= datetime('now', ?)))) "
         "        THEN 1 ELSE 0 END AS regular_fetch_due, "
         "        CASE WHEN ? = 1 AND oc.status = 'failed' "
         "          AND oc.wttj_recovery_version < ? "
         "          AND (oc.failure_reason IS NULL "
-        "               OR oc.failure_reason NOT IN ('http_404', 'http_410')) "
+        "               OR oc.failure_reason NOT IN ('http_404', 'http_410', 'unsupported_scheme')) "
         "          AND (src.type = 'wttj' OR lower(src.name) = 'wttj' "
         "               OR lower(o.platform) = 'wttj') "
         "        THEN 1 ELSE 0 END AS recovery_due "
@@ -309,6 +317,9 @@ def _fetch_playwright(url: str) -> FetchPage:
 
 def _fetch_and_extract_result(url: str, client: httpx.Client) -> FetchOutcome:
     """Récupère puis extrait une offre, avec une cause d'échec classifiable."""
+    if not url.lower().startswith(("http://", "https://")):
+        # Import legacy : certaines URL ne sont pas des adresses web (jobwatch:<hash>).
+        return FetchOutcome(None, None, None, "unsupported_scheme")
     fetchers = (
         ("http", lambda: _fetch_http(url, client)),
         ("playwright", lambda: _fetch_playwright(url)),
@@ -689,13 +700,13 @@ def enrich(
                 if extracted is None:
                     result.fetched_failed += 1
                     attempts = int(offer["fetch_attempts"] or 0) + 1
-                    terminal = fetch.failure_reason in ("http_404", "http_410")
+                    terminal = fetch.failure_reason in TERMINAL_FAILURES
                     if _write_metadata_summary(
                         conn,
                         offer_id,
                         retryable=not terminal and attempts < MAX_FETCH_ATTEMPTS,
                     ):
-                        result.summaries_written += 1
+                        result.limited_written += 1
                     log.info("enrich: offre %d ECHEC fetch %s", offer_id, url)
                     continue
                 content_status = "ok"
@@ -735,29 +746,26 @@ def enrich(
                     futures[pool.submit(_summarize, config, markdown)] = offer_id
             elif content_status != "ok" and not offer["fetch_due"]:
                 attempts = int(offer["fetch_attempts"] or 0)
-                terminal = offer["failure_reason"] in ("http_404", "http_410")
+                terminal = offer["failure_reason"] in TERMINAL_FAILURES
                 if _write_metadata_summary(
                     conn,
                     offer_id,
                     retryable=not terminal and attempts < MAX_FETCH_ATTEMPTS,
                 ):
-                    result.summaries_written += 1
+                    result.limited_written += 1
         for future in as_completed(futures):
             offer_id = futures[future]
             try:
                 summarized = future.result()
             except Exception:  # un résumé qui plante ne doit pas emporter le run
                 log.exception("enrich: summary worker failed for offer %d", offer_id)
-                if _write_metadata_summary(
-                    conn, offer_id, retryable=True, summary_attempted=True
-                ):
-                    result.summaries_written += 1
-                continue
+                summarized = None
             if summarized is None:
+                result.summaries_failed += 1
                 if _write_metadata_summary(
                     conn, offer_id, retryable=True, summary_attempted=True
                 ):
-                    result.summaries_written += 1
+                    result.limited_written += 1
                 continue
             fields, quotes, bullets = summarized
             # Le JSON-LD ne sert qu'à combler : ce que le modèle a lu dans
