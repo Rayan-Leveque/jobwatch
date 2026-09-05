@@ -141,18 +141,20 @@ class NotifyConfig:
 
 
 STANDARD_LLM_RUNNERS = ("opencode", "codex")
-ENRICH_RUNNERS = (*STANDARD_LLM_RUNNERS, "pi")
+ENRICH_RUNNERS = (*STANDARD_LLM_RUNNERS, "openrouter", "pi")
 RESEARCH_RUNNERS = (*STANDARD_LLM_RUNNERS, "openrouter")
 
 
 @dataclass
 class EnrichConfig:
     model: str
-    # Exécuteur LLM : 'opencode', 'codex' ou 'pi'.
+    # Exécuteur LLM : 'opencode', 'codex', 'openrouter' ou 'pi'.
     runner: str = "opencode"
     opencode_bin: str = "opencode"
     codex_bin: str = "codex"
     pi_bin: str = "pi"
+    # Clé API OpenRouter, requise avec le runner 'openrouter'.
+    api_key: str = ""
     # Effort de raisonnement : --variant OpenCode, model_reasoning_effort Codex
     # ou --thinking Pi.
     variant: str | None = None
@@ -491,6 +493,11 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
         raise ConfigError("enrich.pi_bin doit être une chaîne non vide")
     if runner == "pi":
         pi_bin = _resolve_llm_bin(pi_bin, "enrich.pi_bin", "pi")
+    api_key = raw.get("api_key", "")
+    if not isinstance(api_key, str):
+        raise ConfigError("enrich.api_key doit être une chaîne")
+    if runner == "openrouter" and not api_key.strip():
+        raise ConfigError("enrich.api_key est requis avec le runner openrouter")
     variant = raw.get("variant")
     if variant is not None and (not isinstance(variant, str) or not variant):
         raise ConfigError("enrich.variant doit être une chaîne non vide")
@@ -499,7 +506,7 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
         raise ConfigError("enrich.concurrency doit être un entier >= 1")
     return EnrichConfig(
         model=model, runner=runner, opencode_bin=opencode_bin, codex_bin=codex_bin,
-        pi_bin=pi_bin, variant=variant, concurrency=concurrency,
+        pi_bin=pi_bin, api_key=api_key, variant=variant, concurrency=concurrency,
     )
 
 

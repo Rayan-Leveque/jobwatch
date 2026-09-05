@@ -664,6 +664,50 @@ def test_enrich_retries_unclassified_legacy_failure_immediately(
     assert tuple(recovered) == ("ok", 2, None)
 
 
+def test_enrich_summarizes_with_openrouter(conn: sqlite3.Connection, monkeypatch) -> None:
+    from jobwatch.research import OPENROUTER_URL
+
+    offer_id = _seed_offer(conn)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append((url, headers, json))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": (
+                "EXPERIENCE: 3 ans\nEXPERIENCE_CITATION: Ingénieur IA Paris\n"
+                "- Poste IA\n- Paris"
+            )}}]},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("jobwatch.enrich.httpx.post", fake_post)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=LONG_HTML)
+
+    config = EnrichConfig(
+        model="deepseek/deepseek-v4-flash-0731", runner="openrouter", api_key="sk-or-test"
+    )
+    result = enrich(conn, config, client=_http_client(handler), sleep=_no_sleep)
+
+    assert result.fetched_ok == 1
+    assert result.summaries_written == 1
+    assert result.fields_written == 1
+    url, headers, payload = calls[0]
+    assert url == OPENROUTER_URL
+    assert headers["Authorization"] == "Bearer sk-or-test"
+    assert "Ingénieur IA Paris" in payload["messages"][0]["content"]
+    assert "plugins" not in payload
+    field = conn.execute(
+        "SELECT sf.value AS value, sf.quote AS quote FROM summary_field sf "
+        "JOIN offer_summary os ON os.id = sf.summary_id "
+        "WHERE os.offer_id = ? AND sf.key = 'experience'",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(field) == ("3 ans", "Ingénieur IA Paris")
+
+
 def test_enrich_retries_transient_pi_summary_failure_without_refetch(
     conn: sqlite3.Connection, monkeypatch
 ) -> None:
@@ -1175,6 +1219,28 @@ def test_config_parses_codex_runner(tmp_path, monkeypatch) -> None:
     )
     with _pytest.raises(ConfigError, match="opencode_bin"):
         load_config(config_file)
+
+
+def test_config_parses_openrouter_runner_and_requires_api_key(tmp_path) -> None:
+    from jobwatch.config import ConfigError, load_config
+
+    base = f"db: {tmp_path / 'db.sqlite'}\nsearches:\n  - name: test\n    include: ['AI']\n"
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        base + "enrich:\n  runner: openrouter\n  model: deepseek/deepseek-v4-flash-0731\n"
+    )
+    with pytest.raises(ConfigError, match="api_key"):
+        load_config(config_file)
+
+    config_file.write_text(
+        base + "enrich:\n  runner: openrouter\n  model: deepseek/deepseek-v4-flash-0731\n"
+        "  api_key: sk-or-v1-test\n"
+    )
+    config = load_config(config_file).enrich
+    assert config is not None
+    assert config.runner == "openrouter"
+    assert config.api_key == "sk-or-v1-test"
+    assert config.model == "deepseek/deepseek-v4-flash-0731"
 
 
 def test_config_fails_loudly_when_codex_bin_missing_from_path(tmp_path, monkeypatch) -> None:

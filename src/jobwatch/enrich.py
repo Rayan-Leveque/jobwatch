@@ -43,6 +43,7 @@ from jobwatch import llm_runner
 from jobwatch.config import EnrichConfig
 from jobwatch.extraction import Extraction, extract
 from jobwatch.llm_runner import LLMRunnerError, opencode_text, run_codex, run_opencode, run_pi
+from jobwatch.research import OPENROUTER_URL
 from jobwatch.seniority import reclassify_all_profiles
 
 OPENCODE_TOOLS = llm_runner.OPENCODE_TOOLS
@@ -383,6 +384,27 @@ def _store_content(
 SummaryParts = tuple[dict[str, str], dict[str, str], list[str]]
 
 
+def _openrouter_summary(config: EnrichConfig, prompt: str, markdown: str) -> str:
+    """Appel HTTP direct OpenRouter, sans plugin web ni raisonnement étendu."""
+    try:
+        response = httpx.post(
+            OPENROUTER_URL,
+            headers={"Authorization": f"Bearer {config.api_key}"},
+            json={
+                "model": config.model,
+                "messages": [
+                    {"role": "user", "content": f"{prompt}\n\n<offre>{markdown}</offre>"}
+                ],
+                "reasoning": {"enabled": False},
+            },
+            timeout=CODEX_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+        raise LLMRunnerError(f"appel openrouter échoué : {exc}") from exc
+
+
 def _summarize(config: EnrichConfig, markdown: str) -> SummaryParts | None:
     """Demande le résumé structuré au runner configuré, puis vérifie ses citations."""
     try:
@@ -404,6 +426,8 @@ def _summarize(config: EnrichConfig, markdown: str) -> SummaryParts | None:
                 timeout=CODEX_TIMEOUT_SECONDS,
                 variant=config.variant,
             )
+        elif config.runner == "openrouter":
+            text = _openrouter_summary(config, SUMMARY_PROMPT, markdown)
         else:
             text = opencode_text(run_opencode(
                 binary=config.opencode_bin, model=config.model,
