@@ -50,7 +50,7 @@ sources: {}
 notify: {}
 
 # research : recherche web large facultative après les collecteurs directs.
-# Les offres directement collectées sont aussi transmises au modèle pour recevoir un fit.
+# Les critères de sélection des candidats au fit figurent dans unfitted_recent_offers (research.py).
 # Pour activer, remplacez « research: {} » par un bloc rempli :
 #   runner: codex                       # codex, opencode ou openrouter
 #   codex_bin: codex

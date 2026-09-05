@@ -13,9 +13,9 @@ locaux dans le dossier de l'instance sur votre machine. Trois fonctions LLM rest
 et inertes sans configuration explicite : `research` complète les collecteurs directs par une
 recherche web large, `jw enrich` extrait et résume les annonces collectées, et le tableau de bord
 peut rédiger des lettres de motivation. Les appels passent par un binaire OpenCode, Codex ou Pi
-local, ou par l'API OpenRouter pour `research`, lancés en bac à sable : Codex ignore la
-configuration utilisateur et tourne sans outil local, OpenCode voit chacun de ses outils refusé
-nommément (seule `research` rouvre le web), Pi tourne sans session persistante et sans outil.
+local, ou par l’API OpenRouter pour `research`. Les restrictions des runners figurent dans la
+[référence de configuration](#référence-de-configuration). Les fonctions IA transmettent au
+fournisseur du modèle les données nécessaires à leur tâche.
 
 ## Démarrage rapide
 
@@ -37,8 +37,9 @@ python3 -m venv .venv
 
 `jw init` refuse d'écraser un `config.yaml` existant. `jw init --db PATH` écrit ce chemin
 dans la ligne `db:` de la config générée au lieu du défaut `~/.local/share/jobwatch/jobwatch.db`
-(utile pour un environnement de test isolé). Toutes les commandes acceptent
+(utile pour un environnement de test isolé). Les commandes qui chargent la configuration acceptent
 `--config PATH` (par défaut `./config.yaml`, avec repli sur `~/.config/jobwatch/config.yaml`).
+`jw restore` reçoit directement les dossiers source et destination, sans option `--config`.
 
 ### Instances isolées
 
@@ -75,10 +76,13 @@ explicitement `jw --instance alice serve --no-secure-cookie`; ne publiez jamais 
 Les nouvelles configurations, bases et pièces uploadées reçoivent des permissions privées pour le
 compte système qui exécute Jobwatch (`0600` pour les fichiers, `0700` pour les dossiers d'instance).
 
-À la première connexion d'une instance nommée, jobwatch ouvre un parcours de démarrage : importez
-un ou plusieurs CV PDF pour obtenir des catégories proposées ensemble, ou créez-les manuellement.
-Le parcours demande aussi la plage de séniorité acceptée, de `Stage` à `Lead / management`, et si
-la génération de lettres de motivation doit être affichée. Dans le parcours CV, l'étape facultative
+À la première connexion d’une instance nommée, jobwatch ouvre un parcours de démarrage.
+Créez vos catégories manuellement ou partez du préréglage PO / MOA modifiable. Si l’IA est
+configurée, vous pouvez aussi importer un ou plusieurs CV PDF pour obtenir des propositions.
+Le parcours demande la plage de séniorité acceptée, de `Stage` à `Lead / management`, ainsi
+que les localisations décrites dans le [guide de la bêta](ops/README.md#créer-une-instance).
+Le choix d’afficher la génération de lettres apparaît seulement si l’IA est configurée.
+Dans le parcours CV, l’étape facultative
 de partage d'une lettre n'apparaît que si cette génération est activée. Elle permet de fournir
 une lettre (de préférence au format `.tex`) comme exemple de style personnel (`document_library`, type
 `letter_example`) ; sans envoi, la génération de lettres retombe sur un modèle générique fourni
@@ -91,7 +95,7 @@ serveur comme un PDF et limité à 10 Mio ; l'exemple de lettre est limité à 1
 l'extension `.tex`.
 
 Après la première confirmation, la page « Options » permet de modifier les catégories, la plage de
-séniorité et le choix de génération, puis guide facultativement l'utilisateur
+séniorité. Si l’IA est configurée, l’onglet Lettres propose le choix de génération et guide l’utilisateur
 pour renseigner ses motivations, ses cibles, ses réalisations, son ton, ses contraintes et des
 informations personnelles réutilisables. Le menu du compte, dans la barre supérieure, donne accès
 à cette page et à la déconnexion. Ces éléments restent dans l'instance et ne sont transmis au modèle que lors d'une demande
@@ -149,24 +153,10 @@ exception explicite ; il faut tout de même une instance et une invitation disti
 
 #### Sauvegarde, migration et retour arrière
 
-Arrêtez le processus de l'instance avant une copie cohérente, puis sauvegardez tout son dossier de
-données et sa config :
-
-```bash
-systemctl --user stop jobwatch-alice.service
-mkdir -p ~/.local/share/jobwatch/backups
-cp -a ~/.local/share/jobwatch/instances/alice \
-  ~/.local/share/jobwatch/backups/alice-$(date +%F-%H%M%S)
-cp -a ~/.config/jobwatch/instances/alice/config.yaml \
-  ~/.local/share/jobwatch/backups/alice-config-$(date +%F-%H%M%S).yaml
-systemctl --user start jobwatch-alice.service
-```
-
-Les migrations SQLite sont additives et idempotentes au démarrage. Pour revenir au code précédent,
-arrêtez le service, remettez la version de code antérieure et redémarrez ; les colonnes ajoutées sont
-ignorées. Si une opération de données doit aussi être annulée, arrêtez le service et restaurez le
-dossier d'instance sauvegardé avant l'opération. Ne restaurez jamais la sauvegarde d'une personne dans
-l'instance d'une autre.
+Suivez le [guide de sauvegarde et de restauration](ops/README.md#sauvegarder-et-restaurer)
+pour obtenir une copie cohérente et vérifiée. Le [guide de déploiement](ops/README.md#déployer-et-contrôler)
+décrit le retour de version et ses limites pour les migrations de données.
+Ne restaurez jamais la sauvegarde d’une personne dans l’instance d’une autre.
 
 ### Bêta privée sans IA
 
@@ -441,11 +431,11 @@ remplacer.
 | --- | --- |
 | `db` | Chemin vers la base SQLite. `~` est développé. Les répertoires sont créés automatiquement. |
 | `searches` | Liste des recherches enregistrées. Chaque recherche a : `name` (identifiant unique), `include` (mots-clés, au moins un, correspondance insensible à la casse sur le titre), `exclude` (mots-clés, aucun), `locations` (correspondance par sous-chaîne sur la localisation de l'offre ; vide = n'importe où), `contract` (optionnel : `permanent`, `fixed_term`, `internship`, `other`). |
-| `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. `linkedin` prend une liste de couples `keywords`/`location` et une fenêtre `hours`. `wttj` prend ses requêtes, pays, villes internationales, fenêtre `hours` et les identifiants publics de l'index Algolia utilisé par le site. |
+| `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. `linkedin` prend une liste de couples `keywords`/`location` et une fenêtre `hours`. Avec `from_profile: true`, les catégories confirmées remplacent ces requêtes ; sans profil confirmé, LinkedIn reste inactif. Ce mode autorise `searches: []`. Voir le [guide du profil](ops/README.md#créer-une-instance) pour les localisations et le télétravail. `wttj` prend ses requêtes, pays, villes internationales, fenêtre `hours` et les identifiants publics de l'index Algolia utilisé par le site. |
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
-| `research` | Recherche web large facultative après les collecteurs directs : runner `codex`, `opencode` ou `openrouter`. Avec `openrouter`, appel HTTP direct avec la clé `api_key` et recherche web par le plugin `web` d'OpenRouter. Fenêtre `recency_days`, plafond `max_results` (appliqué après validation et déduplication) et instructions de profil. Les offres récentes encore sans fit rejoignent aussi les candidats à évaluer. C'est le seul runner à qui des outils restent autorisés (web uniquement). |
-| `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, `codex` ou `pi`), le binaire correspondant (`opencode_bin`/`codex_bin`/`pi_bin`), `model` (ex. `opencode/deepseek-v4-flash-free`, `gpt-5.6-luna` ou `openai-codex/gpt-5.6-luna` avec Pi), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). Pi est exécuté sans outils et sans session persistante. |
-| `draft` | Génération de lettre de motivation depuis le tableau de bord : `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. Si `examples` ne couvre pas la piste, jobwatch utilise les lettres `letter_example` de la bibliothèque de documents, puis un modèle générique fourni avec le projet. |
+| `research` | Recherche web large facultative après les collecteurs directs : runner `codex`, `opencode` ou `openrouter`. Avec `openrouter`, appel HTTP direct avec la clé `api_key` et recherche web par le plugin `web` d'OpenRouter. Fenêtre `recency_days`, plafond `max_results` (appliqué après validation et déduplication) et instructions de profil. Les offres récentes encore sans fit rejoignent aussi les candidats à évaluer. Codex ignore la configuration utilisateur et désactive les outils locaux. OpenCode refuse ses outils nommément et autorise seulement `websearch` et `webfetch` pour `research`. |
+| `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, `codex` ou `pi`), le binaire correspondant (`opencode_bin`/`codex_bin`/`pi_bin`), `model` (ex. `opencode/deepseek-v4-flash-free`, `gpt-5.6-luna` ou `openai-codex/gpt-5.6-luna` avec Pi), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). Codex et OpenCode sont exécutés sans outils. Pi est exécuté sans outils, extensions, skills, fichiers de contexte ni session persistante. |
+| `draft` | Génération de lettre de motivation depuis le tableau de bord, sans outils du runner. `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. Si `examples` ne couvre pas la piste, jobwatch utilise les lettres `letter_example` de la bibliothèque de documents, puis un modèle générique fourni avec le projet. |
 
 Le filtre `locations` est une correspondance par sous-chaîne sur la localisation de l'offre :
 une offre située à « Puteaux » ou « Levallois-Perret » ne matche PAS une recherche avec
@@ -475,13 +465,15 @@ revanche sa recherche, donc le tri déjà fait.
 4. Demandez le scope `api_offresdemploiv2` pour l'application.
 
 jobwatch exécute ensuite automatiquement le flux OAuth2 client-credentials à chaque `jw run`.
-Une source défaillante ou non configurée est consignée comme avertissement et n'interrompt jamais
-l'exécution.
+Une source non configurée reste inactive. Les erreurs des collecteurs sont consignées.
+Pour LinkedIn, le comportement en cas de collecte partielle est décrit dans le
+[guide d’exploitation](ops/README.md#créer-une-instance).
 
 ## Modèle de données
 
-Les offres sont dédupliquées globalement par URL, et de plus ignorées quand la même société a déjà
-une offre avec le même titre. Chaque offre est mise en correspondance avec chaque recherche active ;
+Les offres sont dédupliquées dans chaque instance par URL et par société et titre.
+Un doublon peut compléter la localisation existante avec une indication de télétravail complet.
+Chaque offre est mise en correspondance avec chaque recherche active ;
 les matchs sont stockés avec un état (`new`, `seen`, `later`, `applied`, `discarded`). Une candidature est
 créée depuis un match, et son statut actuel est le dernier événement de son journal d'événements.
 

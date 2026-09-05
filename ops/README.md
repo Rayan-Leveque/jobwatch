@@ -54,8 +54,10 @@ l'adresse réelle de connexion.
 Transmettre manuellement le lien d'invitation HTTPS au destinataire, jamais dans un
 journal public. Il expire après 48 heures. À l'inscription, la personne peut choisir
 PO / MOA, supprimer une catégorie, changer ses mots-clés et saisir jusqu'à cinq villes
-ou régions. Une localisation vide signifie France. Le télétravail complet ajoute une
-requête France filtrée par LinkedIn. Les offres sans lieu connu restent visibles.
+ou régions. Une liste de localisations vide lance la collecte sur la France et ne filtre pas les lieux
+des offres déjà en base. Avec des localisations renseignées, le télétravail complet ajoute
+une requête France filtrée par LinkedIn et élargit le matching aux mentions « Télétravail
+complet » et « full remote ». Les offres sans lieu connu restent visibles.
 
 Le timer collecte toutes les six heures avec un décalage aléatoire de vingt minutes.
 Aucune requête ne part avant la confirmation du profil. Pour la première invitation,
@@ -92,6 +94,9 @@ de restauration. Les sauvegardes sans `manifest.json` sont incomplètes.
 Pour une sauvegarde manuelle, arrêter également le serveur et toute collecte avant
 `jw --instance alice backup /chemin/neuf`. L'API SQLite seule ne garantit pas une copie
 cohérente des fichiers si une application les modifie pendant l'opération.
+La sauvegarde refuse les liens symboliques et les documents référencés hors du dossier
+de données ou absents. Pour des fichiers historiques externes, suivez d’abord la
+[procédure de migration du stockage](../README.md#import-des-artefacts-et-résumés).
 
 Restaurer un snapshot restic dans un dossier temporaire, puis utiliser
 
