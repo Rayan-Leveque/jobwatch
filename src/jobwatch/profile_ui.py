@@ -8,7 +8,11 @@ import sqlite3
 from jobwatch.onboarding import CareerIntent
 from jobwatch.profile import MAX_PROFILE_FIELD_LENGTH, ProfileDetails, ProfilePreferences
 from jobwatch.seniority import SENIORITY_LEVELS
-from jobwatch.seniority_ui import seniority_level_labels_html, seniority_sync_script
+from jobwatch.seniority_ui import (
+    SENIORITY_RANGE_CSS,
+    seniority_level_labels_html,
+    seniority_sync_script,
+)
 from jobwatch.serve_templates import _csrf_head
 
 
@@ -41,6 +45,7 @@ def render_profile(
     excluded_count: int = 0,
     cv_documents: list[sqlite3.Row] | None = None,
     career_intents: list[CareerIntent] | None = None,
+    draft_enabled: bool = True,
 ) -> str:
     preferences = preferences or ProfilePreferences()
     intro = (
@@ -54,6 +59,7 @@ def render_profile(
     yes_checked = " checked" if preferences.cover_letters_enabled else ""
     no_checked = "" if preferences.cover_letters_enabled else " checked"
     disabled = "" if preferences.cover_letters_enabled else " disabled"
+    letters_hidden = "" if draft_enabled else " hidden"
     exclusion_label = (
         f"{excluded_count} offre{'s' if excluded_count != 1 else ''} explicitement hors plage "
         f"{'sont masquées' if excluded_count != 1 else 'est masquée'} actuellement."
@@ -81,10 +87,11 @@ def render_profile(
 {_csrf_head(csrf_token)}
 <style>
 :root {{ color-scheme:light; --bg:#f3f1eb; --surface:#fffefa; --surface2:#f8f6ef;
-  --fg:#191b1f; --muted:#686d76; --line:rgba(29,31,35,.15); --accent:#42752d;
+  --fg:#191b1f; --muted:#686d76; --line:rgba(29,31,35,.095); --accent:#42752d;
   --danger:#b63c54; font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif; }}
-* {{ box-sizing:border-box }} body {{ margin:0; min-height:100vh; color:var(--fg); background:
-  radial-gradient(circle at 18% 0,rgba(112,82,200,.13),transparent 34%),var(--bg); }}
+* {{ box-sizing:border-box }} html {{ background:var(--bg); }}
+body {{ margin:0; min-height:100vh; color:var(--fg); -webkit-font-smoothing:antialiased; background:
+  radial-gradient(240px 240px at 50% -10px,rgba(112,82,200,.13),transparent 67%),var(--bg); }}
 .shell {{ width:min(100%,1040px); margin:0 auto; padding:24px 16px 48px }}
 .top {{ display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:38px }}
 .brand {{ font-size:.78rem; font-weight:850; letter-spacing:.15em; text-transform:uppercase;
@@ -150,31 +157,8 @@ form {{ display:grid; gap:13px }} fieldset {{ min-width:0; margin:0; border:0; p
   border-radius:17px; background:var(--surface) }} .preferences h2 {{ margin:0; font-size:1.2rem }}
 .preferences p {{ margin:0; color:var(--muted); font-size:.82rem; line-height:1.5 }}
 .range-summary {{ margin-top:2px!important; color:var(--fg)!important; font-weight:790 }}
-.dual-range {{ position:relative; height:42px; margin:10px 10px 0 }}
-.range-rail,.range-selection {{ position:absolute; top:18px; right:13px; left:13px; height:6px;
-  border-radius:999px; background:var(--line) }}
-.range-selection {{ left:var(--range-left); right:auto; width:var(--range-width); background:var(--accent) }}
-.range-input {{ position:absolute; inset:0; width:100%; height:42px; margin:0; padding:0;
-  appearance:none; -webkit-appearance:none; background:transparent; pointer-events:none }}
-.range-input::-webkit-slider-runnable-track {{ height:6px; background:transparent }}
-.range-input::-moz-range-track {{ height:6px; background:transparent }}
-.range-input::-webkit-slider-thumb {{ width:26px; height:26px; margin-top:-10px; border:3px solid var(--surface);
-  border-radius:50%; appearance:none; -webkit-appearance:none; background:var(--accent);
-  box-shadow:0 0 0 1px var(--accent),0 3px 9px rgba(25,27,31,.22); pointer-events:auto; cursor:grab }}
-.range-input::-moz-range-thumb {{ width:20px; height:20px; border:3px solid var(--surface);
-  border-radius:50%; background:var(--accent); box-shadow:0 0 0 1px var(--accent),0 3px 9px rgba(25,27,31,.22);
-  pointer-events:auto; cursor:grab }}
+{SENIORITY_RANGE_CSS}
 .range-input:focus-visible {{ outline:none }} .range-input:focus-visible::-webkit-slider-thumb {{ outline:3px solid rgba(112,82,200,.28); outline-offset:3px }}
-.range-labels {{ position:relative; height:38px }}
-.range-labels span {{ position:absolute; top:8px; left:var(--level-position); width:max-content;
-  max-width:18%; color:var(--muted); font-size:.62rem; line-height:1.2; text-align:center;
-  overflow-wrap:anywhere; transform:translateX(-50%) }}
-.range-labels span::before {{ content:""; position:absolute; bottom:calc(100% + 5px); left:50%;
-  width:2px; height:6px; border-radius:2px; background:var(--line); transform:translateX(-50%) }}
-.range-labels span:first-child {{ text-align:left; transform:none }}
-.range-labels span:first-child::before {{ left:0; transform:none }}
-.range-labels span:last-child {{ text-align:right; transform:translateX(-100%) }}
-.range-labels span:last-child::before {{ right:0; left:auto; transform:none }}
 .radio-group {{ display:grid; gap:8px }} .radio-label {{ display:flex; align-items:flex-start; gap:10px;
   padding:12px; border:1px solid var(--line); border-radius:12px; background:var(--surface2) }}
 .radio-label input {{ margin-top:3px; accent-color:var(--accent) }} .radio-label span {{ line-height:1.4 }}
@@ -215,7 +199,7 @@ textarea:focus {{ outline:3px solid rgba(112,82,200,.24); border-color:#7052c8 }
     <nav class="settings-nav" role="tablist" aria-label="Catégories d’options">
       <button class="settings-tab" type="button" role="tab" aria-selected="true" aria-controls="panel-recherche" data-settings-tab="recherche">Recherche</button>
       <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-cv" data-settings-tab="cv">CV</button>
-      <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-lettres" data-settings-tab="lettres">Lettres</button>
+      <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-lettres" data-settings-tab="lettres"{letters_hidden}>Lettres</button>
       <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-securite" data-settings-tab="securite">Sécurité</button>
     </nav><div class="settings-content">
     <div class="settings-panel" id="panel-recherche" role="tabpanel" data-settings-panel="recherche">
@@ -287,7 +271,7 @@ textarea:focus {{ outline:3px solid rgba(112,82,200,.24); border-color:#7052c8 }
     envoyées au modèle de rédaction uniquement quand vous demandez une lettre.</p>
 </main><script>
 const letterFields=document.getElementById('letter-fields');
-const settingsTabs=[...document.querySelectorAll('[data-settings-tab]')];
+const settingsTabs=[...document.querySelectorAll('[data-settings-tab]')].filter(tab=>!tab.hidden);
 const showSettingsPanel=(name,updateHash=true)=>{{
   const selected=settingsTabs.some(tab=>tab.dataset.settingsTab===name) ? name : 'recherche';
   settingsTabs.forEach(tab=>tab.setAttribute('aria-selected',String(tab.dataset.settingsTab===selected)));

@@ -40,15 +40,6 @@ class StorageMigrationResult:
     missing: list[str] = field(default_factory=list)
 
 
-@dataclass
-class ExampleMigrationResult:
-    """Bilan de la copie des exemples LaTeX référencés par config.yaml."""
-
-    copied: int = 0
-    already_managed: int = 0
-    missing: list[str] = field(default_factory=list)
-
-
 def _sanitize_filename(filename: str) -> str:
     """Ne garde que le nom de base, sans composants de répertoire ni traversée."""
     name = PurePosixPath(filename.replace("\\", "/")).name.strip()
@@ -72,14 +63,6 @@ def ensure_private_directory(path: Path) -> None:
 def protect_private_file(path: Path) -> None:
     """Réserve un document candidat au compte système qui exécute Jobwatch."""
     path.chmod(0o600)
-
-
-def _is_managed(path: Path, db_path: Path) -> bool:
-    try:
-        path.resolve().relative_to(documents_dir(db_path).resolve())
-    except (OSError, ValueError):
-        return False
-    return True
 
 
 def _source_path(raw_path: str, source_root: Path | None) -> Path:
@@ -122,7 +105,7 @@ def migrate_external_documents(
             for row in rows:
                 raw_path = str(row["file_path"])
                 stored_path = Path(raw_path).expanduser()
-                if stored_path.is_absolute() and _is_managed(stored_path, db_path):
+                if stored_path.is_absolute() and _is_below(stored_path, documents_dir(db_path)):
                     result.already_managed += 1
                     continue
                 source = _source_path(raw_path, source_root)
@@ -208,7 +191,7 @@ def migrate_draft_examples(
     config_path: Path,
     db_path: Path,
     source_root: Path | None = None,
-) -> ExampleMigrationResult:
+) -> StorageMigrationResult:
     """Copie les exemples `.tex` dans l'instance et réécrit leurs scalaires YAML.
 
     Les positions fournies par PyYAML permettent de préserver intégralement les
@@ -216,7 +199,7 @@ def migrate_draft_examples(
     """
     text = config_path.read_text(encoding="utf-8")
     nodes = _example_scalar_nodes(text)
-    result = ExampleMigrationResult()
+    result = StorageMigrationResult()
     edits: list[tuple[int, int, str]] = []
     created: list[Path] = []
     target_dir = examples_dir(db_path)

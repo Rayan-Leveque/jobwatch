@@ -42,6 +42,29 @@ class OnboardingError(Exception):
 
 MAX_INTENTS = 4
 DASHBOARD_TRACKS_KEY = "dashboard_tracks"
+PO_MOA_PRESET = [
+    {"label": "Product Owner", "keywords": ["product owner", "proxy product owner"],
+     "exclude": []},
+    {"label": "MOA / Business Analyst",
+     "keywords": ["MOA", "AMOA", "business analyst", "analyste fonctionnel"], "exclude": []},
+]
+REMOTE_LOCATIONS = ["Télétravail complet", "full remote"]
+
+
+def profile_geography(conn: sqlite3.Connection, account_id: int) -> tuple[list[str], bool]:
+    row = conn.execute(
+        "SELECT locations_json, include_remote FROM candidate_profile WHERE account_id = ?",
+        (account_id,),
+    ).fetchone()
+    return (json.loads(row["locations_json"]), bool(row["include_remote"])) if row else ([], False)
+
+
+def validate_locations(value: object) -> list[str]:
+    if not isinstance(value, list) or len(value) > 5 or any(
+        not isinstance(item, str) or not item.strip() or len(item) > 100 for item in value
+    ):
+        raise OnboardingError("indiquez au maximum cinq villes ou régions de 100 caractères")
+    return list(dict.fromkeys(item.strip() for item in value))
 
 
 @dataclass(frozen=True)
@@ -107,14 +130,6 @@ def analyze_cvs(
     return parse_intents(response)
 
 
-def analyze_cv(
-    conn: sqlite3.Connection,
-    config: DraftConfig | None,
-    cv_library_id: int,
-) -> list[CareerIntent]:
-    return analyze_cvs(conn, config, [cv_library_id])
-
-
 def parse_intents(response: str) -> list[CareerIntent]:
     """Décode la réponse JSON de l'IA, puis valide les pistes proposées."""
     match = _JSON_FENCE_RE.search(response)
@@ -155,6 +170,8 @@ def validate_intents(rows: list[object], *, strict: bool = True) -> list[CareerI
             if strict:
                 raise OnboardingError("chaque catégorie doit avoir un nom")
             continue
+        if len(label) > 80:
+            raise OnboardingError("le nom d'une catégorie ne doit pas dépasser 80 caractères")
         if not isinstance(keywords, list) or not all(
             isinstance(keyword, str) and keyword.strip() for keyword in keywords
         ):
@@ -165,6 +182,8 @@ def validate_intents(rows: list[object], *, strict: bool = True) -> list[CareerI
             if strict:
                 raise OnboardingError("les termes à exclure doivent être du texte")
             continue
+        if any(len(term) > 120 for term in [*keywords, *exclude]):
+            raise OnboardingError("chaque mot-clé doit contenir au maximum 120 caractères")
         intents.append(
             CareerIntent(
                 label=label.strip(),
@@ -208,8 +227,11 @@ def _sync_intent_searches(
             (account_id,),
         )
     }
+    locations, include_remote = profile_geography(conn, account_id)
+    matching_locations = locations + (REMOTE_LOCATIONS if locations and include_remote else [])
     searches = [
-        SearchConfig(name=intent.label, include=intent.keywords, exclude=intent.exclude)
+        SearchConfig(name=intent.label, include=intent.keywords, exclude=intent.exclude,
+                     locations=matching_locations)
         for intent in intents
     ]
     resolved: list[int | None] = []
@@ -349,6 +371,8 @@ def complete_profile(
     seniority_min: int = DEFAULT_MIN_LEVEL,
     seniority_max: int = DEFAULT_MAX_LEVEL,
     cover_letters_enabled: bool = True,
+    locations: object = None,
+    include_remote: bool | None = None,
 ) -> list[CareerIntent]:
     if not isinstance(rows, list):
         raise OnboardingError("les pistes doivent être une liste")
@@ -364,6 +388,11 @@ def complete_profile(
         raise OnboardingError(str(exc)) from exc
     if not isinstance(cover_letters_enabled, bool):
         raise OnboardingError("le choix de génération de lettres est invalide")
+    previous_locations, previous_remote = profile_geography(conn, account_id)
+    locations = validate_locations(previous_locations if locations is None else locations)
+    include_remote = previous_remote if include_remote is None else include_remote
+    if not isinstance(include_remote, bool):
+        raise OnboardingError("le choix de télétravail est invalide")
     intents = validate_intents(rows)
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -410,6 +439,10 @@ def complete_profile(
             ),
         )
         conn.execute("DELETE FROM candidate_profile_document WHERE account_id = ?", (account_id,))
+        conn.execute(
+            "UPDATE candidate_profile SET locations_json = ?, include_remote = ? WHERE account_id = ?",
+            (json.dumps(locations, ensure_ascii=False), int(include_remote), account_id),
+        )
         conn.executemany(
             "INSERT INTO candidate_profile_document "
             "(account_id, document_library_id, position) VALUES (?, ?, ?)",

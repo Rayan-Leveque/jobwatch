@@ -16,7 +16,6 @@ l'iPhone comme au rechargement de la page.
 from __future__ import annotations
 
 import datetime
-import gzip
 import logging
 import os
 import re
@@ -32,9 +31,9 @@ import httpx
 
 from jobwatch.config import DRAFT_TRACKS, DraftConfig
 from jobwatch.db import connect
-from jobwatch.enrich import _extract_text, _fetch_and_extract
+from jobwatch.enrich import _fetch_and_extract_result, _store_content
 from jobwatch.library import documents_dir, ensure_private_directory, protect_private_file
-from jobwatch.llm_runner import LLMRunnerError, run_codex, run_opencode
+from jobwatch.llm_runner import LLMRunnerError, opencode_text, run_codex, run_opencode
 from jobwatch.profile import draft_profile_context
 
 log = logging.getLogger(__name__)
@@ -154,30 +153,15 @@ def _load_match(conn: sqlite3.Connection, match_id: int) -> sqlite3.Row:
 def _offer_markdown(conn: sqlite3.Connection, offer_id: int, url: str) -> str | None:
     """Renvoie le texte de l'offre, en le récupérant à la demande s'il manque en base."""
     row = conn.execute(
-        "SELECT markdown, status FROM offer_content WHERE offer_id = ?", (offer_id,)
+        "SELECT markdown FROM offer_content WHERE offer_id = ? AND status = 'ok'", (offer_id,)
     ).fetchone()
-    if row is not None and row["status"] == "ok" and row["markdown"]:
+    if row is not None and row["markdown"]:
         return str(row["markdown"])
     with httpx.Client(timeout=30.0) as client:
-        extracted, fetch_method, html = _fetch_and_extract(url, client)
-    if extracted is None:
-        return None
-    html_gz = gzip.compress(html.encode("utf-8")) if html else None
-    if row is None:
-        conn.execute(
-            "INSERT INTO offer_content (offer_id, markdown, fetch_method, extract_method, "
-            "html_gz, status, fetch_attempts) VALUES (?, ?, ?, ?, ?, 'ok', 1)",
-            (offer_id, extracted.markdown, fetch_method, extracted.method, html_gz),
-        )
-    else:
-        conn.execute(
-            "UPDATE offer_content SET markdown = ?, fetch_method = ?, extract_method = ?, "
-            "html_gz = ?, status = 'ok', fetch_attempts = fetch_attempts + 1, "
-            "failure_reason = NULL, fetched_at = datetime('now') WHERE offer_id = ?",
-            (extracted.markdown, fetch_method, extracted.method, html_gz, offer_id),
-        )
-    conn.commit()
-    return extracted.markdown
+        fetch = _fetch_and_extract_result(url, client)
+    _store_content(conn, offer_id, fetch.extraction, fetch.fetch_method, fetch.html,
+                   fetch.failure_reason)
+    return fetch.extraction.markdown if fetch.extraction is not None else None
 
 
 def _offer_fallback(conn: sqlite3.Connection, match: sqlite3.Row) -> str:
@@ -329,7 +313,7 @@ def _call_opencode(config: DraftConfig, prompt: str, attachment: str) -> str:
                               timeout=LLM_TIMEOUT_SECONDS, attachment_name="bundle.md")
     except LLMRunnerError as exc:
         raise DraftError(str(exc)) from exc
-    text = _extract_text(stdout)
+    text = opencode_text(stdout)
     if not text.strip():
         raise DraftError("réponse vide du modèle")
     return text

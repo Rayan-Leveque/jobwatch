@@ -82,6 +82,7 @@ class LinkedInCollector:
         self.queries = queries
         self.hours = hours
         self._client = client
+        self.failed_requests = 0
 
     def _request_client(self) -> httpx.Client:
         if self._client is None:
@@ -90,6 +91,7 @@ class LinkedInCollector:
 
     def fetch(self) -> list[RawOffer]:
         offers: list[RawOffer] = []
+        self.failed_requests = 0
         seconds = self.hours * 3600
         for query in self.queries:
             try:
@@ -100,9 +102,11 @@ class LinkedInCollector:
                         "location": query.location,
                         "f_TPR": f"r{seconds}",
                         "start": 0,
+                        **({"f_WT": "2"} if query.remote else {}),
                     },
                 )
             except httpx.HTTPError as exc:
+                self.failed_requests += 1
                 log.warning(
                     "linkedin request for %r in %r failed: %s",
                     query.keywords,
@@ -111,7 +115,12 @@ class LinkedInCollector:
                 )
                 continue
             if response.status_code != 200:
+                self.failed_requests += 1
                 log.warning("linkedin request returned status %s", response.status_code)
                 continue
-            offers.extend(_offers_from_html(response.text, query.location))
+            fetched = _offers_from_html(response.text, query.location)
+            if query.remote:
+                for offer in fetched:
+                    offer.location = f"{offer.location or query.location} · Télétravail complet"
+            offers.extend(fetched)
         return offers

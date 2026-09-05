@@ -25,7 +25,6 @@ suivantes.
 from __future__ import annotations
 
 import gzip
-import json
 import logging
 import random
 import re
@@ -43,7 +42,7 @@ from playwright.sync_api import sync_playwright
 from jobwatch import llm_runner
 from jobwatch.config import EnrichConfig
 from jobwatch.extraction import Extraction, extract
-from jobwatch.llm_runner import LLMRunnerError, run_codex, run_opencode, run_pi
+from jobwatch.llm_runner import LLMRunnerError, opencode_text, run_codex, run_opencode, run_pi
 from jobwatch.seniority import reclassify_all_profiles
 
 OPENCODE_TOOLS = llm_runner.OPENCODE_TOOLS
@@ -329,19 +328,6 @@ def _fetch_and_extract_result(url: str, client: httpx.Client) -> FetchOutcome:
     return FetchOutcome(None, None, None, "+".join(failure_reasons))
 
 
-def _fetch_and_extract(
-    url: str, client: httpx.Client
-) -> tuple[Extraction | None, str | None, str | None]:
-    """Renvoie (extraction, fetch_method, html), ou (None, None, None) si tout échoue.
-
-    Le seuil de repli vers Playwright reste mesuré sur la page entière : une
-    page trop courte est une page morte ou un mur de connexion, indépendamment
-    de la qualité de l'extraction qu'on en tirera.
-    """
-    outcome = _fetch_and_extract_result(url, client)
-    return outcome.extraction, outcome.fetch_method, outcome.html
-
-
 def _store_content(
     conn: sqlite3.Connection,
     offer_id: int,
@@ -387,23 +373,33 @@ SummaryParts = tuple[dict[str, str], dict[str, str], list[str]]
 
 
 def _summarize(config: EnrichConfig, markdown: str) -> SummaryParts | None:
-    if config.runner == "pi":
-        return _summarize_pi(config, markdown)
-    if config.runner == "codex":
-        return _summarize_codex(config, markdown)
-    return _summarize_opencode(config, markdown)
-
-
-def _summarize_pi(config: EnrichConfig, markdown: str) -> SummaryParts | None:
+    """Demande le résumé structuré au runner configuré, puis vérifie ses citations."""
     try:
-        text = run_pi(
-            binary=config.pi_bin,
-            model=config.model,
-            prompt=SUMMARY_PROMPT,
-            attachment=markdown,
-            timeout=CODEX_TIMEOUT_SECONDS,
-            thinking=config.variant,
-        )
+        if config.runner == "pi":
+            text = run_pi(
+                binary=config.pi_bin,
+                model=config.model,
+                prompt=SUMMARY_PROMPT,
+                attachment=markdown,
+                timeout=CODEX_TIMEOUT_SECONDS,
+                thinking=config.variant,
+            )
+        elif config.runner == "codex":
+            text = run_codex(
+                binary=config.codex_bin,
+                model=config.model,
+                prompt=CODEX_SUMMARY_PROMPT,
+                attachment=markdown,
+                timeout=CODEX_TIMEOUT_SECONDS,
+                variant=config.variant,
+            )
+        else:
+            text = opencode_text(run_opencode(
+                binary=config.opencode_bin, model=config.model,
+                prompt=SUMMARY_PROMPT, attachment=markdown,
+                timeout=120, variant=config.variant, pass_variant=True,
+                attachment_name="offer.md",
+            ))
     except LLMRunnerError as exc:
         log.warning("enrich: %s", exc)
         return None
@@ -411,54 +407,6 @@ def _summarize_pi(config: EnrichConfig, markdown: str) -> SummaryParts | None:
     if not fields and not bullets:
         return None
     return fields, _verified_quotes(quotes, markdown), bullets
-
-
-def _summarize_codex(config: EnrichConfig, markdown: str) -> SummaryParts | None:
-    try:
-        text = run_codex(binary=config.codex_bin, model=config.model,
-                         prompt=CODEX_SUMMARY_PROMPT, attachment=markdown,
-                         timeout=CODEX_TIMEOUT_SECONDS, variant=config.variant)
-    except LLMRunnerError as exc:
-        log.warning("enrich: %s", exc)
-        return None
-    fields, quotes, bullets = _parse_summary(text)
-    if not fields and not bullets:
-        return None
-    return fields, _verified_quotes(quotes, markdown), bullets
-
-
-def _summarize_opencode(config: EnrichConfig, markdown: str) -> SummaryParts | None:
-    try:
-        stdout = run_opencode(binary=config.opencode_bin, model=config.model,
-                              prompt=SUMMARY_PROMPT, attachment=markdown,
-                              timeout=120, variant=config.variant, pass_variant=True,
-                              attachment_name="offer.md")
-    except LLMRunnerError as exc:
-        log.warning("enrich: %s", exc)
-        return None
-    text = _extract_text(stdout)
-    fields, quotes, bullets = _parse_summary(text)
-    if not fields and not bullets:
-        return None
-    return fields, _verified_quotes(quotes, markdown), bullets
-
-
-def _extract_text(stdout: str) -> str:
-    chunks: list[str] = []
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(event, dict) or event.get("type") != "text":
-            continue
-        part = event.get("part")
-        if isinstance(part, dict) and isinstance(part.get("text"), str):
-            chunks.append(part["text"])
-    return "\n".join(chunks)
 
 
 def _parse_summary(text: str) -> tuple[dict[str, str], dict[str, str], list[str]]:

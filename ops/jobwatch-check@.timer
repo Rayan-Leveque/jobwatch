@@ -1,0 +1,9 @@
+[Unit]
+Description=Contrôle Jobwatch %i toutes les quinze minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

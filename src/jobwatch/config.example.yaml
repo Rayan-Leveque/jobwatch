@@ -50,12 +50,13 @@ sources: {}
 notify: {}
 
 # research : recherche web large facultative après les collecteurs directs.
-# Les offres directement collectées sont aussi transmises au modèle pour recevoir un fit.
+# Les critères de sélection des candidats au fit figurent dans unfitted_recent_offers (research.py).
 # Pour activer, remplacez « research: {} » par un bloc rempli :
-#   runner: codex                       # codex ou opencode
+#   runner: codex                       # codex, opencode ou openrouter
 #   codex_bin: codex
 #   opencode_bin: opencode
 #   model: gpt-5.6-luna
+#   api_key: sk-or-…                    # requis avec openrouter (appel HTTP direct)
 #   variant: max                        # optionnel
 #   recency_days: 7                     # optionnel, défaut 7
 #   max_results: 50                     # optionnel, défaut 50

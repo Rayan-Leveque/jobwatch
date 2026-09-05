@@ -54,20 +54,25 @@ def _seniority_filter(account_id: int | None) -> tuple[str, tuple[int, ...]]:
     )
 
 
+_MATCH_SELECT_SQL = (
+    "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
+    "       s.name AS search_name, "
+    "       c.name AS company, o.title AS title, o.location AS location, "
+    "       o.contract AS contract, o.platform AS platform, o.url AS url, "
+    "       o.collected_at AS collected_at, o.deadline AS deadline "
+    "FROM match m "
+    "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
+    "JOIN offer o ON o.id = m.offer_id "
+    "LEFT JOIN company c ON c.id = o.company_id "
+)
+
+
 def _matches(
     conn: sqlite3.Connection, state: str, track: str, account_id: int | None = None
 ) -> list[sqlite3.Row]:
     seniority_sql, seniority_params = _seniority_filter(account_id)
     return conn.execute(
-        "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
-        "       s.name AS search_name, "
-        "       c.name AS company, o.title AS title, o.location AS location, "
-        "       o.contract AS contract, o.platform AS platform, o.url AS url, "
-        "       o.collected_at AS collected_at, o.deadline AS deadline "
-        "FROM match m "
-        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
-        "JOIN offer o ON o.id = m.offer_id "
-        "LEFT JOIN company c ON c.id = o.company_id "
+        f"{_MATCH_SELECT_SQL}"
         "WHERE m.state = ? AND (m.fit IS NULL OR m.fit != 'high') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
         f"{seniority_sql}"
@@ -84,15 +89,7 @@ def _priority_matches(
 ) -> list[sqlite3.Row]:
     seniority_sql, seniority_params = _seniority_filter(account_id)
     return conn.execute(
-        "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
-        "       s.name AS search_name, "
-        "       c.name AS company, o.title AS title, o.location AS location, "
-        "       o.contract AS contract, o.platform AS platform, o.url AS url, "
-        "       o.collected_at AS collected_at, o.deadline AS deadline "
-        "FROM match m "
-        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
-        "JOIN offer o ON o.id = m.offer_id "
-        "LEFT JOIN company c ON c.id = o.company_id "
+        f"{_MATCH_SELECT_SQL}"
         "WHERE m.fit = 'high' AND m.state IN ('new', 'seen') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
         f"{seniority_sql}"
@@ -104,15 +101,7 @@ def _priority_matches(
 
 def _later_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
-        "       s.name AS search_name, "
-        "       c.name AS company, o.title AS title, o.location AS location, "
-        "       o.contract AS contract, o.platform AS platform, o.url AS url, "
-        "       o.collected_at AS collected_at, o.deadline AS deadline "
-        "FROM match m "
-        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
-        "JOIN offer o ON o.id = m.offer_id "
-        "LEFT JOIN company c ON c.id = o.company_id "
+        f"{_MATCH_SELECT_SQL}"
         "WHERE m.state = 'later' AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
         f"{_track_filter(track)}"
@@ -126,15 +115,7 @@ def _later_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
 def _discarded_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
     """Matchs écartés depuis moins de 30 jours ; filtre d'affichage pur, jamais de suppression."""
     return conn.execute(
-        "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
-        "       s.name AS search_name, "
-        "       c.name AS company, o.title AS title, o.location AS location, "
-        "       o.contract AS contract, o.platform AS platform, o.url AS url, "
-        "       o.collected_at AS collected_at, o.deadline AS deadline "
-        "FROM match m "
-        "JOIN search s ON s.id = m.search_id AND s.archived_at IS NULL "
-        "JOIN offer o ON o.id = m.offer_id "
-        "LEFT JOIN company c ON c.id = o.company_id "
+        f"{_MATCH_SELECT_SQL}"
         "WHERE m.state = 'discarded' AND m.discarded_at > datetime('now', '-30 days') "
         f"{_track_filter(track)}"
         "ORDER BY m.discarded_at DESC, m.id DESC",

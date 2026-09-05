@@ -38,6 +38,22 @@ def opencode_sandbox(tmp_dir: Path, allow: tuple[str, ...] = ()) -> dict[str, st
     return {**os.environ, "OPENCODE_PERMISSION": json.dumps(permission)}
 
 
+def opencode_text(stdout: str) -> str:
+    """Concatène les événements "text" du flux JSON qu'émet `opencode run --format json`."""
+    chunks: list[str] = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "text":
+            continue
+        part = event.get("part")
+        if isinstance(part, dict) and isinstance(part.get("text"), str):
+            chunks.append(part["text"])
+    return "\n".join(chunks)
+
+
 def run_codex(
     *,
     binary: str,
@@ -102,7 +118,8 @@ def run_pi(
     Le texte tiers passe par un fichier temporaire référencé avec ``@`` plutôt
     que dans un argument : une annonce volumineuse ne rencontre pas la limite
     du noyau sur la taille d'un argument et son contenu n'est jamais interprété
-    par le shell.
+    par le shell. Extensions, skills et fichiers de contexte restent hors de
+    l'appel : seul le modèle parle, sans bruit de configuration locale.
     """
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -112,6 +129,9 @@ def run_pi(
                 binary,
                 "--print",
                 "--no-session",
+                "--no-extensions",
+                "--no-skills",
+                "--no-context-files",
                 "--no-tools",
                 "--model",
                 model,

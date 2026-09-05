@@ -648,14 +648,14 @@ def test_enrich_retries_transient_pi_summary_failure_without_refetch(
         fetch_calls += 1
         return httpx.Response(200, text=LONG_HTML)
 
-    def summarize_pi(config: EnrichConfig, markdown: str):
+    def summarize(config: EnrichConfig, markdown: str):
         nonlocal summary_calls
         summary_calls += 1
         if summary_calls == 1:
             return None
         return {"experience": "3 ans"}, {}, ["Résumé Pi récupéré"]
 
-    monkeypatch.setattr("jobwatch.enrich._summarize_pi", summarize_pi)
+    monkeypatch.setattr("jobwatch.enrich._summarize", summarize)
     client = _http_client(handler)
     first = enrich(conn, _pi_config(), client=client, sleep=_no_sleep)
     limited = conn.execute(
@@ -701,7 +701,7 @@ def test_enrich_bounds_summary_retries_and_respects_delay(
         nonlocal calls
         calls += 1
 
-    monkeypatch.setattr("jobwatch.enrich._summarize_pi", failed_summary)
+    monkeypatch.setattr("jobwatch.enrich._summarize", failed_summary)
     first = enrich(conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep)
     immediate = enrich(
         conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep
@@ -748,7 +748,7 @@ def test_enrich_summarizes_stored_content_without_fetch(
         raise AssertionError("stored usable content must not be fetched again")
 
     monkeypatch.setattr(
-        "jobwatch.enrich._summarize_pi",
+        "jobwatch.enrich._summarize",
         lambda config, markdown: ({"remote": "hybride"}, {}, ["Résumé depuis la base"]),
     )
     result = enrich(conn, _pi_config(), client=_http_client(handler), sleep=_no_sleep)
@@ -824,7 +824,7 @@ def test_metadata_fallback_upgrades_when_real_content_arrives(
     )
     conn.commit()
     monkeypatch.setattr(
-        "jobwatch.enrich._summarize_pi",
+        "jobwatch.enrich._summarize",
         lambda config, markdown: ({"stack": "Python"}, {}, ["Mission issue du contenu réel"]),
     )
 
@@ -881,7 +881,7 @@ def test_metadata_fallback_keeps_bullets_when_upgrade_yields_fields_only(
     )
     conn.commit()
     monkeypatch.setattr(
-        "jobwatch.enrich._summarize_pi",
+        "jobwatch.enrich._summarize",
         lambda config, markdown: ({"stack": "Python"}, {}, []),
     )
 

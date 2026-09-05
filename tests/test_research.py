@@ -4,6 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import httpx
 import pytest
 
 from jobwatch.collectors.base import RawOffer, store_offers
@@ -15,6 +16,7 @@ from jobwatch.research import (
     _parse_result,
     apply_research_fits,
     research_offers,
+    unfitted_recent_offers,
 )
 
 
@@ -61,12 +63,38 @@ research:
     )
 
 
+def test_config_parses_openrouter_research(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"""db: {tmp_path / 'db.sqlite'}
+searches:
+  - name: ai
+    include: [AI]
+sources: {{}}
+notify: {{}}
+research:
+  runner: openrouter
+  model: deepseek/deepseek-v4-flash
+  api_key: sk-or-test
+  recency_days: 3
+"""
+    )
+    config = load_config(path)
+    assert config.research == ResearchConfig(
+        model="deepseek/deepseek-v4-flash",
+        runner="openrouter",
+        api_key="sk-or-test",
+        recency_days=3,
+    )
+
+
 @pytest.mark.parametrize(
     "research_yaml,message",
     [
         ("research: enabled", "research.*mapping"),
         ("research:\n  runner: codex", "research.model"),
-        ("research:\n  runner: pi\n  model: test", "research.runner"),
+        ("research:\n  runner: openrouter\n  model: m", "research.api_key"),
+        ("research:\n  runner: eks\n  model: m", "research.runner"),
         ("research:\n  model: test\n  recency_days: 0", "research.recency_days"),
         ("research:\n  model: test\n  instructions: []", "research.instructions"),
     ],
@@ -183,6 +211,78 @@ def test_opencode_research_denies_local_tools_and_allows_web(monkeypatch) -> Non
     )
 
     assert result == ResearchResult([], {})
+
+
+def test_openrouter_research_sends_web_plugin_and_direct_key(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    row = {
+        "title": "AI Engineer",
+        "url": "https://jobs.example/1",
+        "company": "Acme",
+        "platform": "Web",
+        "location": "Paris",
+        "contract": None,
+        "published_at": None,
+        "fit": "high",
+    }
+
+    def fake_post(url, **kwargs):
+        captured.update(url=url, **kwargs)
+        content = json.dumps({"offers": [row]})
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    monkeypatch.setattr("jobwatch.research.httpx.post", fake_post)
+
+    result = research_offers(
+        _config(runner="openrouter", model="deepseek/deepseek-v4-flash",
+                api_key="sk-or-test"),
+        _searches(),
+        [],
+    )
+
+    assert result.offers[0].url == "https://jobs.example/1"
+    assert result.fits_by_url == {"https://jobs.example/1": "high"}
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer sk-or-test"
+    assert captured["json"]["model"] == "deepseek/deepseek-v4-flash"
+    assert captured["json"]["plugins"] == [{"id": "web", "max_results": 8}]
+    assert captured["json"]["reasoning"] == {"enabled": False}
+    assert captured["timeout"] == 1800
+    assert "<candidates>" in captured["json"]["messages"][0]["content"]
+
+
+def test_parse_result_tolerates_json_fence() -> None:
+    wrapped = "Voici les offres :\n```json\n" + json.dumps({"offers": []}) + "\n```"
+    assert _parse_result(wrapped, 50) == ResearchResult([], {})
+
+
+def test_unfitted_recent_offers_lists_recent_matches_without_fit() -> None:
+    conn = connect(":memory:")
+    init_db(conn)
+    sync_searches(conn, _searches())
+    offers = [
+        RawOffer("AI One", "https://jobs.example/1", "Acme", "Test", "Paris"),
+        RawOffer("AI Two", "https://jobs.example/2", "Beta", "Test", "Paris"),
+        RawOffer("AI Old", "https://jobs.example/3", "Old", "Test", "Paris"),
+    ]
+    store_offers(conn, "test", "test", offers)
+    conn.execute(
+        "UPDATE offer SET collected_at = datetime('now', '-5 days') WHERE url = ?",
+        (offers[2].url,),
+    )
+    run_matching(conn)
+    conn.execute(
+        "UPDATE match SET fit = 'low' WHERE offer_id = (SELECT id FROM offer WHERE url = ?)",
+        (offers[1].url,),
+    )
+    conn.commit()
+
+    assert [offer.url for offer in unfitted_recent_offers(conn)] == [offers[0].url]
+    conn.close()
 
 
 def test_research_failure_is_non_blocking(monkeypatch) -> None:

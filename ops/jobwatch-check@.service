@@ -1,0 +1,14 @@
+[Unit]
+Description=Contrôle Jobwatch %i
+
+[Service]
+Type=oneshot
+User=jobwatch-%i
+Group=jobwatch-%i
+Environment=XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib
+ExecStart=/opt/jobwatch/current/ops/check-instance.sh %i
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/var/lib/jobwatch/instances/%i

@@ -375,3 +375,42 @@ def test_store_offers_skips_network_duplicates_within_one_batch(
     offers = [_offer("Engineer", "https://a/1", "Acme"), _offer("Engineer", "https://a/2", "Acme")]
     new_ids = store_offers(conn, "s", "test", offers)
     assert len(new_ids) == 1
+
+
+@pytest.mark.parametrize("same_batch", [True, False])
+@pytest.mark.parametrize("same_url", [True, False])
+@pytest.mark.parametrize("remote_first", [True, False])
+def test_store_offers_preserves_remote_matching(
+    conn: sqlite3.Connection, same_batch: bool, same_url: bool, remote_first: bool,
+) -> None:
+    from jobwatch.config import SearchConfig
+    from jobwatch.matching import run_matching, sync_searches
+
+    local = _offer("Product owner", "https://a/1", "Acme", location="Paris")
+    remote = _offer(
+        "Product owner", "https://a/1" if same_url else "https://a/2", "Acme",
+        location="Paris · Télétravail complet",
+    )
+    offers = [remote, local] if remote_first else [local, remote]
+    sync_searches(conn, [
+        SearchConfig(name="Lyon", include=["Product owner"],
+                     locations=["Lyon", "Télétravail complet"]),
+    ])
+    if same_batch:
+        ids = store_offers(conn, "s", "test", offers)
+    else:
+        ids = store_offers(conn, "s", "test", offers[:1])
+        if not remote_first:
+            assert run_matching(conn) == []
+        assert store_offers(conn, "s", "test", offers[1:]) == []
+    assert len(ids) == 1
+    assert len(run_matching(conn)) == 1
+    conn.execute("UPDATE match SET state = 'later'")
+    conn.commit()
+    assert store_offers(conn, "s", "test", [local, remote]) == []
+    assert run_matching(conn) == []
+    rows = conn.execute("SELECT id, location FROM offer").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == ids[0]
+    assert rows[0]["location"] == "Paris · Télétravail complet"
+    assert conn.execute("SELECT state FROM match").fetchone()["state"] == "later"

@@ -51,8 +51,8 @@ def store_offers(
 ) -> list[int]:
     """Upsert des sociétés et offres, en renvoyant les ids des offres nouvellement insérées.
 
-    Une offre est ignorée quand son url existe déjà, ou quand une offre avec le
-    même (company, lower(title)) existe déjà.
+    Une offre est dédupliquée par URL ou (company, lower(title)), en conservant
+    toute information de télétravail complet reçue.
     """
     conn.execute(
         "INSERT OR IGNORE INTO source (type, name) VALUES (?, ?)", (source_type, source_name)
@@ -60,21 +60,32 @@ def store_offers(
     source_row = conn.execute("SELECT id FROM source WHERE name = ?", (source_name,)).fetchone()
     source_id = int(source_row["id"])
 
-    existing_urls = {str(r["url"]) for r in conn.execute("SELECT url FROM offer").fetchall()}
+    existing = conn.execute(
+        "SELECT o.id, o.url, o.location, c.name AS company, o.title "
+        "FROM offer o JOIN company c ON c.id = o.company_id"
+    ).fetchall()
+    existing_urls = {str(row["url"]): int(row["id"]) for row in existing}
     existing_titles = {
-        (str(r["company"]), str(r["title"]).lower())
-        for r in conn.execute(
-            "SELECT c.name AS company, o.title AS title "
-            "FROM offer o JOIN company c ON c.id = o.company_id"
-        ).fetchall()
+        (str(row["company"]), str(row["title"]).lower()): int(row["id"])
+        for row in existing
     }
+    locations = {int(row["id"]): row["location"] for row in existing}
 
     new_ids: list[int] = []
     for offer in offers:
-        if offer.url in existing_urls:
-            continue
         key = (offer.company, offer.title.lower())
-        if key in existing_titles:
+        existing_id = existing_urls.get(offer.url) or existing_titles.get(key)
+        if existing_id is not None:
+            marker = "Télétravail complet"
+            location = locations[existing_id] or ""
+            if marker.casefold() in (offer.location or "").casefold() and (
+                marker.casefold() not in location.casefold()
+            ):
+                location = f"{location} · {marker}" if location else offer.location
+                conn.execute(
+                    "UPDATE offer SET location = ? WHERE id = ?", (location, existing_id)
+                )
+                locations[existing_id] = location
             continue
         company_id = _get_company_id(conn, offer.company)
         cur = conn.execute(
@@ -94,9 +105,11 @@ def store_offers(
         )
         if cur.rowcount == 0:
             continue
-        new_ids.append(int(cur.lastrowid))
-        existing_urls.add(offer.url)
-        existing_titles.add(key)
+        offer_id = int(cur.lastrowid)
+        new_ids.append(offer_id)
+        existing_urls[offer.url] = offer_id
+        existing_titles[key] = offer_id
+        locations[offer_id] = offer.location
 
     conn.execute("UPDATE source SET last_run_at = datetime('now') WHERE id = ?", (source_id,))
     conn.commit()

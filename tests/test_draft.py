@@ -32,6 +32,7 @@ from jobwatch.draft import (
     splice_body,
     unescape_latex_body,
 )
+from jobwatch.enrich import FetchOutcome
 from jobwatch.serve import make_handler, render_page, render_swipe_page
 
 HAS_TEX = shutil.which("lualatex") is not None and shutil.which("pdftoppm") is not None
@@ -441,7 +442,8 @@ def test_run_job_without_offer_content_falls_back_with_warning(
     job_id = _seed_job(conn, match_id, cv_id)
     conn.close()
 
-    monkeypatch.setattr(draft, "_fetch_and_extract", lambda url, client: (None, None, None))
+    monkeypatch.setattr(draft, "_fetch_and_extract_result",
+                        lambda url, client: FetchOutcome(None, None, None))
     monkeypatch.setattr(draft, "_call_llm", lambda config, prompt, bundle: MINIMAL_TEX)
     run_job(db_path, _config(tmp_path), job_id)
 
