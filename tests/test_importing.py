@@ -345,6 +345,21 @@ def test_parse_daily_digest_v06_bare_url(tmp_path: Path) -> None:
     assert offers[2].fit == "medium"
 
 
+def test_parse_daily_digest_normalizes_llm_headers(tmp_path: Path) -> None:
+    text = """## Fit high
+
+| fit | Poste / rôle | entreprise | lieu | source | url |
+|---|---|---|---|---|---|
+| high | AI Engineer | Acme | Paris | LinkedIn | https://www.linkedin.com/jobs/view/123 |
+"""
+    offers = parse_daily_digest(_digest_file(tmp_path, text))
+    assert len(offers) == 1
+    assert offers[0].title == "AI Engineer"
+    assert offers[0].company == "Acme"
+    assert offers[0].location == "Paris"
+    assert offers[0].url == "https://www.linkedin.com/jobs/view/123"
+
+
 def test_parse_daily_digest_fit_from_section_fallback(tmp_path: Path) -> None:
     text = """## Fit low
 

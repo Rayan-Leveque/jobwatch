@@ -349,7 +349,7 @@ def _parse_digest_text(text: str, name: str) -> list[DailyOffer]:
         if cells and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
             continue
         if headers is None:
-            headers = cells
+            headers = [_canonical_digest_header(cell) for cell in cells]
             continue
         row = _repair_row(headers, cells)
         offer = _offer_from_digest_row(row, current_fit)
@@ -358,6 +358,26 @@ def _parse_digest_text(text: str, name: str) -> list[DailyOffer]:
     if not offers:
         raise ImportError(f"aucune offre valide dans le digest {name}")
     return offers
+
+
+def _canonical_digest_header(header: str) -> str:
+    """Normalise les en-têtes de tableaux Markdown générés par le LLM."""
+    normalized = re.sub(r"\s+", " ", header.strip()).casefold()
+    if normalized == "fit":
+        return "Fit"
+    if normalized.startswith("poste"):
+        return "Poste"
+    if normalized == "entreprise":
+        return "Entreprise"
+    if normalized == "employeur":
+        return "Employeur"
+    if normalized == "lieu":
+        return "Lieu"
+    if normalized == "source":
+        return "Source"
+    if normalized == "url":
+        return "URL"
+    return header.strip()
 
 
 def _repair_row(headers: list[str], cells: list[str]) -> dict[str, str]:
