@@ -343,7 +343,9 @@ votre réseau. Une installation historique sans compte conserve son comportement
 Pour protéger une instance nommée, créez son invitation avec `account invite` : toutes les routes,
 y compris les documents et les actions qui mutent SQLite, exigent alors une session, et les POST
 exigent aussi le jeton CSRF de cette session. Les mots de passe font au moins 8 caractères, les
-sessions expirent après 24 heures et cinq échecs de connexion bloquent la paire email/adresse
+sessions expirent après 24 heures. Cocher « Se souvenir de moi pendant 30 jours » conserve la
+connexion dans le navigateur pendant 30 jours, sans prolongation automatique. La déconnexion
+invalide immédiatement la session. Cinq échecs de connexion bloquent la paire email/adresse
 pendant 15 minutes. Préférez HTTPS avec le cookie sécurisé par défaut. `--no-secure-cookie` existe
 uniquement pour un accès HTTP local ou sur un réseau privé chiffré comme Tailscale.
 
