@@ -178,7 +178,7 @@ def init(config_path: Path | None, db_path: Path | None, beta: bool = False) -> 
 @cli.command()
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def run(config_path: Path | None) -> None:
-    """Collecte les offres, les met en correspondance avec les recherches et envoie un digest."""
+    """Collecte, matche, enrichit si configuré, puis envoie le digest."""
     config = _require_config(config_path)
 
     conn = _open_db(config)
@@ -207,6 +207,9 @@ def run(config_path: Path | None) -> None:
             collected += len(new_ids)
             new_matches += run_matching(conn)
         fitted = apply_research_fits(conn, research_fits)
+        enrichment = enrich(conn, config.enrich) if config.enrich is not None else None
+        if enrichment is not None:
+            click.echo(enrichment.summary_line())
         channels = send_digest(conn, config)
         if not collection_failed:
             conn.execute(
@@ -226,6 +229,10 @@ def run(config_path: Path | None) -> None:
     )
     if collection_failed:
         _fatal("collecte incomplète, consultez les journaux et réessayez")
+    if research_failed:
+        _fatal("recherche large en échec, consultez les journaux et réessayez")
+    if enrichment is not None and enrichment.summaries_failed:
+        _fatal("génération des résumés incomplète, consultez les journaux et réessayez")
 
 
 @cli.command("enrich")
@@ -247,6 +254,8 @@ def enrich_cmd(config_path: Path | None, recover_wttj: bool) -> None:
     finally:
         conn.close()
     click.echo(result.summary_line())
+    if result.summaries_failed:
+        _fatal("génération des résumés incomplète, consultez les journaux et réessayez")
 
 
 @cli.command("ingest-daily")

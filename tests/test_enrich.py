@@ -611,6 +611,34 @@ def test_enrich_marks_terminal_http_failures_without_retrying(
     assert tuple(failed) == ("failed", 1, f"http_{status_code}")
 
 
+def test_enrich_never_fetches_non_http_legacy_urls(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """Les URL importées sans schéma web (jobwatch:<hash>) sont des échecs définitifs."""
+    offer_id = _seed_offer(conn, url="jobwatch:108868fdd9901960fe58ea084b66152ec3d486aa")
+
+    def unexpected_fetch(*_args):
+        raise AssertionError("une URL non HTTP ne doit déclencher aucun fetch")
+
+    monkeypatch.setattr("jobwatch.enrich._fetch_http", unexpected_fetch)
+    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", unexpected_fetch)
+
+    first = enrich(conn, _config(), client=_http_client(lambda request: None), sleep=_no_sleep)
+    second = enrich(conn, _config(), client=_http_client(lambda request: None), sleep=_no_sleep)
+
+    assert first.fetched_failed == 1
+    assert second.fetched_failed == 0
+    failed = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(failed) == ("failed", 1, "unsupported_scheme")
+    summary = conn.execute(
+        "SELECT status FROM offer_summary WHERE offer_id = ?", (offer_id,)
+    ).fetchone()
+    assert summary["status"] == "limited_no_content"
+
+
 def test_enrich_retries_unclassified_legacy_failure_immediately(
     conn: sqlite3.Connection, monkeypatch
 ) -> None:
@@ -706,7 +734,9 @@ def test_enrich_bounds_summary_retries_and_respects_delay(
     immediate = enrich(
         conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep
     )
-    assert first.summaries_written == 1
+    assert first.summaries_failed == 1
+    assert first.limited_written == 1
+    assert first.summaries_written == 0
     assert immediate.summaries_written == 0
     assert calls == 1
 
@@ -815,7 +845,7 @@ def test_metadata_fallback_upgrades_when_real_content_arrives(
     )
     conn.commit()
     first = enrich(conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep)
-    assert first.summaries_written == 1
+    assert first.limited_written == 1
 
     conn.execute(
         "UPDATE offer_content SET status = 'ok', markdown = ?, fetch_method = 'http', "
@@ -863,7 +893,7 @@ def test_metadata_fallback_keeps_bullets_when_upgrade_yields_fields_only(
     )
     conn.commit()
     first = enrich(conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep)
-    assert first.summaries_written == 1
+    assert first.limited_written == 1
     original_bullets = [
         row["text"]
         for row in conn.execute(

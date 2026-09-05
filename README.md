@@ -25,7 +25,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 .venv/bin/jw init                # crée config.yaml + une base de données vide
 # éditez config.yaml : décommentez et remplissez les blocs sources et notify, puis :
-.venv/bin/jw run                # collecter, matcher, notifier
+.venv/bin/jw run                # collecter, matcher, enrichir (bloc enrich rempli), notifier
 .venv/bin/jw enrich             # récupère et résume les offres collectées (bloc enrich requis)
 .venv/bin/jw serve              # tableau de bord web local : http://127.0.0.1:8000
 .venv/bin/jw list               # affiche les nouveaux matchs
@@ -172,10 +172,12 @@ les commandes opérateur. Ces fichiers nécessitent une installation explicite.
 
 ### Cron
 
-Exécutez `jw run` chaque jour via cron ; enchaînez `jw enrich` si le bloc `enrich` est configuré :
+Exécutez `jw run` chaque jour via cron ; il enrichit les nouvelles offres avant la
+notification quand le bloc `enrich` est configuré. `jw enrich` reste utile à la main pour
+rattraper les échecs temporaires (WTTJ, quota LLM) :
 
 ```
-0 7 * * * cd ~/jobwatch && .venv/bin/jw run && .venv/bin/jw enrich
+0 7 * * * cd ~/jobwatch && .venv/bin/jw run && .venv/bin/jw enrich --recover-wttj
 ```
 
 ### Import des artefacts et résumés
