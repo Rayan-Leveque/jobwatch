@@ -69,12 +69,14 @@ class SmartRecruitersSource:
 class LinkedInQuery:
     keywords: str
     location: str
+    remote: bool = False
 
 
 @dataclass
 class LinkedInSource:
     queries: list[LinkedInQuery]
     hours: int = 48
+    from_profile: bool = False
 
 
 @dataclass
@@ -140,6 +142,7 @@ class NotifyConfig:
 
 STANDARD_LLM_RUNNERS = ("opencode", "codex")
 ENRICH_RUNNERS = (*STANDARD_LLM_RUNNERS, "pi")
+RESEARCH_RUNNERS = (*STANDARD_LLM_RUNNERS, "openrouter")
 
 
 @dataclass
@@ -163,6 +166,9 @@ class ResearchConfig:
     runner: str = "codex"
     opencode_bin: str = "opencode"
     codex_bin: str = "codex"
+    # Requise avec le runner openrouter : appel HTTP direct, la recherche web
+    # passant par le plugin `web` d'OpenRouter.
+    api_key: str | None = None
     variant: str | None = None
     instructions: str = ""
     recency_days: int = 7
@@ -278,8 +284,11 @@ def _positive_hours(value: object, field_name: str) -> int:
 def _linkedin_from_dict(raw: object) -> LinkedInSource:
     if not isinstance(raw, dict):
         raise ConfigError("sources.linkedin doit être un mapping")
-    queries_raw = raw.get("queries")
-    if not isinstance(queries_raw, list) or not queries_raw:
+    from_profile = raw.get("from_profile", False)
+    if not isinstance(from_profile, bool):
+        raise ConfigError("sources.linkedin.from_profile doit être un booléen")
+    queries_raw = raw.get("queries", [])
+    if not isinstance(queries_raw, list) or (not queries_raw and not from_profile):
         raise ConfigError("sources.linkedin.queries doit être une liste non vide")
     queries: list[LinkedInQuery] = []
     for index, query in enumerate(queries_raw):
@@ -295,6 +304,7 @@ def _linkedin_from_dict(raw: object) -> LinkedInSource:
     return LinkedInSource(
         queries=queries,
         hours=_positive_hours(raw.get("hours", 48), "sources.linkedin.hours"),
+        from_profile=from_profile,
     )
 
 
@@ -414,11 +424,16 @@ def _research_from_dict(raw: object) -> ResearchConfig | None:
     if not isinstance(model, str) or not model:
         raise ConfigError("research.model est requis quand research est présent")
     runner = raw.get("runner", "codex")
-    if runner not in STANDARD_LLM_RUNNERS:
+    if runner not in RESEARCH_RUNNERS:
         raise ConfigError(
             "research.runner doit être l'un de "
-            f"{list(STANDARD_LLM_RUNNERS)}, reçu : {runner!r}"
+            f"{list(RESEARCH_RUNNERS)}, reçu : {runner!r}"
         )
+    api_key = raw.get("api_key")
+    if api_key is not None and (not isinstance(api_key, str) or not api_key):
+        raise ConfigError("research.api_key doit être une chaîne non vide")
+    if runner == "openrouter" and not api_key:
+        raise ConfigError("research.api_key est requise avec le runner openrouter")
     opencode_bin = raw.get("opencode_bin", "opencode")
     if not isinstance(opencode_bin, str) or not opencode_bin:
         raise ConfigError("research.opencode_bin doit être une chaîne non vide")
@@ -438,6 +453,7 @@ def _research_from_dict(raw: object) -> ResearchConfig | None:
         runner=runner,
         opencode_bin=opencode_bin,
         codex_bin=codex_bin,
+        api_key=api_key,
         variant=variant,
         instructions=instructions.strip(),
         recency_days=recency_days,
@@ -555,14 +571,15 @@ def load_config(path: Path) -> Config:
     searches_raw = raw.get("searches")
     if not isinstance(searches_raw, list):
         raise ConfigError("'searches' doit être une liste")
-    if not searches_raw:
-        raise ConfigError("'searches' ne doit pas être vide")
+    sources = _sources_from_dict(raw.get("sources"))
+    if not searches_raw and (sources.linkedin is None or not sources.linkedin.from_profile):
+        raise ConfigError("'searches' vide nécessite sources.linkedin.from_profile")
     searches = [_search_from_dict(s) for s in searches_raw]
 
     return Config(
         db=db_path,
         searches=searches,
-        sources=_sources_from_dict(raw.get("sources")),
+        sources=sources,
         notify=_notify_from_dict(raw.get("notify")),
         research=_research_from_dict(raw.get("research")),
         enrich=_enrich_from_dict(raw.get("enrich")),

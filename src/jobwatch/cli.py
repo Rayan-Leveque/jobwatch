@@ -7,12 +7,14 @@ import sqlite3
 from pathlib import Path
 
 import click
+import yaml
 
 from jobwatch import __version__, importing
 from jobwatch.applications import ApplicationError, record_application
 from jobwatch.auth import AuthError, auth_required, create_invite
+from jobwatch.backup import BackupError, create_backup, restore_backup
 from jobwatch.collectors import build_collectors
-from jobwatch.collectors.base import RawOffer, store_offers
+from jobwatch.collectors.base import store_offers
 from jobwatch.config import Config, ConfigError, example_config_text, load_config
 from jobwatch.db import connect, init_db
 from jobwatch.digest import send_digest
@@ -21,7 +23,8 @@ from jobwatch.library import LibraryError, migrate_draft_examples, migrate_exter
 from jobwatch.matching import active_search_configs, run_matching, sync_searches
 from jobwatch.onboarding import sync_profile_searches
 from jobwatch.paths import INSTANCE_ENV, instance_paths, validate_instance_name
-from jobwatch.research import apply_research_fits, research_offers
+from jobwatch.profile_sources import sources_for_profile
+from jobwatch.research import apply_research_fits, research_offers, unfitted_recent_offers
 from jobwatch.serve import ServeError, serve_http
 
 logger = logging.getLogger(__name__)
@@ -115,6 +118,7 @@ def cli(instance: str | None, verbose: bool) -> None:
 
 @cli.command()
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+@click.option("--beta", is_flag=True, help="veille LinkedIn personnalisée, sans IA, instance requise")
 @click.option(
     "--db",
     "db_path",
@@ -122,9 +126,11 @@ def cli(instance: str | None, verbose: bool) -> None:
     default=None,
     help="Chemin de la base SQLite à écrire dans la config (défaut : ~/.local/share/jobwatch/jobwatch.db).",
 )
-def init(config_path: Path | None, db_path: Path | None) -> None:
+def init(config_path: Path | None, db_path: Path | None, beta: bool = False) -> None:
     """Crée un fichier config.yaml et une base de données vide, puis affiche les prochaines étapes."""
     instance = _current_instance()
+    if beta and instance is None:
+        _fatal("--beta nécessite --instance NAME")
     paths = instance_paths(instance) if instance is not None else None
     target = config_path or (paths.config if paths is not None else Path(DEFAULT_CONFIG))
     if target.exists():
@@ -137,6 +143,12 @@ def init(config_path: Path | None, db_path: Path | None) -> None:
         if default_db_line not in text:
             _fatal("ligne db par défaut introuvable dans la config d'exemple")
         text = text.replace(default_db_line, f"db: {target_db}", 1)
+    if beta:
+        text = yaml.safe_dump({
+            "db": str(target_db), "searches": [],
+            "sources": {"linkedin": {"from_profile": True, "hours": 48}},
+            "notify": {}, "research": {}, "enrich": {}, "draft": {},
+        }, allow_unicode=True, sort_keys=False)
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -151,8 +163,9 @@ def init(config_path: Path | None, db_path: Path | None) -> None:
     try:
         config.db.chmod(0o600)
         if paths is not None:
-            paths.config.parent.chmod(0o700)
-            if paths.data_dir.exists():
+            if target == paths.config:
+                paths.config.parent.chmod(0o700)
+            if config.db == paths.db and paths.data_dir.exists():
                 paths.data_dir.chmod(0o700)
     except OSError as exc:
         _fatal(f"permissions privées impossibles : {exc}")
@@ -174,32 +187,33 @@ def run(config_path: Path | None) -> None:
         sync_profile_searches(conn)
         searches = active_search_configs(conn)
         collected = 0
-        direct_candidates: list[RawOffer] = []
-        for collector in build_collectors(config.sources):
+        collection_failed = False
+        for collector in build_collectors(sources_for_profile(conn, config.sources)):
             offers = collector.fetch()
+            collection_failed |= bool(getattr(collector, "failed_requests", 0))
             new_ids = store_offers(conn, collector.name, collector.source_type, offers)
             collected += len(new_ids)
-            if new_ids:
-                placeholders = ",".join("?" for _ in new_ids)
-                new_urls = {
-                    str(row["url"])
-                    for row in conn.execute(
-                        f"SELECT url FROM offer WHERE id IN ({placeholders})", new_ids
-                    ).fetchall()
-                }
-                direct_candidates.extend(offer for offer in offers if offer.url in new_urls)
             logger.info("collected %d new offers from %s", len(new_ids), collector.name)
+        # Un premier matching avant la recherche large : les offres du jour,
+        # même venues du pont, entrent ainsi dans ses candidats à évaluer.
+        new_matches = run_matching(conn)
         research_failed = False
         research_fits: dict[str, str] = {}
         if config.research is not None:
-            result = research_offers(config.research, searches, direct_candidates)
+            result = research_offers(config.research, searches, unfitted_recent_offers(conn))
             research_failed = result.failed
             research_fits = result.fits_by_url
             new_ids = store_offers(conn, "research", "research", result.offers)
             collected += len(new_ids)
-        new_matches = run_matching(conn)
+            new_matches += run_matching(conn)
         fitted = apply_research_fits(conn, research_fits)
         channels = send_digest(conn, config)
+        if not collection_failed:
+            conn.execute(
+                "INSERT INTO instance_setting (key, value) VALUES ('last_collection', datetime('now')) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            )
+            conn.commit()
     finally:
         conn.close()
 
@@ -210,6 +224,8 @@ def run(config_path: Path | None) -> None:
         f"{collected} nouvelles offres collectées, {len(new_matches)} nouveaux matchs"
         f"{fit_note}{notified}{research_note}"
     )
+    if collection_failed:
+        _fatal("collecte incomplète, consultez les journaux et réessayez")
 
 
 @cli.command("enrich")
@@ -388,6 +404,23 @@ def account_invite(config_path: Path | None, email: str) -> None:
         conn.close()
     click.echo(f"invitation créée pour {email.strip().casefold()} (valable 48 h)")
     click.echo(f"/invite/{token}")
+
+
+@account_group.command("revoke")
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def account_revoke(config_path: Path | None) -> None:
+    """Désactive le propriétaire et révoque sessions et invitations de cette instance."""
+    if _current_instance() is None:
+        _fatal("account revoke nécessite --instance NAME")
+    conn = _open_db(_require_config(config_path))
+    try:
+        with conn:
+            conn.execute("UPDATE account SET disabled = 1")
+            conn.execute("DELETE FROM web_session")
+            conn.execute("UPDATE account_invite SET expires_at = '1970-01-01' WHERE accepted_at IS NULL")
+        click.echo("Compte désactivé, sessions et invitations révoquées.")
+    finally:
+        conn.close()
 
 
 @cli.command("list")
@@ -602,6 +635,53 @@ def bugs(config_path: Path | None) -> None:
             click.echo(f"  {line}")
         if report["user_agent"]:
             click.echo(f"  Navigateur : {report['user_agent']}")
+
+
+@cli.command("backup")
+@click.argument("destination", type=click.Path(path_type=Path))
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def backup_cmd(destination: Path, config_path: Path | None) -> None:
+    """Sauvegarde dans un dossier neuf. Arrêter serveur et collecte au préalable."""
+    try:
+        create_backup(_resolve_config_path(config_path), destination)
+    except (BackupError, ConfigError, OSError, ValueError, sqlite3.Error) as exc:
+        _fatal(str(exc))
+    click.echo(f"Sauvegarde vérifiée dans {destination}")
+
+
+@cli.command("check")
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def check_cmd(config_path: Path | None) -> None:
+    """Vérifie SQLite, la protection du compte et la fraîcheur de la collecte."""
+    config = _require_config(config_path)
+    conn = connect(config.db)
+    try:
+        if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            _fatal("SQLite nécessite une vérification")
+        if not auth_required(conn):
+            _fatal("authentification inactive")
+        stale = conn.execute(
+            "SELECT 1 FROM candidate_profile WHERE completed_at < datetime('now', '-30 hours') "
+            "AND NOT EXISTS (SELECT 1 FROM instance_setting WHERE key = 'last_collection' "
+            "AND value >= datetime('now', '-30 hours')) LIMIT 1"
+        ).fetchone()
+        if stale:
+            _fatal("aucune collecte réussie depuis 30 heures")
+        click.echo("Instance protégée, SQLite et collecte vérifiés.")
+    finally:
+        conn.close()
+
+
+@cli.command("restore")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.argument("destination", type=click.Path(path_type=Path))
+def restore_cmd(source: Path, destination: Path) -> None:
+    """Restaure dans un dossier neuf et révoque les anciennes sessions."""
+    try:
+        config = restore_backup(source, destination)
+    except (BackupError, OSError, ValueError, KeyError, sqlite3.Error) as exc:
+        _fatal(str(exc))
+    click.echo(f"Instance restaurée, config disponible dans {config}")
 
 
 @cli.command("apps")

@@ -12,10 +12,10 @@ Pas de cloud, pas de traçage : le tableau de bord, SQLite et les documents gér
 locaux dans le dossier de l'instance sur votre machine. Trois fonctions LLM restent optionnelles
 et inertes sans configuration explicite : `research` complète les collecteurs directs par une
 recherche web large, `jw enrich` extrait et résume les annonces collectées, et le tableau de bord
-peut rédiger des lettres de motivation. Les appels passent par un binaire OpenCode ou Codex local,
-lancé en bac à sable : Codex ignore la configuration utilisateur et tourne sans outil local,
-OpenCode voit chacun de ses outils refusé nommément (seule `research` rouvre le web). `jw enrich`
-accepte aussi Pi comme runner, exécuté sans outil et sans session persistante.
+peut rédiger des lettres de motivation. Les appels passent par un binaire OpenCode, Codex ou Pi
+local, ou par l'API OpenRouter pour `research`, lancés en bac à sable : Codex ignore la
+configuration utilisateur et tourne sans outil local, OpenCode voit chacun de ses outils refusé
+nommément (seule `research` rouvre le web), Pi tourne sans session persistante et sans outil.
 
 ## Démarrage rapide
 
@@ -167,6 +167,18 @@ arrêtez le service, remettez la version de code antérieure et redémarrez ; le
 ignorées. Si une opération de données doit aussi être annulée, arrêtez le service et restaurez le
 dossier d'instance sauvegardé avant l'opération. Ne restaurez jamais la sauvegarde d'une personne dans
 l'instance d'une autre.
+
+### Bêta privée sans IA
+
+`jw --instance alice init --beta` prépare une veille LinkedIn pilotée par les
+catégories confirmées à l'inscription. Le préréglage PO / MOA reste modifiable.
+Chaque personne choisit ses villes ou régions et peut inclure le télétravail complet.
+Aucun appel réseau ne part avant confirmation du profil. Les blocs IA restent vides.
+
+Le [guide d'exploitation](ops/README.md) fournit les services isolés, la configuration
+HTTPS, la collecte, le contrôle, la sauvegarde distante et le déploiement avec retour
+de version. `jw backup`, `jw restore`, `jw check` et `jw account revoke` complètent
+les commandes opérateur. Ces fichiers nécessitent une installation explicite.
 
 ### Cron
 
@@ -431,7 +443,7 @@ remplacer.
 | `searches` | Liste des recherches enregistrées. Chaque recherche a : `name` (identifiant unique), `include` (mots-clés, au moins un, correspondance insensible à la casse sur le titre), `exclude` (mots-clés, aucun), `locations` (correspondance par sous-chaîne sur la localisation de l'offre ; vide = n'importe où), `contract` (optionnel : `permanent`, `fixed_term`, `internship`, `other`). |
 | `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. `linkedin` prend une liste de couples `keywords`/`location` et une fenêtre `hours`. `wttj` prend ses requêtes, pays, villes internationales, fenêtre `hours` et les identifiants publics de l'index Algolia utilisé par le site. |
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
-| `research` | Recherche web large facultative après les collecteurs directs : runner `codex` ou `opencode`, modèle, fenêtre `recency_days`, plafond `max_results` (appliqué après validation et déduplication) et instructions de profil. C'est le seul runner à qui `websearch` et `webfetch` restent autorisés. Les catégories confirmées dans SQLite sont utilisées en priorité. |
+| `research` | Recherche web large facultative après les collecteurs directs : runner `codex`, `opencode` ou `openrouter`. Avec `openrouter`, appel HTTP direct avec la clé `api_key` et recherche web par le plugin `web` d'OpenRouter. Fenêtre `recency_days`, plafond `max_results` (appliqué après validation et déduplication) et instructions de profil. Les offres récentes encore sans fit rejoignent aussi les candidats à évaluer. C'est le seul runner à qui des outils restent autorisés (web uniquement). |
 | `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, `codex` ou `pi`), le binaire correspondant (`opencode_bin`/`codex_bin`/`pi_bin`), `model` (ex. `opencode/deepseek-v4-flash-free`, `gpt-5.6-luna` ou `openai-codex/gpt-5.6-luna` avec Pi), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). Pi est exécuté sans outils et sans session persistante. |
 | `draft` | Génération de lettre de motivation depuis le tableau de bord : `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. Si `examples` ne couvre pas la piste, jobwatch utilise les lettres `letter_example` de la bibliothèque de documents, puis un modèle générique fourni avec le projet. |
 
