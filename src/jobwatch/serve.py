@@ -73,6 +73,7 @@ from jobwatch.onboarding import (
     complete_profile,
     profile_complete,
     profile_cv_library_ids,
+    profile_geography,
     profile_intents,
 )
 from jobwatch.onboarding_ui import render_onboarding
@@ -126,6 +127,7 @@ _BUG_REPORT_PATH = "/bug-report"
 
 
 MAX_JSON_BODY_BYTES = 15 * 1024 * 1024
+_auth_slot = threading.BoundedSemaphore(1)
 
 
 MAX_BUG_REPORT_LENGTH = 4_000
@@ -196,6 +198,10 @@ def make_handler(
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "jobwatch"
+
+        def setup(self) -> None:
+            self.request.settimeout(30)
+            super().setup()
 
         @contextmanager
         def _db(self):
@@ -275,6 +281,14 @@ def make_handler(
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
             path = parsed.path
+            if path == "/healthz":
+                try:
+                    with self._db() as conn:
+                        conn.execute("SELECT COUNT(*) FROM instance_setting").fetchone()
+                    self._send_json(200, {"status": "ok"})
+                except sqlite3.Error:
+                    self._send_json(503, {"status": "unavailable"})
+                return
             if path == "/login":
                 required, session, _token = self._authentication()
                 if not required or session is not None:
@@ -317,6 +331,7 @@ def make_handler(
                     intents = profile_intents(conn, session.account_id) if editing else None
                     cv_library_ids = profile_cv_library_ids(conn, session.account_id)
                     preferences = profile_preferences(conn, session.account_id)
+                    locations, include_remote = profile_geography(conn, session.account_id)
                 initial_intents = (
                     [
                         {
@@ -337,6 +352,9 @@ def make_handler(
                         initial_intents=initial_intents,
                         cv_library_ids=cv_library_ids,
                         preferences=preferences,
+                        ai_enabled=onboarding_config is not None or draft_config is not None,
+                        locations=locations,
+                        include_remote=include_remote,
                     ).encode("utf-8"),
                     "text/html; charset=utf-8",
                 )
@@ -366,6 +384,7 @@ def make_handler(
                         excluded_count=excluded_count,
                         cv_documents=cv_documents,
                         career_intents=career_intents,
+                        draft_enabled=draft_config is not None or onboarding_config is not None,
                     ).encode("utf-8"),
                     "text/html; charset=utf-8",
                 )
@@ -685,12 +704,33 @@ def make_handler(
 
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
-            if path == "/login":
-                self._handle_login()
+            lengths = self.headers.get_all("Content-Length", [])
+            if self.headers.get("Transfer-Encoding") or len(lengths) != 1:
+                self.close_connection = True
+                self._send_json(400, {"error": "taille de requête invalide"})
+                return
+            try:
+                length = int(lengths[0])
+            except ValueError:
+                length = -1
+            limit = 16 * 1024 if path == "/login" or path.startswith("/invite/") else MAX_JSON_BODY_BYTES
+            if length < 0 or length > limit:
+                self.close_connection = True
+                self._send_json(413 if length > limit else 400,
+                                {"error": "taille de requête invalide"})
                 return
             invite = re.fullmatch(r"/invite/([^/]+)", path)
-            if invite:
-                self._handle_invite(invite.group(1))
+            if path == "/login" or invite:
+                if not _auth_slot.acquire(blocking=False):
+                    self._send_json(429, {"error": "connexion occupée, réessayez dans un instant"})
+                    return
+                try:
+                    if invite:
+                        self._handle_invite(invite.group(1))
+                    else:
+                        self._handle_login()
+                finally:
+                    _auth_slot.release()
                 return
             required, session = self._auth_enabled_without_session(path)
             if required and session is None:
@@ -898,6 +938,8 @@ def make_handler(
                             "cover_letters_enabled",
                             current_preferences.cover_letters_enabled,
                         ),
+                        locations=fields.get("locations"),
+                        include_remote=fields.get("include_remote"),
                     )
                 except OnboardingError as exc:
                     self._send_json(400, {"error": str(exc)})

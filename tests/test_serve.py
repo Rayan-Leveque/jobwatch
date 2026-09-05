@@ -274,7 +274,7 @@ def test_track_pages_have_full_sections_and_tabs(conn: sqlite3.Connection) -> No
     assert "HighPO" in _section_html(project, "priority")
     assert "HighPO" not in engineer
     assert 'class="card-action action-later"' in _section_html(project, "priority")
-    for page, active in ((engineer, ">Ingénieur IA<"), (project, ">Chef de projet / PO<")):
+    for page, active in ((engineer, ">Ingénieur IA<"), (project, ">Chef de projet IA<")):
         assert 'href="/"' in page and 'href="/po"' in page
         assert f'aria-current="page"{active}' in page
 

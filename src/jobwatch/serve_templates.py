@@ -178,10 +178,12 @@ def _auth_page(title: str, body: str, *, workspace_slug: str | None = None) -> s
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f3f1eb"><title>jobwatch · {html.escape(title)}</title>
 <style>
-:root {{ color-scheme:light; font-family:Inter,ui-sans-serif,system-ui,sans-serif; }}
+:root {{ color-scheme:light; font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif; }}
 * {{ box-sizing:border-box; }}
+html {{ background:#f3f1eb; }}
 body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24px;
-  color:#191b1f; background:radial-gradient(circle at 20% 0,#e5def7 0,transparent 35%),#f3f1eb; }}
+  color:#191b1f; -webkit-font-smoothing:antialiased;
+  background:radial-gradient(240px 240px at 50% -10px,rgba(112,82,200,.13),transparent 67%),#f3f1eb; }}
 .auth-card {{ width:min(100%,430px); padding:32px; border:1px solid rgba(29,31,35,.12);
   border-radius:24px; background:#fffefa; box-shadow:0 24px 70px rgba(52,46,34,.13); }}
 .auth-brand {{ color:#42752d; font-size:.78rem; font-weight:800; letter-spacing:.16em;

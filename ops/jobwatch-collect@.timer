@@ -1,0 +1,11 @@
+[Unit]
+Description=Veille Jobwatch %i toutes les six heures
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:00:00
+RandomizedDelaySec=20min
+Persistent=true
+Unit=jobwatch-collect@%i.service
+
+[Install]
+WantedBy=timers.target

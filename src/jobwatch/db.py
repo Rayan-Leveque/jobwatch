@@ -37,11 +37,9 @@ COLUMN_MIGRATIONS = (
     ("candidate_profile", "seniority_min", "INTEGER NOT NULL DEFAULT 0"),
     ("candidate_profile", "seniority_max", "INTEGER NOT NULL DEFAULT 5"),
     ("candidate_profile", "cover_letters_enabled", "INTEGER NOT NULL DEFAULT 1"),
+    ("candidate_profile", "locations_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("candidate_profile", "include_remote", "INTEGER NOT NULL DEFAULT 0"),
 )
-
-
-class JobwatchError(Exception):
-    """Erreur attendue, destinée à l'utilisateur. La CLI affiche un message clair et sort avec le code 1."""
 
 
 def connect(path: Path | str) -> sqlite3.Connection:

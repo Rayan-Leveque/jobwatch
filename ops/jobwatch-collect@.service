@@ -1,0 +1,21 @@
+[Unit]
+Description=Collecte Jobwatch %i
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=jobwatch-%i
+Group=jobwatch-%i
+Environment=XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib
+ExecStart=/usr/bin/flock --shared /var/lib/jobwatch/instances/%i/maintenance.lock /opt/jobwatch/current/.venv/bin/jw --instance %i run
+TimeoutStartSec=20min
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/jobwatch/instances/%i
+MemoryMax=256M
+TasksMax=16
+CPUQuota=50%

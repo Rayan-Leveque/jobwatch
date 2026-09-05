@@ -1,0 +1,31 @@
+[Unit]
+Description=Jobwatch %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=jobwatch-%i
+Group=jobwatch-%i
+Environment=XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib
+EnvironmentFile=/etc/jobwatch/instances/%i/service.env
+ExecStart=/usr/bin/flock --shared /var/lib/jobwatch/instances/%i/maintenance.lock /opt/jobwatch/current/.venv/bin/jw --instance %i serve --host 127.0.0.1 --port ${PORT}
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/jobwatch/instances/%i
+MemoryMax=384M
+TasksMax=48
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

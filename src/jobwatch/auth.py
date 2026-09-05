@@ -265,6 +265,7 @@ def accept_invite(
                 "UPDATE account SET password_hash = ?, disabled = 0 WHERE id = ?",
                 (password_hash, account_id),
             )
+            conn.execute("DELETE FROM web_session WHERE account_id = ?", (account_id,))
         conn.execute(
             "INSERT INTO membership (account_id, workspace_id, role) VALUES (?, ?, ?) "
             "ON CONFLICT(account_id, workspace_id) DO UPDATE SET role = excluded.role",

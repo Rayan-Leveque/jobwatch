@@ -5,10 +5,14 @@ from __future__ import annotations
 import html
 import json
 
-from jobwatch.onboarding import MAX_INTENTS
+from jobwatch.onboarding import MAX_INTENTS, PO_MOA_PRESET
 from jobwatch.profile import ProfilePreferences
 from jobwatch.seniority import SENIORITY_LEVELS
-from jobwatch.seniority_ui import seniority_level_labels_html, seniority_sync_script
+from jobwatch.seniority_ui import (
+    SENIORITY_RANGE_CSS,
+    seniority_level_labels_html,
+    seniority_sync_script,
+)
 
 
 def _script_json(value: object) -> str:
@@ -25,6 +29,9 @@ def render_onboarding(
     initial_intents: list[dict[str, object]] | None = None,
     cv_library_ids: list[int] | None = None,
     preferences: ProfilePreferences | None = None,
+    ai_enabled: bool = True,
+    locations: list[str] | None = None,
+    include_remote: bool = False,
 ) -> str:
     preferences = preferences or ProfilePreferences()
     csrf = html.escape(csrf_token, quote=True)
@@ -37,11 +44,13 @@ def render_onboarding(
             "seniorityMin": preferences.seniority_min,
             "seniorityMax": preferences.seniority_max,
             "coverLettersEnabled": preferences.cover_letters_enabled,
+            "preset": PO_MOA_PRESET,
+            "aiEnabled": ai_enabled,
         }
     )
     choice_hidden = " hidden" if editing else ""
     intent_hidden = "" if editing else " hidden"
-    eyebrow = "Vos catégories" if editing else "Étape 4 · Vos objectifs"
+    eyebrow = "Vos catégories" if editing else f"Étape {4 if ai_enabled else 2} · Vos objectifs"
     heading = "Gérez vos catégories" if editing else "Quels postes recherchez-vous ?"
     lead = (
         "Ajoutez, renommez ou retirez une catégorie. Les changements s’appliqueront à vos "
@@ -58,25 +67,35 @@ def render_onboarding(
     level_labels = seniority_level_labels_html(range_max)
     yes_checked = " checked" if preferences.cover_letters_enabled else ""
     no_checked = "" if preferences.cover_letters_enabled else " checked"
+    ai_hidden = "" if ai_enabled else " hidden"
+    location_value = html.escape(", ".join(locations or []), quote=True)
+    remote_checked = " checked" if include_remote else ""
+    step_count = 4 if ai_enabled else 2
+    start_lead = (
+        "Vous pouvez partir de vos CV ou définir directement vos catégories de postes."
+        if ai_enabled else "Choisissez un préréglage modifiable ou créez vos catégories de postes."
+    )
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f3f1eb"><meta name="csrf-token" content="{csrf}">
 <title>jobwatch · Votre recherche</title>
 <style>
-:root {{ color-scheme:light; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+:root {{ color-scheme:light; font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
   --bg:#f3f1eb; --surface:#fffefa; --surface-2:#f8f6ef; --fg:#191b1f;
-  --muted:#686d76; --line:rgba(29,31,35,.12); --green:#42752d; --violet:#7052c8; }}
+  --muted:#686d76; --line:rgba(29,31,35,.095); --green:#42752d; --violet:#7052c8; }}
 * {{ box-sizing:border-box }}
-body {{ margin:0; min-height:100vh; color:var(--fg); background:var(--bg); }}
+html {{ background:var(--bg); }}
+body {{ margin:0; min-height:100vh; color:var(--fg); background:var(--bg);
+  -webkit-font-smoothing:antialiased; }}
 .ambient {{ position:fixed; inset:0; pointer-events:none;
-  background:radial-gradient(circle at 20% 0,rgba(112,82,200,.13),transparent 34%); }}
+  background:radial-gradient(240px 240px at 50% -10px,rgba(112,82,200,.13),transparent 67%); }}
 main {{ position:relative; width:min(100%,720px); margin:auto; padding:28px 18px 70px; }}
 .brand {{ display:flex; align-items:center; gap:10px; color:var(--green); font-size:.78rem;
   font-weight:850; letter-spacing:.14em; text-transform:uppercase; }}
 .brand-mark {{ display:grid; place-items:center; width:34px; height:34px; border-radius:11px;
   color:#fff; background:var(--green); letter-spacing:0; }}
-.steps {{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin:34px 0 28px; }}
+.steps {{ display:grid; grid-template-columns:repeat({step_count},1fr); gap:8px; margin:34px 0 28px; }}
 .step {{ height:5px; border-radius:999px; background:rgba(29,31,35,.10); }}
 .step.active {{ background:var(--green); }}
 .eyebrow {{ margin:0 0 8px; color:var(--green); font-size:.78rem; font-weight:800;
@@ -103,30 +122,7 @@ h1 {{ max-width:620px; margin:0; font-size:clamp(2.2rem,9vw,4.2rem); line-height
 .radio-choice input {{ width:auto; margin-top:3px; accent-color:var(--green) }}
 .radio-choice span {{ min-width:0; line-height:1.4 }}
 .seniority-box {{ margin-bottom:16px }} .range-summary {{ margin:0; color:var(--fg); font-weight:790 }}
-.dual-range {{ position:relative; height:42px; margin:10px 10px 0 }}
-.range-rail,.range-selection {{ position:absolute; top:18px; right:13px; left:13px; height:6px;
-  border-radius:999px; background:var(--line) }}
-.range-selection {{ left:var(--range-left); right:auto; width:var(--range-width); background:var(--green) }}
-.range-input {{ position:absolute; inset:0; width:100%; height:42px; margin:0; padding:0;
-  appearance:none; -webkit-appearance:none; background:transparent; pointer-events:none }}
-.range-input::-webkit-slider-runnable-track {{ height:6px; background:transparent }}
-.range-input::-moz-range-track {{ height:6px; background:transparent }}
-.range-input::-webkit-slider-thumb {{ width:26px; height:26px; margin-top:-10px; border:3px solid var(--surface);
-  border-radius:50%; appearance:none; -webkit-appearance:none; background:var(--green);
-  box-shadow:0 0 0 1px var(--green),0 3px 9px rgba(25,27,31,.22); pointer-events:auto; cursor:grab }}
-.range-input::-moz-range-thumb {{ width:20px; height:20px; border:3px solid var(--surface);
-  border-radius:50%; background:var(--green); box-shadow:0 0 0 1px var(--green),0 3px 9px rgba(25,27,31,.22);
-  pointer-events:auto; cursor:grab }}
-.range-labels {{ position:relative; height:38px }}
-.range-labels span {{ position:absolute; top:8px; left:var(--level-position); width:max-content;
-  max-width:18%; color:var(--muted); font-size:.62rem; line-height:1.2; text-align:center;
-  overflow-wrap:anywhere; transform:translateX(-50%) }}
-.range-labels span::before {{ content:""; position:absolute; bottom:calc(100% + 5px); left:50%;
-  width:2px; height:6px; border-radius:2px; background:var(--line); transform:translateX(-50%) }}
-.range-labels span:first-child {{ text-align:left; transform:none }}
-.range-labels span:first-child::before {{ left:0; transform:none }}
-.range-labels span:last-child {{ text-align:right; transform:translateX(-100%) }}
-.range-labels span:last-child::before {{ right:0; left:auto; transform:none }}
+{SENIORITY_RANGE_CSS}
 .drop {{ display:grid; place-items:center; min-height:210px; padding:24px; border:1.5px dashed
   rgba(66,117,45,.35); border-radius:17px; background:rgba(66,117,45,.045); text-align:center; }}
 .drop.drag {{ border-color:var(--green); background:rgba(66,117,45,.09); }}
@@ -155,6 +151,8 @@ button {{ border:0; font:inherit; cursor:pointer; }}
 .intent-head {{ display:flex; gap:10px; align-items:center; }}
 input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-radius:11px;
   color:var(--fg); background:var(--surface); font:inherit; }}
+input:not([type="range"]):focus-visible {{ outline:3px solid rgba(112,82,200,.24);
+  border-color:var(--violet); }}
 .intent-label {{ font-size:1rem; font-weight:750; }}
 .remove {{ flex:none; width:38px; height:38px; border-radius:10px; color:var(--muted);
   background:transparent; font-size:1.3rem; }}
@@ -165,31 +163,33 @@ input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-rad
 .actions .primary {{ margin-top:0; }}
 .secondary {{ border:1px solid var(--line); color:var(--fg); background:var(--surface);
   box-shadow:0 5px 16px rgba(52,46,34,.06); font-size:.84rem; font-weight:750; }}
-.analysis-note {{ margin:0 0 18px; color:var(--muted); line-height:1.5; }}
+.analysis-note {{ margin:18px 0; color:var(--muted); font-size:.88rem; line-height:1.5; }}
 .mode-back {{ margin:0 0 18px; border:1px solid var(--line); color:var(--fg);
   background:var(--surface); box-shadow:0 5px 16px rgba(52,46,34,.06); }}
 .mode-back:hover {{ border-color:rgba(66,117,45,.45); background:rgba(66,117,45,.06); }}
 .back-link {{ display:inline-flex; margin:0 0 26px; color:var(--muted); font-size:.82rem;
   font-weight:700; text-decoration:none; }}
 @media (max-width:520px) {{ .panel {{ padding:16px; }} .choice-grid,.radio-row {{ grid-template-columns:1fr; }} }}
+@media (max-width:360px) {{ .dual-range,.range-labels {{ margin-left:0; margin-right:0; }} }}
 </style></head><body><div class="ambient"></div><main>
 <div class="brand"><span class="brand-mark">JW</span>jobwatch</div>
 {back_link}
 <div class="steps"><span class="step active"></span><span class="step" id="step-2"></span>
-  <span class="step" id="step-3"></span><span class="step" id="step-4"></span></div>
+  <span class="step" id="step-3"{ai_hidden}></span><span class="step" id="step-4"{ai_hidden}></span></div>
 <section id="choice-step"{choice_hidden}>
   <p class="eyebrow">Étape 1 · Votre départ</p>
   <h1>Comment voulez-vous commencer ?</h1>
   <p class="lead">jobwatch surveille les nouvelles offres correspondant aux postes qui vous
-  intéressent et les rassemble dans un seul tableau de bord. Vous pouvez partir de vos CV ou
-  définir directement vos catégories de postes.</p>
+  intéressent et les rassemble dans un seul tableau de bord. {start_lead}</p>
   <div class="panel choice-grid">
-    <button class="choice" id="choose-cv" type="button"><strong>Importer mes CV</strong>
+    <button class="choice" id="choose-cv" type="button"{ai_hidden}><strong>Importer mes CV</strong>
       <span>Ajoutez un ou plusieurs PDF et laissez l’IA suggérer des catégories de postes.</span></button>
     <button class="choice" id="choose-manual" type="button"><strong>Créer mes catégories</strong>
       <span>Renseignez vous-même les métiers et mots-clés à surveiller.</span></button>
+    <button class="choice" id="choose-po-moa" type="button"><strong>Partir de PO / MOA</strong>
+      <span>Product Owner et MOA / Business Analyst. Modifiez ou supprimez chaque catégorie.</span></button>
   </div>
-  <fieldset class="preference-box">
+  <fieldset class="preference-box"{ai_hidden}>
     <legend>Lettres de motivation</legend>
     <p class="preference-help">Souhaitez-vous afficher les outils de génération de lettres ?
       Vous pourrez changer ce choix plus tard sans perdre de brouillon.</p>
@@ -263,8 +263,17 @@ input {{ width:100%; padding:12px 13px; border:1px solid var(--line); border-rad
           step="1" value="{preferences.seniority_max}" aria-label="Niveau maximum">
       </div><div class="range-labels" aria-hidden="true">{level_labels}</div>
     </fieldset>
+    <fieldset class="preference-box">
+      <legend>Où souhaitez-vous travailler ?</legend>
+      <label class="field-label" for="locations">Villes ou régions, séparées par des virgules</label>
+      <input id="locations" value="{location_value}" placeholder="Lyon, Grenoble" maxlength="504">
+      <p class="preference-help">Cinq zones maximum. Laissez vide pour rechercher dans toute la France.
+        Les offres dont le lieu est inconnu restent visibles.</p>
+      <label class="radio-choice"><input id="include-remote" type="checkbox"{remote_checked}>
+        <span>Inclure aussi le télétravail complet en France</span></label>
+    </fieldset>
     <p class="analysis-note">jobwatch cherchera les offres correspondant aux mots-clés de chaque
-    catégorie. Toutes les offres seront réunies dans votre tableau de bord, avec leur catégorie.</p>
+    catégorie. Les offres apparaîtront dans votre tableau de bord après la prochaine collecte.</p>
     <div class="intent-list" id="intent-list"></div>
     <div class="actions"><button class="wizard-action secondary" id="add-intent" type="button">+ Ajouter une catégorie</button>
       <button class="wizard-action primary" id="confirm" type="button">{confirm_label}</button></div>
@@ -382,6 +391,8 @@ document.getElementById('back-to-choice-example').addEventListener('click', retu
 document.getElementById('back-to-choice-intents').addEventListener('click', returnToChoice);
 document.getElementById('choose-manual').addEventListener('click', () =>
   showIntents([{{label:'',keywords:[],exclude:[]}}], false));
+document.getElementById('choose-po-moa').addEventListener('click', () =>
+  showIntents(initialData.preset, false));
 
 const exampleFileInput = document.getElementById('example-file');
 const exampleFileList = document.getElementById('example-file-list');
@@ -486,10 +497,12 @@ document.getElementById('confirm').addEventListener('click', async event => {{
   }}
   button.disabled = true; status.textContent = 'Enregistrement de vos catégories…';
   status.classList.remove('error');
-  const coverLettersEnabled=document.querySelector('[name="cover_letters_enabled"]:checked').value==='true';
+  const coverLettersEnabled=initialData.aiEnabled && document.querySelector('[name="cover_letters_enabled"]:checked').value==='true';
   try {{ const result=await post('/onboarding/complete', {{cv_library_ids:cvLibraryIds, intents,
       seniority_min:seniorityMin, seniority_max:seniorityMax,
-      cover_letters_enabled:coverLettersEnabled}});
+      cover_letters_enabled:coverLettersEnabled,
+      locations:split(document.getElementById('locations').value),
+      include_remote:document.getElementById('include-remote').checked}});
     location.href = result.next || '/'; }} catch (error) {{ status.textContent = error.message;
     status.classList.add('error'); button.disabled = false; }}
 }});
