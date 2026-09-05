@@ -1,5 +1,7 @@
 """Tests des cookies et protections HTTP d'authentification."""
 
+import pytest
+
 from jobwatch.auth import Session
 from jobwatch.auth_http import (
     csrf_valid,
@@ -14,12 +16,16 @@ def _session() -> Session:
     return Session(1, 1, "alice@example.com", "owner", "csrf-secret", "tomorrow")
 
 
-def test_secure_session_cookie_has_required_attributes() -> None:
-    value = session_cookie("opaque-token", secure=True)
+@pytest.mark.parametrize("remember", [False, True])
+def test_secure_session_cookie_has_required_attributes(remember: bool) -> None:
+    value = session_cookie("opaque-token", secure=True, remember=remember)
     assert value.startswith("id=opaque-token")
     for attribute in ("HttpOnly", "Path=/", "SameSite=Strict", "Secure"):
         assert attribute in value
-    assert "Max-Age" not in value
+    if remember:
+        assert "Max-Age=2592000" in value
+    else:
+        assert "Max-Age" not in value
 
 
 def test_insecure_cookie_is_explicit_for_private_http_only() -> None:

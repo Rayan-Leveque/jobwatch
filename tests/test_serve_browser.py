@@ -858,15 +858,44 @@ def test_swipe_card_scroll_hides_scrollbar_chrome(browser, dashboard) -> None:
     page.close()
 
 
-def test_invite_then_protected_action_in_browser(browser, protected_dashboard) -> None:
+@pytest.mark.parametrize("remember", [False, True])
+@pytest.mark.parametrize("width", [390, 1280])
+def test_invite_then_protected_action_in_browser(
+    browser, protected_dashboard, remember: bool, width: int,
+) -> None:
     url, invite = protected_dashboard
-    page = browser.new_page()
+    page = browser.new_page(viewport={"width": width, "height": 844})
     page.goto(f"{url}/invite/{invite}")
     password = "une très longue phrase secrète"
     page.get_by_label("Mot de passe", exact=True).fill(password)
     page.get_by_label("Confirmation", exact=True).fill(password)
     page.get_by_role("button", name="Créer mon compte").click()
     page.wait_for_url(f"{url}/")
+    page.context.clear_cookies()
+    page.goto(f"{url}/login")
+    checkbox = page.get_by_role("checkbox", name="Se souvenir de moi pendant 30 jours")
+    expect(checkbox).not_to_be_checked()
+    checkbox.set_checked(remember)
+    page.get_by_label("Email", exact=True).fill("alice@example.com")
+    page.get_by_label("Mot de passe", exact=True).fill("incorrect")
+    page.get_by_role("button", name="Se connecter", exact=True).click()
+    expect(page.locator(".auth-error")).to_have_text("Email ou mot de passe incorrect.")
+    assert checkbox.is_checked() == remember
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    page.get_by_label("Mot de passe", exact=True).fill(password)
+    page.get_by_role("button", name="Se connecter", exact=True).click()
+    page.wait_for_url(f"{url}/")
+    cookie = next(c for c in page.context.cookies() if c["name"] == "id")
+    assert (cookie["expires"] > 0) if remember else (cookie["expires"] == -1)
+    if remember:
+        state = page.context.storage_state()
+        page.close()
+        context = browser.new_context(
+            storage_state=state, viewport={"width": width, "height": 844}
+        )
+        page = context.new_page()
+        page.goto(f"{url}/")
+        page.wait_for_url(f"{url}/")
     popup = page.locator("#swipe-popup")
     if popup.is_visible():
         page.locator(".swipe-popup-later").click()
@@ -874,7 +903,7 @@ def test_invite_then_protected_action_in_browser(browser, protected_dashboard) -
     card.locator(".action-later").click()
     page.locator(".undo-toast").wait_for(state="visible", timeout=5000)
     assert card.count() == 0
-    page.close()
+    page.context.close()
 
 
 def test_later_click_removes_card_and_shows_undo_without_reload(browser, dashboard) -> None:
