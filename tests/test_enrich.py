@@ -611,6 +611,34 @@ def test_enrich_marks_terminal_http_failures_without_retrying(
     assert tuple(failed) == ("failed", 1, f"http_{status_code}")
 
 
+def test_enrich_never_fetches_non_http_legacy_urls(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """Les URL importées sans schéma web (jobwatch:<hash>) sont des échecs définitifs."""
+    offer_id = _seed_offer(conn, url="jobwatch:108868fdd9901960fe58ea084b66152ec3d486aa")
+
+    def unexpected_fetch(*_args):
+        raise AssertionError("une URL non HTTP ne doit déclencher aucun fetch")
+
+    monkeypatch.setattr("jobwatch.enrich._fetch_http", unexpected_fetch)
+    monkeypatch.setattr("jobwatch.enrich._fetch_playwright", unexpected_fetch)
+
+    first = enrich(conn, _config(), client=_http_client(lambda request: None), sleep=_no_sleep)
+    second = enrich(conn, _config(), client=_http_client(lambda request: None), sleep=_no_sleep)
+
+    assert first.fetched_failed == 1
+    assert second.fetched_failed == 0
+    failed = conn.execute(
+        "SELECT status, fetch_attempts, failure_reason FROM offer_content WHERE offer_id = ?",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(failed) == ("failed", 1, "unsupported_scheme")
+    summary = conn.execute(
+        "SELECT status FROM offer_summary WHERE offer_id = ?", (offer_id,)
+    ).fetchone()
+    assert summary["status"] == "limited_no_content"
+
+
 def test_enrich_retries_unclassified_legacy_failure_immediately(
     conn: sqlite3.Connection, monkeypatch
 ) -> None:
@@ -634,6 +662,50 @@ def test_enrich_retries_unclassified_legacy_failure_immediately(
         (offer_id,),
     ).fetchone()
     assert tuple(recovered) == ("ok", 2, None)
+
+
+def test_enrich_summarizes_with_openrouter(conn: sqlite3.Connection, monkeypatch) -> None:
+    from jobwatch.research import OPENROUTER_URL
+
+    offer_id = _seed_offer(conn)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append((url, headers, json))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": (
+                "EXPERIENCE: 3 ans\nEXPERIENCE_CITATION: Ingénieur IA Paris\n"
+                "- Poste IA\n- Paris"
+            )}}]},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("jobwatch.enrich.httpx.post", fake_post)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=LONG_HTML)
+
+    config = EnrichConfig(
+        model="deepseek/deepseek-v4-flash-0731", runner="openrouter", api_key="sk-or-test"
+    )
+    result = enrich(conn, config, client=_http_client(handler), sleep=_no_sleep)
+
+    assert result.fetched_ok == 1
+    assert result.summaries_written == 1
+    assert result.fields_written == 1
+    url, headers, payload = calls[0]
+    assert url == OPENROUTER_URL
+    assert headers["Authorization"] == "Bearer sk-or-test"
+    assert "Ingénieur IA Paris" in payload["messages"][0]["content"]
+    assert "plugins" not in payload
+    field = conn.execute(
+        "SELECT sf.value AS value, sf.quote AS quote FROM summary_field sf "
+        "JOIN offer_summary os ON os.id = sf.summary_id "
+        "WHERE os.offer_id = ? AND sf.key = 'experience'",
+        (offer_id,),
+    ).fetchone()
+    assert tuple(field) == ("3 ans", "Ingénieur IA Paris")
 
 
 def test_enrich_retries_transient_pi_summary_failure_without_refetch(
@@ -706,7 +778,9 @@ def test_enrich_bounds_summary_retries_and_respects_delay(
     immediate = enrich(
         conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep
     )
-    assert first.summaries_written == 1
+    assert first.summaries_failed == 1
+    assert first.limited_written == 1
+    assert first.summaries_written == 0
     assert immediate.summaries_written == 0
     assert calls == 1
 
@@ -815,7 +889,7 @@ def test_metadata_fallback_upgrades_when_real_content_arrives(
     )
     conn.commit()
     first = enrich(conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep)
-    assert first.summaries_written == 1
+    assert first.limited_written == 1
 
     conn.execute(
         "UPDATE offer_content SET status = 'ok', markdown = ?, fetch_method = 'http', "
@@ -863,7 +937,7 @@ def test_metadata_fallback_keeps_bullets_when_upgrade_yields_fields_only(
     )
     conn.commit()
     first = enrich(conn, _pi_config(), client=_http_client(lambda request: None), sleep=_no_sleep)
-    assert first.summaries_written == 1
+    assert first.limited_written == 1
     original_bullets = [
         row["text"]
         for row in conn.execute(
@@ -1145,6 +1219,28 @@ def test_config_parses_codex_runner(tmp_path, monkeypatch) -> None:
     )
     with _pytest.raises(ConfigError, match="opencode_bin"):
         load_config(config_file)
+
+
+def test_config_parses_openrouter_runner_and_requires_api_key(tmp_path) -> None:
+    from jobwatch.config import ConfigError, load_config
+
+    base = f"db: {tmp_path / 'db.sqlite'}\nsearches:\n  - name: test\n    include: ['AI']\n"
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        base + "enrich:\n  runner: openrouter\n  model: deepseek/deepseek-v4-flash-0731\n"
+    )
+    with pytest.raises(ConfigError, match="api_key"):
+        load_config(config_file)
+
+    config_file.write_text(
+        base + "enrich:\n  runner: openrouter\n  model: deepseek/deepseek-v4-flash-0731\n"
+        "  api_key: sk-or-v1-test\n"
+    )
+    config = load_config(config_file).enrich
+    assert config is not None
+    assert config.runner == "openrouter"
+    assert config.api_key == "sk-or-v1-test"
+    assert config.model == "deepseek/deepseek-v4-flash-0731"
 
 
 def test_config_fails_loudly_when_codex_bin_missing_from_path(tmp_path, monkeypatch) -> None:

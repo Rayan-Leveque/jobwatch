@@ -25,7 +25,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 .venv/bin/jw init                # crée config.yaml + une base de données vide
 # éditez config.yaml : décommentez et remplissez les blocs sources et notify, puis :
-.venv/bin/jw run                # collecter, matcher, notifier
+.venv/bin/jw run                # collecter, matcher, enrichir (bloc enrich rempli), notifier
 .venv/bin/jw enrich             # récupère et résume les offres collectées (bloc enrich requis)
 .venv/bin/jw serve              # tableau de bord web local : http://127.0.0.1:8000
 .venv/bin/jw list               # affiche les nouveaux matchs
@@ -172,10 +172,12 @@ les commandes opérateur. Ces fichiers nécessitent une installation explicite.
 
 ### Cron
 
-Exécutez `jw run` chaque jour via cron ; enchaînez `jw enrich` si le bloc `enrich` est configuré :
+Exécutez `jw run` chaque jour via cron ; il enrichit les nouvelles offres avant la
+notification quand le bloc `enrich` est configuré. `jw enrich` reste utile à la main pour
+rattraper les échecs temporaires (WTTJ, quota LLM) :
 
 ```
-0 7 * * * cd ~/jobwatch && .venv/bin/jw run && .venv/bin/jw enrich
+0 7 * * * cd ~/jobwatch && .venv/bin/jw run && .venv/bin/jw enrich --recover-wttj
 ```
 
 ### Import des artefacts et résumés
@@ -436,7 +438,7 @@ remplacer.
 | `sources` | Les job boards à surveiller. `france_travail` nécessite `client_id`, `client_secret`, `keywords` et éventuellement `department`. `smartrecruiters` prend une liste de slugs de sociétés. `linkedin` prend une liste de couples `keywords`/`location` et une fenêtre `hours`. Avec `from_profile: true`, les catégories confirmées remplacent ces requêtes ; sans profil confirmé, LinkedIn reste inactif. Ce mode autorise `searches: []`. Voir le [guide du profil](ops/README.md#créer-une-instance) pour les localisations et le télétravail. `wttj` prend ses requêtes, pays, villes internationales, fenêtre `hours` et les identifiants publics de l'index Algolia utilisé par le site. |
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
 | `research` | Recherche web large facultative après les collecteurs directs : runner `codex`, `opencode` ou `openrouter`. Avec `openrouter`, appel HTTP direct avec la clé `api_key` et recherche web par le plugin `web` d'OpenRouter. Fenêtre `recency_days`, plafond `max_results` (appliqué après validation et déduplication) et instructions de profil. Les offres récentes encore sans fit rejoignent aussi les candidats à évaluer. Codex ignore la configuration utilisateur et désactive les outils locaux. OpenCode refuse ses outils nommément et autorise seulement `websearch` et `webfetch` pour `research`. |
-| `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, `codex` ou `pi`), le binaire correspondant (`opencode_bin`/`codex_bin`/`pi_bin`), `model` (ex. `opencode/deepseek-v4-flash-free`, `gpt-5.6-luna` ou `openai-codex/gpt-5.6-luna` avec Pi), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). Codex et OpenCode sont exécutés sans outils. Pi est exécuté sans outils, extensions, skills, fichiers de contexte ni session persistante. |
+| `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, `codex`, `openrouter` ou `pi`), le binaire correspondant (`opencode_bin`/`codex_bin`/`pi_bin`), `api_key` (requis avec `openrouter`, appel HTTP direct sans plugin web), `model` (ex. `opencode/deepseek-v4-flash-free`, `deepseek/deepseek-v4-flash-0731`, `gpt-5.6-luna` ou `openai-codex/gpt-5.6-luna` avec Pi), `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). Codex et OpenCode sont exécutés sans outils. Pi est exécuté sans outils, extensions, skills, fichiers de contexte ni session persistante. |
 | `draft` | Génération de lettre de motivation depuis le tableau de bord, sans outils du runner. `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. Si `examples` ne couvre pas la piste, jobwatch utilise les lettres `letter_example` de la bibliothèque de documents, puis un modèle générique fourni avec le projet. |
 
 Le filtre `locations` est une correspondance par sous-chaîne sur la localisation de l'offre :

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import stat
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -348,6 +350,102 @@ research:
     ).fetchone()
     assert dict(row) == {"url": offer.url, "fit": "high"}
     conn.close()
+
+
+@pytest.mark.parametrize("summary_fails", [False, True])
+def test_run_enriches_bridge_and_research_before_notifying(
+    runner: CliRunner, tmp_path: Path, monkeypatch, summary_fails: bool,
+) -> None:
+    from jobwatch.collectors.base import RawOffer
+    from jobwatch.llm_runner import LLMRunnerError
+    from jobwatch.research import ResearchResult
+
+    db_path = tmp_path / "alice.db"
+    notifications = []
+    fetched = []
+    summarized = []
+    description = "Développer des applications IA en Python à Paris. " * 10
+    html = '<script type="application/ld+json">' + json.dumps({
+        "@type": "JobPosting", "description": description,
+    }) + "</script>"
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            fetched.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(html.encode())
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            conn = connect(db_path)
+            notifications.append([tuple(row) for row in conn.execute(
+                "SELECT oc.status, os.source, os.status, m.notified_at "
+                "FROM match m LEFT JOIN offer_content oc ON oc.offer_id = m.offer_id "
+                "LEFT JOIN offer_summary os ON os.offer_id = m.offer_id ORDER BY m.id"
+            )])
+            conn.close()
+            self.send_response(200)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"db: {db_path}\nsearches: [{{name: ai, include: [AI]}}]\nsources: {{}}\n"
+        "research: {runner: codex, model: test-model}\n"
+        "enrich: {runner: pi, model: test-model}\nnotify: {ntfy: {topic: test}}\n"
+    )
+    monkeypatch.setattr("jobwatch.digest.NTFY_URL", base + "/{topic}")
+    offer = RawOffer(title="AI Engineer", url=base + "/research", company="Acme", platform="web")
+    monkeypatch.setattr(
+        "jobwatch.cli.research_offers",
+        lambda *_args: ResearchResult([offer], {offer.url: "high"}),
+    )
+
+    def summarize(**kwargs):
+        summarized.append(kwargs["attachment"])
+        if summary_fails:
+            raise LLMRunnerError("usage limit reached")
+        return "STACK: Python\n- Développer des applications IA en Python."
+
+    monkeypatch.setattr("jobwatch.enrich.run_pi", summarize)
+    artifact = tmp_path / "daily.json"
+    artifact.write_text(json.dumps({"li-1": {
+        "title": "AI Engineer", "company": "Bridge", "source": "linkedin",
+        "url": base + "/bridge", "first_seen": "2026-09-05",
+    }}))
+    try:
+        imported = runner.invoke(cli, [
+            "--instance", "alice", "ingest-daily", "--config", str(config),
+            "--api-json", str(artifact),
+        ])
+        assert imported.exit_code == 0, imported.output
+        result = runner.invoke(cli, ["--instance", "alice", "run", "--config", str(config)])
+        assert set(fetched) == {"/bridge", "/research"}
+        assert len(summarized) == 2
+        assert all("Développer des applications IA" in text for text in summarized)
+        expected = ("ok", "metadata", "limited_retryable", None) if summary_fails else (
+            "ok", "auto", "ready", None
+        )
+        assert len(notifications) == 1
+        assert all(row == expected for row in notifications[0])
+        assert result.exit_code == int(summary_fails), result.output
+        if summary_fails:
+            assert "0 résumé(s) généré(s)" in result.output
+            assert "2 résumé(s) limité(s) aux métadonnées" in result.output
+            assert "2 échec(s) de génération" in result.output
+        else:
+            assert "2 résumé(s) généré(s)" in result.output
+        second = runner.invoke(cli, ["--instance", "alice", "enrich", "--config", str(config)])
+        assert second.exit_code == 0, second.output
+        assert len(fetched) == len(summarized) == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_run_research_uses_profile_categories_and_keeps_config_searches(
