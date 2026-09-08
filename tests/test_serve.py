@@ -551,21 +551,6 @@ def test_high_application_renders_its_summary(conn: sqlite3.Connection) -> None:
     assert 'aria-controls="summary-application-' in applied
 
 
-def test_summary_reader_preserves_external_link_interaction(
-    conn: sqlite3.Connection,
-) -> None:
-    _match_id, offer_id = _seed_offer(conn, company="HighCo", fit="high")
-    _add_summary(conn, offer_id, "Fait")
-
-    page = render_page(conn)
-
-    assert 'class="reader-tab summary-toggle"' in page
-    assert 'class="card-reader"' in page
-    assert 'class="offer-link"' in page
-    assert 'aria-label="Voir l’offre externe"' in page
-    assert 'target="_blank"' in page
-
-
 def test_content_panel_renders_escaped_and_collapsible(conn: sqlite3.Connection) -> None:
     _match_id, offer_id = _seed_offer(conn, company="ContentCo", title="AI Engineer", fit=None)
     _add_content(conn, offer_id, "Poste <script>alert(1)</script>\n\nDeuxième paragraphe.")
@@ -603,47 +588,6 @@ def test_content_panel_absent_when_fetch_failed(conn: sqlite3.Connection) -> Non
     assert '<div class="content-panel"' not in page
 
 
-def test_markdown_to_html_renders_heading_as_styled_paragraph() -> None:
-    """Pas de vraie balise <h1>-<h6> : ça casserait la hiérarchie de titres de la carte."""
-    assert _markdown_to_html("## Missions") == '<p class="md-heading">Missions</p>'
-
-
-def test_markdown_to_html_ignores_hash_without_space() -> None:
-    assert _markdown_to_html("#recrutement2026") == "<p>#recrutement2026</p>"
-
-
-def test_markdown_to_html_renders_bold_and_italic() -> None:
-    assert _markdown_to_html("**Stack**: *Python*") == "<p><strong>Stack</strong>: <em>Python</em></p>"
-
-
-def test_markdown_to_html_leaves_lone_asterisk_untouched() -> None:
-    """Un astérisque isolé (ex: note de salaire '40-50k*') ne doit pas être avalé."""
-    assert _markdown_to_html("Salaire 40-50k*") == "<p>Salaire 40-50k*</p>"
-
-
-def test_markdown_to_html_renders_flat_unordered_list() -> None:
-    html_out = _markdown_to_html("- Python\n- SQL")
-    assert html_out == "<ul><li>Python</li><li>SQL</li></ul>"
-
-
-def test_markdown_to_html_renders_ordered_list() -> None:
-    html_out = _markdown_to_html("1. Entretien RH\n2. Entretien technique")
-    assert html_out == "<ol><li>Entretien RH</li><li>Entretien technique</li></ol>"
-
-
-def test_markdown_to_html_switches_list_type_without_blank_line() -> None:
-    html_out = _markdown_to_html("- Python\n1. Entretien RH")
-    assert html_out == "<ul><li>Python</li></ul><ol><li>Entretien RH</li></ol>"
-
-
-def test_markdown_to_html_renders_safe_link() -> None:
-    html_out = _markdown_to_html("Voir [le site](https://example.com/careers)")
-    assert (
-        '<a href="https://example.com/careers" target="_blank" '
-        'rel="noopener noreferrer">le site</a>' in html_out
-    )
-
-
 def test_markdown_to_html_degrades_unsafe_link_scheme_to_label_only() -> None:
     """Ni lien ni syntaxe brute : le contenu réel regorge de liens relatifs/ancre
     de navigation scrapés (ex. '#main-content'), les laisser en littéral donnerait
@@ -654,113 +598,10 @@ def test_markdown_to_html_degrades_unsafe_link_scheme_to_label_only() -> None:
     assert html_out == "<p>cliquer</p>"
 
 
-def test_markdown_to_html_degrades_relative_nav_link_to_label_only() -> None:
-    html_out = _markdown_to_html("[Skip to main content](#main-content)")
-    assert "<a " not in html_out
-    assert html_out == "<p>Skip to main content</p>"
-
-
-def test_markdown_to_html_renders_titled_link() -> None:
-    html_out = _markdown_to_html('[Wavestone](https://www.wavestone.com/ "Wavestone")')
-    assert (
-        '<a href="https://www.wavestone.com/" target="_blank" '
-        'rel="noopener noreferrer">Wavestone</a>' in html_out
-    )
-
-
-def test_markdown_to_html_renders_link_with_parens_in_url() -> None:
-    """Motif réel (choisirleservicepublic.gouv.fr) : une URL peut contenir des parenthèses."""
-    html_out = _markdown_to_html("[Fiche](https://example.gouv.fr/metiers/ingenieur(e)/)")
-    assert (
-        '<a href="https://example.gouv.fr/metiers/ingenieur(e)/" target="_blank" '
-        'rel="noopener noreferrer">Fiche</a>' in html_out
-    )
-
-
-def test_markdown_to_html_degrades_mailto_with_raw_spaces_to_label_only() -> None:
-    """Motif réel (partage par email) : espaces bruts non encodés dans l'URL,
-    et un titre optionnel en fin de parenthèse ne doit pas être avalé par l'URL."""
-    html_out = _markdown_to_html(
-        '[Partager par email](mailto:?subject=Une offre &body=Voir ici "Partager par email")'
-    )
-    assert "<a " not in html_out
-    assert html_out == "<p>Partager par email</p>"
-
-
-def test_markdown_to_html_renders_clickable_logo_as_plain_link() -> None:
-    """Motif réel des offres scrapées : logo cliquable [![alt](image)](lien)."""
-    html_out = _markdown_to_html(
-        "[![Wavestone logo](https://c.example.com/logo.png)](https://www.wavestone.com/)"
-    )
-    assert (
-        '<a href="https://www.wavestone.com/" target="_blank" '
-        'rel="noopener noreferrer">Wavestone logo</a>' in html_out
-    )
-    assert "![" not in html_out
-
-
-def test_markdown_to_html_drops_standalone_image() -> None:
-    html_out = _markdown_to_html("![Decorative banner](https://example.com/banner.png)")
-    assert html_out == "<p>Decorative banner</p>"
-
-
-def test_markdown_to_html_renders_underlined_setext_heading() -> None:
-    """markdownify produit ce style par défaut pour les h1/h2 (pas de #) ; une
-    ligne de séparation visuelle marque la coupure de section sous le titre."""
-    html_out = _markdown_to_html("Missions\n========\n\nTexte.")
-    assert html_out == '<p class="md-heading">Missions</p><hr><p>Texte.</p>'
-
-
-def test_markdown_to_html_drops_bare_heading_marker() -> None:
-    """Motif réel (offre Valeo) : '#### ' sans texte (logo d'entreprise réduit
-    à rien par markdownify) ne doit pas laisser '####' apparaître littéralement."""
-    html_out = _markdown_to_html("#### \n\nValeo")
-    assert "#" not in html_out
-    assert html_out == "<p>Valeo</p>"
-
-
-def test_markdown_to_html_renders_horizontal_rule() -> None:
-    """Une ligne de --- seule (pas de texte juste avant) devient une vraie
-    séparation visuelle, comme sur Obsidian, au lieu de tirets littéraux."""
-    html_out = _markdown_to_html("Texte 1.\n\n---\n\nTexte 2.")
-    assert html_out == "<p>Texte 1.</p><hr><p>Texte 2.</p>"
-
-
-def test_markdown_to_html_renders_long_horizontal_rule() -> None:
-    html_out = _markdown_to_html("Texte 1.\n\n----------------------------\n\nTexte 2.")
-    assert html_out == "<p>Texte 1.</p><hr><p>Texte 2.</p>"
-
-
-def test_markdown_to_html_horizontal_rule_does_not_break_setext_heading() -> None:
-    """--- juste après une ligne de texte (sans ligne blanche) reste un titre
-    souligné suivi de sa ligne, pas un --- littéral ni un titre sans ligne."""
-    html_out = _markdown_to_html("Titre\n---\n\nTexte.")
-    assert html_out == '<p class="md-heading">Titre</p><hr><p>Texte.</p>'
-
-
 def test_markdown_to_html_escapes_html_inside_formatting() -> None:
     html_out = _markdown_to_html("**<script>alert(1)</script>**")
     assert "<script>" not in html_out
     assert "<strong>&lt;script&gt;alert(1)&lt;/script&gt;</strong>" in html_out
-
-
-def test_content_panel_independent_from_summary_panel(conn: sqlite3.Connection) -> None:
-    """Le panneau En bref existant reste inchangé, que l'annonce complète existe ou non."""
-    _match_id, offer_id = _seed_offer(conn, company="BothCo", fit="high")
-    _add_summary(conn, offer_id, "Fait résumé")
-    _add_content(conn, offer_id, "Texte complet de annonce.")
-
-    page = render_page(conn)
-    section = _section_html(page, "priority")
-
-    assert 'class="summary-panel"' in section
-    assert "En bref" in section
-    assert "Fait résumé" in section
-    assert 'class="content-panel"' in section
-    assert "Texte complet de annonce." in section
-    # les deux panneaux ont des id distincts
-    assert 'aria-controls="summary-match-' in section
-    assert 'aria-controls="content-match-' in section
 
 
 def test_content_panel_rendered_for_low_fit_and_no_summary(conn: sqlite3.Connection) -> None:
@@ -953,7 +794,9 @@ def test_post_later_updates_match_state(tmp_path: Path) -> None:
     db_path = tmp_path / "jw.db"
     connection = connect(db_path)
     init_db(connection)
-    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="new")
+    match_id, _ = _seed_offer(connection, company="Acme", title="Role", state="discarded")
+    connection.execute("UPDATE match SET discarded_at = datetime('now') WHERE id = ?", (match_id,))
+    connection.commit()
     connection.close()
     server, thread = _start_server(db_path)
     try:
@@ -964,9 +807,9 @@ def test_post_later_updates_match_state(tmp_path: Path) -> None:
         assert json.loads(body) == {"ok": True}
 
         check = connect(db_path)
-        row = check.execute("SELECT state FROM match WHERE id = ?", (match_id,)).fetchone()
+        row = check.execute("SELECT state, discarded_at FROM match WHERE id = ?", (match_id,)).fetchone()
         check.close()
-        assert row["state"] == "later"
+        assert tuple(row) == ("later", None)
     finally:
         server.shutdown()
         server.server_close()
@@ -1091,13 +934,11 @@ def test_post_restore_rejects_disallowed_target_state(tmp_path: Path) -> None:
     server, thread = _start_server(db_path)
     try:
         port = server.server_address[1]
-        status, _headers, _body = _post(
-            port,
-            f"/match/{match_id}/restore",
-            body=json.dumps({"state": "discarded"}).encode("utf-8"),
-            content_type="application/json",
-        )
-        assert status == 400
+        for payload in (None, {}, {"state": "discarded"}, {"state": "applied"},
+                        {"state": 3}, "later"):
+            status, _, _ = _json_post(port, f"/match/{match_id}/restore", payload)
+            assert status == 400, payload
+        assert _apply_state(db_path, match_id)["state"] == "new"
     finally:
         server.shutdown()
         server.server_close()
@@ -1234,7 +1075,11 @@ def test_post_apply_without_paths_creates_application_only(tmp_path: Path) -> No
         thread.join(timeout=5)
 
 
-def test_post_apply_blank_library_ids_create_no_document(tmp_path: Path) -> None:
+@pytest.mark.parametrize("payload", [
+    {"cv_library_id": "", "cover_letter_library_id": None},
+    {"cv_library_id": 999},
+])
+def test_post_apply_empty_or_unknown_library_ids_create_no_document(tmp_path: Path, payload) -> None:
     db_path = tmp_path / "jw.db"
     connection = connect(db_path)
     init_db(connection)
@@ -1246,7 +1091,7 @@ def test_post_apply_blank_library_ids_create_no_document(tmp_path: Path) -> None
         status, _headers, _body = _json_post(
             port,
             f"/match/{match_id}/apply",
-            {"cv_library_id": "", "cover_letter_library_id": None},
+            payload,
         )
         assert status == 200
         assert _apply_state(db_path, match_id)["documents"] == []
@@ -1330,11 +1175,11 @@ def test_post_apply_rejects_non_integer_library_id(tmp_path: Path) -> None:
     server, thread = _start_server(db_path)
     try:
         port = server.server_address[1]
-        status, _headers, _body = _json_post(
-            port, f"/match/{match_id}/apply", {"cv_library_id": "not-an-id"}
-        )
-        assert status == 400
-        assert _apply_state(db_path, match_id)["application"] is None
+        for payload in ({"cv_library_id": "not-an-id"}, {"cv_library_id": "3"},
+                        {"cv_library_id": True}, {"cover_letter_library_id": [1]}):
+            status, _, _ = _json_post(port, f"/match/{match_id}/apply", payload)
+            assert status == 400, payload
+            assert _apply_state(db_path, match_id)["application"] is None
     finally:
         server.shutdown()
         server.server_close()

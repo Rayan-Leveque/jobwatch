@@ -102,19 +102,6 @@ class SourcesConfig:
     linkedin: LinkedInSource | None = None
     wttj: WttjSource | None = None
 
-    def configured(self) -> list[tuple[str, object]]:
-        """Renvoie les paires (source_type, config) pour chaque source configurée."""
-        pairs = []
-        if self.france_travail is not None:
-            pairs.append(("france_travail", self.france_travail))
-        if self.smartrecruiters is not None:
-            pairs.append(("smartrecruiters", self.smartrecruiters))
-        if self.linkedin is not None:
-            pairs.append(("linkedin", self.linkedin))
-        if self.wttj is not None:
-            pairs.append(("wttj", self.wttj))
-        return pairs
-
 
 @dataclass
 class NtfyConfig:

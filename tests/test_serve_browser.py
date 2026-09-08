@@ -799,7 +799,17 @@ def test_offer_markdown_renders_visually_not_as_raw_syntax(browser, dashboard) -
     _add_content(
         conn,
         offer_id,
-        "## Missions\n\n**Stack** : Python\n\n- Développement\n- Code review",
+        "## Missions\n\n**Stack** : *Python*\n\n- Développement\n- Code review\n"
+        "1. Entretien RH\n2. Entretien technique\n\n"
+        "Profil\n======\n\nSalaire 40-50k*\n\n#recrutement2026\n\n"
+        "#### \n\n[Site](https://example.com/careers)\n\n"
+        '[Wavestone](https://www.wavestone.com/ "Wavestone")\n\n'
+        "[Fiche](https://example.gouv.fr/metiers/ingenieur(e)/)\n\n"
+        "[Skip to main content](#main-content)\n\n"
+        '[Partager par email](mailto:?subject=Une offre &body=Voir ici "Partager par email")\n\n'
+        "[![Logo](https://example.com/logo.png)](https://www.wavestone.com/)\n\n"
+        "![Bannière](https://example.com/banner.png)\n\n---\n\n"
+        "Équipe\n---\n\nPrésentation\n\n----------------------------\n\nFin.",
     )
     conn.close()
     page = _open_page(browser, url)
@@ -815,6 +825,26 @@ def test_offer_markdown_renders_visually_not_as_raw_syntax(browser, dashboard) -
     assert "##" not in content.inner_text()
     assert "**" not in content.inner_text()
     assert "- Développement" not in content.inner_text()
+    expect(content.locator("em")).to_have_text("Python")
+    expect(content.locator("ol li")).to_have_text(["Entretien RH", "Entretien technique"])
+    expect(content.locator(".md-heading")).to_have_text(["Missions", "Profil", "Équipe"])
+    expect(content.locator("hr")).to_have_count(4)
+    expect(content.locator("img, h1, h2, h3, h4, h5, h6")).to_have_count(0)
+    for label, href in (
+        ("Site", "https://example.com/careers"),
+        ("Wavestone", "https://www.wavestone.com/"),
+        ("Fiche", "https://example.gouv.fr/metiers/ingenieur(e)/"),
+        ("Logo", "https://www.wavestone.com/"),
+    ):
+        link = content.get_by_role("link", name=label, exact=True)
+        expect(link).to_have_attribute("href", href)
+        expect(link).to_have_attribute("target", "_blank")
+        expect(link).to_have_attribute("rel", "noopener noreferrer")
+    expect(content.locator("a")).to_have_count(4)
+    for text in ("Salaire 40-50k*", "#recrutement2026", "Skip to main content",
+                 "Partager par email", "Bannière"):
+        expect(content).to_contain_text(text)
+    assert "![" not in content.inner_text()
     _assert_no_horizontal_overflow(page)
     page.close()
 
@@ -906,59 +936,38 @@ def test_invite_then_protected_action_in_browser(
     page.context.close()
 
 
-def test_later_click_removes_card_and_shows_undo_without_reload(browser, dashboard) -> None:
-    url, _db_path = dashboard
-    page = _open_page(browser, url)
-    card = _card(page, "NewCo")
-    card.locator(".action-later").click()
-    page.locator(".undo-toast").wait_for(state="visible", timeout=5000)
-    assert card.count() == 0
-    _assert_not_reloaded(page)
-    page.close()
-
-
-def test_discard_click_removes_card_and_shows_undo_without_reload(browser, dashboard) -> None:
-    url, _db_path = dashboard
-    page = _open_page(browser, url)
-    card = _card(page, "NewCo")
-    card.locator(".action-discard").click()
-    page.locator(".undo-toast").wait_for(state="visible", timeout=5000)
-    assert card.count() == 0
-    _assert_not_reloaded(page)
-    page.close()
-
-
-def test_later_click_updates_dom_even_when_transitions_are_skipped(browser, dashboard) -> None:
-    """Régression iPhone : transition sautée sans prefers-reduced-motion."""
-    url, _db_path = dashboard
-    page = _open_page(browser, url)
-    page.add_style_tag(content=NO_TRANSITIONS_CSS)
-    assert (
-        page.evaluate("window.matchMedia('(prefers-reduced-motion: reduce)').matches") is False
-    )
-    card = _card(page, "NewCo")
-    card.locator(".action-later").click()
-    page.locator(".undo-toast").wait_for(state="visible", timeout=5000)
-    assert card.count() == 0
-    _assert_not_reloaded(page)
-    page.close()
-
-
-def test_undo_restores_previous_state(browser, dashboard) -> None:
+@pytest.mark.parametrize("action,state", [("later", "later"), ("discard", "discarded")])
+@pytest.mark.parametrize("skip_transitions", [False, True])
+def test_triage_and_undo_persist_without_waiting_for_transitions(
+    browser, dashboard, action, state, skip_transitions,
+) -> None:
+    """Clic, persistance et annulation, y compris la régression iPhone."""
     url, db_path = dashboard
     page = _open_page(browser, url)
+    if skip_transitions:
+        page.add_style_tag(content=NO_TRANSITIONS_CSS)
+        assert not page.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches")
     card = _card(page, "NewCo")
-    card.locator(".action-later").click()
+    assert card.locator(".card-actions .card-action").all_inner_texts() == [
+        "Plus tard", "Candidater", "Écarter",
+    ]
+    card.locator(f".action-{action}").click()
     page.locator(".undo-toast .undo-btn").wait_for(state="visible", timeout=5000)
+    expect(card).to_have_count(0)
+    _assert_not_reloaded(page)
+    conn = connect(db_path)
+    query = (
+        "SELECT m.state, m.discarded_at FROM match m JOIN offer o ON o.id = m.offer_id "
+        "JOIN company c ON c.id = o.company_id WHERE c.name = 'NewCo'"
+    )
+    row = conn.execute(query).fetchone()
+    assert row["state"] == state
+    assert (row["discarded_at"] is not None) == (state == "discarded")
     with page.expect_navigation():
         page.locator(".undo-toast .undo-btn").click()
-    conn = connect(db_path)
-    state = conn.execute(
-        "SELECT m.state AS state FROM match m JOIN offer o ON o.id = m.offer_id "
-        "JOIN company c ON c.id = o.company_id WHERE c.name = 'NewCo'"
-    ).fetchone()["state"]
+    expect(_card(page, "NewCo")).to_be_visible()
+    assert tuple(conn.execute(query).fetchone()) == ("new", None)
     conn.close()
-    assert state == "new"
     page.close()
 
 
@@ -1017,14 +1026,6 @@ def test_apply_form_submits_and_removes_card_without_reload(browser, dashboard, 
     assert [d["type"] for d in documents] == ["cover_letter", "cv"]
     assert Path(documents[1]["path"]).read_bytes() == b"%PDF-1.4 cv content"
     assert Path(documents[0]["path"]).read_bytes() == b"# Lettre de motivation"
-    page.close()
-
-
-def test_card_action_buttons_render_in_order_later_apply_discard(browser, dashboard) -> None:
-    url, _db_path = dashboard
-    page = _open_page(browser, url)
-    buttons = _card(page, "NewCo").locator(".card-actions .card-action")
-    assert buttons.all_inner_texts() == ["Plus tard", "Candidater", "Écarter"]
     page.close()
 
 

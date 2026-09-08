@@ -12,8 +12,7 @@ Pas de cloud, pas de traçage : le tableau de bord, SQLite et les documents gér
 locaux dans le dossier de l'instance sur votre machine. Trois fonctions LLM restent optionnelles
 et inertes sans configuration explicite : `research` complète les collecteurs directs par une
 recherche web large, `jw enrich` extrait et résume les annonces collectées, et le tableau de bord
-peut rédiger des lettres de motivation. Les appels passent par un binaire OpenCode, Codex ou Pi
-local, ou par l’API OpenRouter pour `research`. Les restrictions des runners figurent dans la
+peut rédiger des lettres de motivation. Les runners disponibles et leurs restrictions figurent dans la
 [référence de configuration](#référence-de-configuration). Les fonctions IA transmettent au
 fournisseur du modèle les données nécessaires à leur tâche.
 
@@ -235,8 +234,8 @@ ne coûtent aucun token. Pour chaque offre active sans texte stocké ou sans cha
    annonce, retente via Playwright (Chromium headless) et convertit la page rendue.
 4. Stocke le texte retenu dans `offer_content`, avec son statut, sa méthode de récupération,
    sa méthode d'extraction et une copie compressée du HTML brut pour permettre un retraitement.
-5. Génère un résumé structuré via le LLM configuré (runner `opencode`, `codex` ou `pi`, en
-   subprocess, jusqu'à `concurrency` appels simultanés) : quatre
+5. Génère un résumé structuré via le LLM configuré dans le bloc `enrich` de la
+   [référence de configuration](#référence-de-configuration), avec quatre
    champs fixes - Expérience souhaitée, Salaire, Télétravail, Stack, valeur « non précisé »
    quand l'annonce ne dit rien (table `summary_field`) - suivis de puces mission
    (`offer_summary`/`summary_bullet`, `source = 'auto'`). Les puces d'un résumé `manual`
@@ -513,6 +512,25 @@ repli reproduit le comportement antérieur jusqu'à ce que leur propriétaire mo
 - v0.3 : import des artefacts quotidiens (`jw ingest-daily`) et du suivi Markdown (`jw import-md`), fit LLM, échéances et documents.
 - v0.4 : résumés high stockés dans SQLite et affichés dans le tableau de bord.
 - v0.5 : `jw enrich` récupère le texte complet des annonces collectées et en génère un résumé via LLM.
+
+## Vérifier les changements
+
+Privilégiez les parcours navigateur, HTTP et CLI sur des bases temporaires.
+Étendez un parcours existant plutôt que de tester à nouveau ses fonctions internes.
+Les tests ciblés restent utiles pour la sécurité, les migrations, les formats externes
+et les pannes réseau ou LLM. Les mocks se limitent autant que possible aux services externes.
+
+```bash
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/playwright install chromium
+.venv/bin/pytest -q tests/test_serve_browser.py tests/test_beta_browser.py
+.venv/bin/pytest -q tests/test_cli.py tests/test_importing.py tests/test_matching.py
+.venv/bin/ruff check .
+.venv/bin/pytest -q
+```
+
+Vérifiez les tests ignorés avant livraison. Chromium est nécessaire aux parcours navigateur.
+Les tests de compilation des lettres nécessitent aussi `lualatex` et les outils Poppler.
 
 ## Licence
 

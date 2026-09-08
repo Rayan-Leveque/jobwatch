@@ -96,11 +96,6 @@ class Extraction:
     #: Lignes repêchées hors du corps de l'annonce (salaires isolés, etc.).
     salvaged_lines: int = 0
 
-    @property
-    def degraded(self) -> bool:
-        """Vrai quand on a dû garder la page entière faute de mieux."""
-        return self.method == "raw"
-
 
 def extract(html: str) -> Extraction:
     """Renvoie le meilleur texte disponible pour cette page, jamais moins que le brut."""

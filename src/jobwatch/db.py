@@ -1,11 +1,10 @@
-"""Connexion SQLite, initialisation du schéma et helpers de lignes."""
+"""Connexion SQLite et initialisation du schéma."""
 
 from __future__ import annotations
 
 import sqlite3
 from importlib import resources
 from pathlib import Path
-from typing import Any
 
 SCHEMA_FILE = "schema.sql"
 
@@ -63,13 +62,3 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
-
-
-def row(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> sqlite3.Row | None:
-    """Renvoie une ligne unique ou None."""
-    return conn.execute(query, params).fetchone()
-
-
-def rows(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
-    """Renvoie toutes les lignes sous forme de liste."""
-    return list(conn.execute(query, params).fetchall())
