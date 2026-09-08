@@ -126,13 +126,15 @@ _BUG_REPORT_JS = """\
 """
 
 
-def _login_form(email: str = "", error: str = "") -> str:
+def _login_form(email: str = "", error: str = "", *, remember: bool = False) -> str:
     error_html = f'<p class="auth-error">{html.escape(error)}</p>' if error else ""
     return f"""{error_html}
 <form method="post" action="/login">
   <label>Email<input type="email" name="email" autocomplete="username" required
     value="{html.escape(email, quote=True)}"></label>
   {_password_field("password", "Mot de passe", "current-password")}
+  <label class="auth-remember"><input type="checkbox" name="remember" value="1"
+    {'checked' if remember else ''}>Se souvenir de moi pendant 30 jours</label>
   <button type="submit">Se connecter</button>
 </form>"""
 
@@ -195,6 +197,9 @@ label {{ display:grid; gap:8px; color:#686d76; font-size:.86rem; font-weight:650
 input {{ width:100%; padding:13px 14px; border:1px solid rgba(29,31,35,.17);
   border-radius:12px; color:#191b1f; background:#f8f6ef; font:inherit; }}
 input:focus {{ outline:2px solid #42752d; outline-offset:2px; }}
+.auth-remember {{ display:flex; align-items:center; min-height:44px; cursor:pointer; }}
+.auth-remember input {{ flex-shrink:0; width:20px; height:20px; margin:0;
+  padding:0; accent-color:#42752d; }}
 .password-field {{ position:relative; display:block; }}
 .password-field input {{ padding-right:48px; }}
 button {{ margin-top:4px; padding:14px 18px; border:0; border-radius:12px;

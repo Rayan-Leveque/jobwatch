@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import http.client
 import json
 import sqlite3
@@ -8,7 +9,9 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlencode
 
-from jobwatch.auth import accept_invite, create_invite, create_session
+import pytest
+
+from jobwatch.auth import accept_invite, create_invite, create_session, resolve_session
 from jobwatch.db import connect, init_db
 from jobwatch.onboarding import complete_profile
 from jobwatch.serve import make_handler
@@ -132,7 +135,8 @@ def test_bug_report_rejects_an_empty_description(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
-def test_invite_session_csrf_and_logout_end_to_end(tmp_path: Path) -> None:
+@pytest.mark.parametrize("remember", [None, "1", "invalid"])
+def test_invite_session_csrf_and_logout_end_to_end(tmp_path: Path, remember: str | None) -> None:
     db_path = tmp_path / "jobwatch.db"
     conn = connect(db_path)
     init_db(conn)
@@ -164,7 +168,28 @@ def test_invite_session_csrf_and_logout_end_to_end(tmp_path: Path) -> None:
         )
         assert status == 303
         assert headers["Location"] == "/"
+        assert "Max-Age" not in headers["Set-Cookie"]
+        fields = {"email": "alice@example.com", "password": password}
+        if remember is not None:
+            fields["remember"] = remember
+        status, headers, _body = _request(
+            port, "POST", "/login", body=urlencode(fields).encode(), headers=_form_headers(port)
+        )
+        assert status == 303
         cookie_header = headers["Set-Cookie"]
+        if remember == "1":
+            assert "Max-Age=2592000" in cookie_header
+        else:
+            assert "Max-Age" not in cookie_header
+        token = cookie_header.split(";", 1)[0].split("=", 1)[1]
+        conn = connect(db_path)
+        row = conn.execute("SELECT * FROM web_session ORDER BY rowid DESC LIMIT 1").fetchone()
+        created = datetime.datetime.fromisoformat(row["created_at"])
+        expires = datetime.datetime.fromisoformat(row["expires_at"])
+        assert expires - created == datetime.timedelta(days=30 if remember == "1" else 1)
+        assert resolve_session(conn, token, now=expires - datetime.timedelta(seconds=1))
+        assert resolve_session(conn, token, now=expires) is None
+        conn.close()
         assert "HttpOnly" in cookie_header
         assert "SameSite=Strict" in cookie_header
         assert "Secure" not in cookie_header

@@ -6,16 +6,14 @@ import json
 import sqlite3
 
 import pytest
+from click.testing import CliRunner
 
-from jobwatch.config import SearchConfig
+from jobwatch.cli import cli
 from jobwatch.db import connect, init_db
-from jobwatch.matching import offer_matches_search, run_matching, sync_searches
 from jobwatch.onboarding import complete_profile
 from jobwatch.profile import save_profile_details
 from jobwatch.seniority import reclassify_all_profiles
 from jobwatch.serve_render import render_page
-
-MATCH_QUERY = "SELECT * FROM match WHERE search_id = ? AND offer_id = ?"
 
 
 @pytest.fixture()
@@ -24,28 +22,6 @@ def conn() -> sqlite3.Connection:
     init_db(connection)
     yield connection
     connection.close()
-
-
-def _insert_search(
-    conn: sqlite3.Connection,
-    name: str,
-    include: list[str],
-    exclude: list[str] | None = None,
-    locations: list[str] | None = None,
-    contract: str | None = None,
-) -> int:
-    cur = conn.execute(
-        "INSERT INTO search (name, include_json, exclude_json, locations_json, contract) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (
-            name,
-            json.dumps(include),
-            json.dumps(exclude or []),
-            json.dumps(locations or []),
-            contract,
-        ),
-    )
-    return int(cur.lastrowid)
 
 
 def _company_id(conn: sqlite3.Connection, name: str) -> int:
@@ -85,8 +61,7 @@ def _add_experience(conn: sqlite3.Connection, offer_id: int, value: str, content
         ).lastrowid
     )
     conn.execute(
-        "INSERT INTO summary_field (summary_id, key, value, quote) "
-        "VALUES (?, 'experience', ?, ?)",
+        "INSERT INTO summary_field (summary_id, key, value, quote) VALUES (?, 'experience', ?, ?)",
         (summary_id, value, content),
     )
 
@@ -109,9 +84,7 @@ def test_junior_profile_filters_explicit_senior_offer_but_keeps_compatible_and_u
     conn: sqlite3.Connection,
 ) -> None:
     account_id, workspace_id = _insert_owner(conn)
-    senior_id = _insert_offer(
-        conn, "Product Owner IA H/F - Asnières-sur-Seine", "https://a/senior"
-    )
+    senior_id = _insert_offer(conn, "Product Owner IA H/F - Asnières-sur-Seine", "https://a/senior")
     compatible_id = _insert_offer(conn, "AI Solutions engineer", "https://a/junior")
     unknown_id = _insert_offer(conn, "AI Product Owner", "https://a/unknown")
     _add_experience(
@@ -191,9 +164,10 @@ def test_seniority_change_reclassifies_recent_feed_without_destroying_decisions(
     assert "AI Engineer" not in page
     assert "AI Platform Engineer" in page
     assert conn.execute("SELECT COUNT(*) AS n FROM match").fetchone()["n"] == 2
-    assert conn.execute(
-        "SELECT state FROM match WHERE id = ?", (later_match_id,)
-    ).fetchone()["state"] == "later"
+    assert (
+        conn.execute("SELECT state FROM match WHERE id = ?", (later_match_id,)).fetchone()["state"]
+        == "later"
+    )
 
 
 def test_later_experience_enrichment_reclassifies_previous_unknown_match(
@@ -225,148 +199,82 @@ def test_later_experience_enrichment_reclassifies_previous_unknown_match(
     assert "AI Engineer" not in render_page(conn, track="all", account_id=account_id)
 
 
-def test_sync_searches_inserts_new(conn: sqlite3.Connection) -> None:
-    sync_searches(conn, [SearchConfig(name="s1", include=["AI"])])
-    row = conn.execute("SELECT * FROM search WHERE name = 's1'").fetchone()
-    assert row is not None
-    assert row["active"] == 1
-    assert json.loads(row["include_json"]) == ["AI"]
-
-
-def test_sync_searches_updates_changed(conn: sqlite3.Connection) -> None:
-    sync_searches(conn, [SearchConfig(name="s1", include=["AI"])])
-    sync_searches(conn, [SearchConfig(name="s1", include=["AI", "LLM"], contract="permanent")])
-    row = conn.execute("SELECT * FROM search WHERE name = 's1'").fetchone()
-    assert json.loads(row["include_json"]) == ["AI", "LLM"]
-    assert row["contract"] == "permanent"
-
-
-def test_sync_searches_reactivates(conn: sqlite3.Connection) -> None:
-    sync_searches(conn, [SearchConfig(name="s1", include=["AI"])])
-    conn.execute("UPDATE search SET active = 0 WHERE name = 's1'")
+def test_cli_run_filters_offers_and_resyncs_searches_without_resetting_triage(tmp_path) -> None:
+    db = tmp_path / "jw.db"
+    conn = connect(db)
+    init_db(conn)
+    for key, title, location, contract in (
+        ("ml", "Machine Learning Engineer", "Paris 11e", "permanent"),
+        ("llm", "LLM Platform Engineer", "Paris", "permanent"),
+        ("other", "Frontend Developer", "Paris", "permanent"),
+        ("excluded", "AI Engineer Stage", "Paris", "permanent"),
+        ("outside", "AI Engineer Lyon", "Lyon", "permanent"),
+        ("no-location", "AI Engineer Anywhere", None, "permanent"),
+        ("contract", "AI Engineer CDD", "Paris", "fixed_term"),
+        ("no-contract", "AI Engineer Unknown", "Paris", None),
+    ):
+        _insert_offer(conn, title, f"https://a/{key}", location=location, contract=contract)
+    _insert_offer(conn, "AI Engineer Old", "https://a/old", collected_at="2020-01-01")
     conn.commit()
-    sync_searches(conn, [SearchConfig(name="s1", include=["AI"])])
-    row = conn.execute("SELECT * FROM search WHERE name = 's1'").fetchone()
-    assert row["active"] == 1
-
-
-def test_sync_searches_deactivates_removed(conn: sqlite3.Connection) -> None:
-    sync_searches(
-        conn, [SearchConfig(name="s1", include=["AI"]), SearchConfig(name="s2", include=["X"])]
-    )
-    sync_searches(conn, [SearchConfig(name="s1", include=["AI"])])
-    active = [
-        str(r["name"]) for r in conn.execute("SELECT name FROM search WHERE active = 1").fetchall()
-    ]
-    assert active == ["s1"]
-
-
-def _run_matching_for(conn: sqlite3.Connection, search_id: int, offer_id: int) -> bool:
-    run_matching(conn)
-    return conn.execute(MATCH_QUERY, (search_id, offer_id)).fetchone() is not None
-
-
-def test_match_on_include_keyword_case_insensitive(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["machine learning"])
-    offer_id = _insert_offer(conn, "Senior Machine Learning Engineer", "https://a/1")
-    assert _run_matching_for(conn, search_id, offer_id)
-
-
-def test_match_on_any_include_keyword(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI engineer", "LLM"])
-    offer_id = _insert_offer(conn, "LLM Platform Engineer", "https://a/1")
-    assert _run_matching_for(conn, search_id, offer_id)
-
-
-def test_no_match_when_include_absent(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["machine learning"])
-    offer_id = _insert_offer(conn, "Frontend Developer", "https://a/1")
-    assert not _run_matching_for(conn, search_id, offer_id)
-
-
-def test_no_match_when_exclude_present(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI"], exclude=["stage", "internship"])
-    offer_id = _insert_offer(conn, "AI Engineer Stage", "https://a/1")
-    assert not _run_matching_for(conn, search_id, offer_id)
-
-
-def test_location_substring_match(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI"], locations=["Île-de-France", "Paris"])
-    offer_id = _insert_offer(conn, "AI Engineer", "https://a/1", location="Paris 11e")
-    assert _run_matching_for(conn, search_id, offer_id)
-
-
-def test_no_match_when_location_outside(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI"], locations=["Paris"])
-    offer_id = _insert_offer(conn, "AI Engineer", "https://a/1", location="Lyon")
-    assert not _run_matching_for(conn, search_id, offer_id)
-
-
-def test_match_when_offer_location_missing(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI"], locations=["Paris"])
-    offer_id = _insert_offer(conn, "AI Engineer", "https://a/1", location=None)
-    assert _run_matching_for(conn, search_id, offer_id)
-
-
-def test_match_when_locations_empty(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI"])
-    offer_id = _insert_offer(conn, "AI Engineer", "https://a/1", location="Somewhere")
-    assert _run_matching_for(conn, search_id, offer_id)
-
-
-def test_contract_filter_blocks_mismatch(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI"], contract="permanent")
-    offer_id = _insert_offer(conn, "AI Engineer", "https://a/1", contract="fixed_term")
-    assert not _run_matching_for(conn, search_id, offer_id)
-
-
-def test_contract_filter_allows_match(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI"], contract="permanent")
-    offer_id = _insert_offer(conn, "AI Engineer", "https://a/1", contract="permanent")
-    assert _run_matching_for(conn, search_id, offer_id)
-
-
-def test_offer_contract_missing_matches_any_search_contract(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI"], contract="permanent")
-    offer_id = _insert_offer(conn, "AI Engineer", "https://a/1", contract=None)
-    assert _run_matching_for(conn, search_id, offer_id)
-
-
-def test_contract_null_matches_any(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI"])
-    offer_id = _insert_offer(conn, "AI Engineer", "https://a/1", contract="fixed_term")
-    assert _run_matching_for(conn, search_id, offer_id)
-
-
-def test_old_offers_are_not_matched(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI"])
-    offer_id = _insert_offer(conn, "AI Engineer", "https://a/1", collected_at="2020-01-01 00:00:00")
-    assert not _run_matching_for(conn, search_id, offer_id)
-
-
-def test_run_matching_is_idempotent(conn: sqlite3.Connection) -> None:
-    _insert_search(conn, "s", ["AI"])
-    _insert_offer(conn, "AI Engineer", "https://a/1")
-    run_matching(conn)
-    run_matching(conn)
-    count = conn.execute("SELECT count(*) FROM match").fetchone()[0]
-    assert count == 1
-
-
-def test_inactive_search_does_not_match(conn: sqlite3.Connection) -> None:
-    search_id = _insert_search(conn, "s", ["AI"])
-    conn.execute("UPDATE search SET active = 0 WHERE id = ?", (search_id,))
-    conn.commit()
-    offer_id = _insert_offer(conn, "AI Engineer", "https://a/1")
-    assert not _run_matching_for(conn, search_id, offer_id)
-
-
-def test_offer_matches_search_with_contract_none(conn: sqlite3.Connection) -> None:
-    search = conn.execute(
-        "SELECT * FROM search WHERE id = ?", (_insert_search(conn, "s", ["AI"]),)
-    ).fetchone()
-    offer = conn.execute(
-        "SELECT * FROM offer WHERE id = ?",
-        (_insert_offer(conn, "AI Engineer", "https://a/1"),),
-    ).fetchone()
-    assert offer_matches_search(offer, search)
+    config = tmp_path / "config.yaml"
+    strict = {
+        "name": "strict",
+        "include": ["machine learning", "AI", "LLM"],
+        "exclude": ["stage"],
+        "locations": ["Paris"],
+        "contract": "permanent",
+    }
+    broad = {"name": "broad", "include": ["AI"]}
+    runner = CliRunner()
+    for step, searches, expected in (
+        ("initial", [strict, broad], {"ml", "llm", "no-location", "no-contract"}),
+        ("disabled", [broad], {"ml", "llm", "no-location", "no-contract"}),
+        (
+            "updated",
+            [{**strict, "contract": None, "locations": [], "include": ["AI"]}, broad],
+            {"ml", "llm", "outside", "no-location", "contract", "no-contract", "later"},
+        ),
+    ):
+        config.write_text(json.dumps({"db": str(db), "searches": searches}))
+        result = runner.invoke(cli, ["run", "--config", str(config)])
+        assert result.exit_code == 0, result.output
+        urls = {
+            r[0].removeprefix("https://a/")
+            for r in conn.execute(
+                "SELECT o.url FROM match m JOIN offer o ON o.id = m.offer_id "
+                "JOIN search s ON s.id = m.search_id WHERE s.name = 'strict'"
+            )
+        }
+        assert urls == expected
+        assert [
+            r[0] for r in conn.execute("SELECT name FROM search WHERE active = 1 ORDER BY name")
+        ] == (sorted(s["name"] for s in searches))
+        before = list(conn.execute("SELECT id, state FROM match ORDER BY id"))
+        assert runner.invoke(cli, ["run", "--config", str(config)]).exit_code == 0
+        assert list(conn.execute("SELECT id, state FROM match ORDER BY id")) == before
+        broad_urls = {
+            r[0].removeprefix("https://a/")
+            for r in conn.execute(
+                "SELECT o.url FROM match m JOIN offer o ON o.id = m.offer_id "
+                "JOIN search s ON s.id = m.search_id WHERE s.name = 'broad'"
+            )
+        }
+        assert broad_urls == {"excluded", "outside", "no-location", "contract", "no-contract"} | (
+            set() if step == "initial" else {"later"}
+        )
+        if step == "initial":
+            initial_ids = [r[0] for r in before]
+            conn.execute("UPDATE match SET state = 'later'")
+            _insert_offer(conn, "AI Engineer Later", "https://a/later")
+            conn.commit()
+    assert [
+        r[0] for r in conn.execute("SELECT id FROM match WHERE state = 'later' ORDER BY id")
+    ] == initial_ids
+    search = conn.execute("SELECT * FROM search WHERE name = 'strict'").fetchone()
+    assert json.loads(search["include_json"]) == ["AI"]
+    assert search["contract"] is None
+    assert json.loads(search["locations_json"]) == []
+    listing = runner.invoke(cli, ["list", "--state", "later", "--config", str(config)])
+    assert listing.exit_code == 0, listing.output
+    assert "Machine Learning Engineer" in listing.output
+    conn.close()

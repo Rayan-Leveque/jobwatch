@@ -976,9 +976,11 @@ def make_handler(
             fields = self._read_form_body()
             email = fields.get("email", "")
             password = fields.get("password", "")
+            remember = fields.get("remember") == "1"
             if workspace_slug is None:
                 self._send_auth_page(
-                    "Connexion", _login_form(email, "Instance nommée requise."), status=503
+                    "Connexion", _login_form(email, "Instance nommée requise.", remember=remember),
+                    status=503
                 )
                 return
             with self._db() as conn:
@@ -989,22 +991,30 @@ def make_handler(
                 if not login_allowed(conn, key):
                     self._send_auth_page(
                         "Connexion",
-                        _login_form(email, "Trop de tentatives. Réessayez dans 15 minutes."),
+                        _login_form(
+                            email, "Trop de tentatives. Réessayez dans 15 minutes.",
+                            remember=remember,
+                        ),
                         status=429,
                     )
                     return
                 try:
-                    token, _session = create_session(conn, email, password, workspace_slug)
+                    token, _session = create_session(
+                        conn, email, password, workspace_slug, remember=remember
+                    )
                 except AuthError:
                     record_login_failure(conn, key)
                     self._send_auth_page(
-                        "Connexion", _login_form(email, "Email ou mot de passe incorrect."),
+                        "Connexion",
+                        _login_form(email, "Email ou mot de passe incorrect.", remember=remember),
                         status=401,
                     )
                     return
                 clear_login_failures(conn, key)
             self._redirect(
-                "/", headers={"Set-Cookie": session_cookie(token, secure=secure_cookie)}
+                "/", headers={
+                    "Set-Cookie": session_cookie(token, secure=secure_cookie, remember=remember)
+                }
             )
 
         def _handle_invite(self, token: str) -> None:

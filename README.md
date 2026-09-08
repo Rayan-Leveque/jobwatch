@@ -343,7 +343,9 @@ votre réseau. Une installation historique sans compte conserve son comportement
 Pour protéger une instance nommée, créez son invitation avec `account invite` : toutes les routes,
 y compris les documents et les actions qui mutent SQLite, exigent alors une session, et les POST
 exigent aussi le jeton CSRF de cette session. Les mots de passe font au moins 8 caractères, les
-sessions expirent après 24 heures et cinq échecs de connexion bloquent la paire email/adresse
+sessions expirent après 24 heures. Cocher « Se souvenir de moi pendant 30 jours » conserve la
+connexion dans le navigateur pendant 30 jours, sans prolongation automatique. La déconnexion
+invalide immédiatement la session. Cinq échecs de connexion bloquent la paire email/adresse
 pendant 15 minutes. Préférez HTTPS avec le cookie sécurisé par défaut. `--no-secure-cookie` existe
 uniquement pour un accès HTTP local ou sur un réseau privé chiffré comme Tailscale.
 
@@ -509,6 +511,25 @@ repli reproduit le comportement antérieur jusqu'à ce que leur propriétaire mo
 - v0.3 : import des artefacts quotidiens (`jw ingest-daily`) et du suivi Markdown (`jw import-md`), fit LLM, échéances et documents.
 - v0.4 : résumés high stockés dans SQLite et affichés dans le tableau de bord.
 - v0.5 : `jw enrich` récupère le texte complet des annonces collectées et en génère un résumé via LLM.
+
+## Vérifier les changements
+
+Privilégiez les parcours navigateur, HTTP et CLI sur des bases temporaires.
+Étendez un parcours existant plutôt que de tester à nouveau ses fonctions internes.
+Les tests ciblés restent utiles pour la sécurité, les migrations, les formats externes
+et les pannes réseau ou LLM. Les mocks se limitent autant que possible aux services externes.
+
+```bash
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/playwright install chromium
+.venv/bin/pytest -q tests/test_serve_browser.py tests/test_beta_browser.py
+.venv/bin/pytest -q tests/test_cli.py tests/test_importing.py tests/test_matching.py
+.venv/bin/ruff check .
+.venv/bin/pytest -q
+```
+
+Vérifiez les tests ignorés avant livraison. Chromium est nécessaire aux parcours navigateur.
+Les tests de compilation des lettres nécessitent aussi `lualatex` et les outils Poppler.
 
 ## Licence
 

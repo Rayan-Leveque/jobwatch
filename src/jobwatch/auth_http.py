@@ -5,20 +5,22 @@ from __future__ import annotations
 import hmac
 from http.cookies import CookieError, SimpleCookie
 
-from jobwatch.auth import Session
+from jobwatch.auth import REMEMBER_SESSION_SECONDS, Session
 
 SESSION_COOKIE = "id"
 CSRF_HEADER = "X-CSRF-Token"
 
 
-def session_cookie(token: str, *, secure: bool) -> str:
-    """Construit un cookie de session non persistant et inaccessible au JavaScript."""
+def session_cookie(token: str, *, secure: bool, remember: bool = False) -> str:
+    """Construit un cookie HttpOnly, persistant 30 jours sur demande."""
     cookie = SimpleCookie()
     cookie[SESSION_COOKIE] = token
     morsel = cookie[SESSION_COOKIE]
     morsel["path"] = "/"
     morsel["httponly"] = True
     morsel["samesite"] = "Strict"
+    if remember:
+        morsel["max-age"] = REMEMBER_SESSION_SECONDS
     if secure:
         morsel["secure"] = True
     return morsel.OutputString()

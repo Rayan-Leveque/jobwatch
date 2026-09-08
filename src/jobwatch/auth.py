@@ -21,6 +21,7 @@ SCRYPT_DKLEN = 32
 SCRYPT_MAXMEM = 256 * 1024 * 1024
 INVITE_HOURS = 48
 SESSION_HOURS = 24
+REMEMBER_SESSION_SECONDS = 30 * 24 * 60 * 60
 AUTH_REQUIRED_KEY = "auth_required"
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_MINUTES = 15
@@ -290,9 +291,10 @@ def create_session(
     password: str,
     workspace_slug: str,
     *,
+    remember: bool = False,
     now: datetime.datetime | None = None,
 ) -> tuple[str, Session]:
-    """Vérifie les identifiants puis crée une session serveur de 24 heures."""
+    """Crée une session de 24 heures, ou de 30 jours sur demande."""
     current = _now(now)
     normalized_email = normalize_email(email)
     row = conn.execute(
@@ -312,7 +314,8 @@ def create_session(
         raise AuthError("identifiants invalides")
     token = secrets.token_urlsafe(32)
     csrf_token = secrets.token_urlsafe(32)
-    expires = _timestamp(current + datetime.timedelta(hours=SESSION_HOURS))
+    lifetime = REMEMBER_SESSION_SECONDS if remember else SESSION_HOURS * 60 * 60
+    expires = _timestamp(current + datetime.timedelta(seconds=lifetime))
     conn.execute(
         "INSERT INTO web_session "
         "(token_hash, account_id, workspace_id, csrf_token, expires_at, created_at, last_seen_at) "
