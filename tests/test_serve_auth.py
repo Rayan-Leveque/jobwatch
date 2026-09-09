@@ -557,7 +557,7 @@ def test_first_time_friend_is_guided_to_private_letter_profile(tmp_path: Path) -
         assert status == 200
         assert "Tous les champs sont facultatifs" in body
         assert "alice@example.com" in body
-        assert "Espace alice" in body
+        assert "Espace alice" not in body
         assert 'name="motivations"' in body
 
         profile_payload = json.dumps(
@@ -587,7 +587,7 @@ def test_first_time_friend_is_guided_to_private_letter_profile(tmp_path: Path) -
         status, _headers, body = _request(port, "GET", "/", headers={"Cookie": cookie})
         assert status == 200
         assert "alice@example.com" in body
-        assert "Espace alice" in body
+        assert "Espace alice" not in body
         assert 'href="/options">' in body
         assert "manage-link" not in body
 
