@@ -190,7 +190,7 @@ textarea:focus {{ outline:3px solid rgba(112,82,200,.24); border-color:#7052c8 }
   .status {{ flex-basis:100% }} .skip,button {{ flex:1; justify-content:center }} }}
 </style></head><body><main class="shell">
   <div class="top"><a class="back" href="/">← Tableau de bord</a>
-    <div class="account-actions"><div class="account">{html.escape(email)}<br>Espace {html.escape(workspace_slug)}</div></div></div>
+    <div class="account-actions"><div class="account">{html.escape(email)}</div></div></div>
   <p class="eyebrow">Options</p><h1>Adaptez Jobwatch à votre recherche.</h1>
   <p class="intro">{html.escape(intro)}</p>
   <p class="note">Tous les champs sont facultatifs. Jobwatch utilise seulement des informations
@@ -259,7 +259,7 @@ textarea:focus {{ outline:3px solid rgba(112,82,200,.24); border-color:#7052c8 }
     <div class="settings-panel" id="panel-securite" role="tabpanel" data-settings-panel="securite" hidden>
       <div class="panel-heading"><h2>Sécurité</h2><p>Consultez le compte connecté et fermez sa session.</p></div>
       <section class="security-card"><div class="security-row"><div><strong>Compte connecté</strong>
-        <span>{html.escape(email)} · Espace {html.escape(workspace_slug)}</span></div>
+        <span>{html.escape(email)}</span></div>
         <button class="logout" id="logout" type="button">Se déconnecter</button></div></section>
     </div>
     <div class="actions"><p class="status" id="status" aria-live="polite"></p>
@@ -267,7 +267,7 @@ textarea:focus {{ outline:3px solid rgba(112,82,200,.24); border-color:#7052c8 }
       <button id="save" type="submit">Enregistrer mes options</button></div>
     </div></div>
   </form>
-  <p class="privacy">Ces informations restent dans la base SQLite de cet espace. Elles sont
+  <p class="privacy">Ces informations restent dans la base SQLite de votre compte. Elles sont
     envoyées au modèle de rédaction uniquement quand vous demandez une lettre.</p>
 </main><script>
 const letterFields=document.getElementById('letter-fields');

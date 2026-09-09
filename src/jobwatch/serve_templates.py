@@ -170,11 +170,7 @@ def _password_field(
 
 
 def _auth_page(title: str, body: str, *, workspace_slug: str | None = None) -> str:
-    workspace = (
-        f'<p class="auth-workspace">Espace {html.escape(workspace_slug)}</p>'
-        if workspace_slug
-        else ""
-    )
+    workspace = ""
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -1317,11 +1313,10 @@ def _page_template(
 ) -> str:
     if csrf_token and identity_email:
         email = html.escape(identity_email)
-        workspace = html.escape(identity_workspace)
         identity = f'''<details class="user-menu"><summary aria-label="Ouvrir le menu utilisateur">
           <div class="monogram" aria-hidden="true">{email[:1].upper()}</div>
           <div class="identity-copy"><span class="identity-name">{email}</span>
-            <span class="identity-sub">Espace {workspace}</span></div></summary>
+            <span class="identity-sub">Suivi de vos offres</span></div></summary>
           <div class="user-menu-panel">
             <a class="user-menu-item" href="/options"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg>Options</a>
             <div class="user-menu-divider"></div>
