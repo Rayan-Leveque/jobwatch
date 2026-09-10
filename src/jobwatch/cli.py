@@ -740,12 +740,19 @@ def apps(config_path: Path | None) -> None:
     is_flag=True,
     help="autorise explicitement une instance nommée sans compte (développement local uniquement)",
 )
+@click.option(
+    "--collect-onboarding",
+    is_flag=True,
+    envvar="JOBWATCH_COLLECT_ONBOARDING",
+    help="demande la première collecte via jobwatch-collect@.path (installation systemd)",
+)
 def serve(
     config_path: Path | None,
     host: str,
     port: int,
     secure_cookie: bool,
     allow_open: bool,
+    collect_onboarding: bool,
 ) -> None:
     """Sert un tableau de bord web local."""
     config = _require_config(config_path)
@@ -767,6 +774,7 @@ def serve(
             workspace_slug=_current_instance(),
             secure_cookie=secure_cookie,
             onboarding_enabled=_current_instance() is not None,
+            collect_onboarding=collect_onboarding,
         )
     except ServeError as exc:
         _fatal(str(exc))

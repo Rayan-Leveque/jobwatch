@@ -20,7 +20,7 @@ gestion des certificats TLS sur l'hôte. Placer un checkout du commit validé so
 Le code et la `.venv` appartiennent à root et ne sont pas modifiables par les comptes
 Jobwatch. Le lien `/opt/jobwatch/current` pointe vers cette version.
 
-Installer les fichiers `jobwatch*.service` et `jobwatch*.timer` de ce dossier sous
+Installer les fichiers `jobwatch*.service`, `jobwatch*.timer` et `jobwatch*.path` de ce dossier sous
 `/etc/systemd/system/`, puis lancer `systemctl daemon-reload`.
 
 Les unités limitent la mémoire, les processus, le CPU et l'accès en écriture.
@@ -59,9 +59,20 @@ des offres déjà en base. Avec des localisations renseignées, le télétravail
 une requête France filtrée par LinkedIn et élargit le matching aux mentions « Télétravail
 complet » et « full remote ». Les offres sans lieu connu restent visibles.
 
-Le timer collecte toutes les six heures avec un décalage aléatoire de vingt minutes.
-Aucune requête ne part avant la confirmation du profil. Pour la première invitation,
-après confirmation du profil, l'opérateur peut lancer immédiatement
+La première confirmation du profil crée `collect.request` dans le dossier de données.
+L'unité serveur active `--collect-onboarding` via `JOBWATCH_COLLECT_ONBOARDING=1`.
+`jobwatch-collect@alice.path` déclenche alors
+le service de collecte existant, sans bloquer l'inscription. Le profil et ses localisations
+sont enregistrés avant cette demande. Un profil invalide ou une modification ultérieure
+ne déclenche pas une nouvelle première collecte. Hors de cette installation systemd,
+`jw serve` ne crée pas de demande sans activation explicite de cette option.
+
+Le service consomme la demande au démarrage. Un échec reste visible dans systemd et
+le timer suivant retente la collecte, sans boucle immédiate. Le timer conserve ses passages
+à 00 h, 06 h, 12 h et 18 h avec un décalage aléatoire de vingt minutes maximum.
+Aucune requête ne part avant la confirmation du profil. Une demande en attente survit
+à un redémarrage tant que le service ne l'a pas consommée. Pour les profils confirmés
+avant l'installation de ce déclenchement, l'opérateur peut lancer immédiatement
 
 ```bash
 systemctl start jobwatch-collect@alice.service
@@ -84,7 +95,7 @@ systemctl enable --now jobwatch-backup@alice.timer
 systemctl start jobwatch-backup@alice.service
 ```
 
-Le script arrête serveur et collecte pendant la copie, utilise l'API de sauvegarde
+Le script arrête serveur, collecte et déclenchement `.path` pendant la copie, utilise l'API de sauvegarde
 SQLite, vérifie son intégrité et copie les documents. Il redémarre ensuite le service
 avant l'envoi chiffré par restic. Un échec de l'envoi reste un échec systemd. Les copies
 locales sont conservées sous `/var/backups/jobwatch/`. Aucun nettoyage automatique
@@ -120,11 +131,15 @@ instances, puis lancer
 /opt/jobwatch/current/ops/deploy.sh /opt/jobwatch/releases/COMMIT_COMPLET alice bob
 ```
 
-Le script arrête les instances indiquées et leur collecte, change le lien de version,
+Le script arrête les instances indiquées, leur collecte et leur déclenchement `.path`, change le lien de version,
 puis vérifie `/healthz` sur chaque port. Un échec remet le lien précédent et redémarre
 les instances. Ce retour arrière concerne le code, pas une migration de données
 incompatible. Tester chaque migration sur une restauration avant le déploiement.
 Les lettres IA restent hors de cette installation, aucun job LLM n'y est interrompu.
+Lors de la première mise à jour vers le déclenchement automatique, installer les unités
+`.path` et les unités serveur/collecte mises à jour, puis lancer `systemctl daemon-reload`.
+Activer `jobwatch-collect@alice.path` pour chaque instance après le déploiement validé.
+Le script de provisionnement le fait automatiquement pour les nouvelles instances.
 
 Le timer de contrôle vérifie HTTP, SQLite, l'authentification et une collecte réussie
 depuis moins de trente heures pour un profil inscrit depuis plus de trente heures.

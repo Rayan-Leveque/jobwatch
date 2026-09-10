@@ -1,0 +1,9 @@
+[Unit]
+Description=Première collecte après confirmation du profil Jobwatch %i
+
+[Path]
+PathExists=/var/lib/jobwatch/instances/%i/collect.request
+Unit=jobwatch-collect@%i.service
+
+[Install]
+WantedBy=multi-user.target

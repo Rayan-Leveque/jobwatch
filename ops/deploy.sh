@@ -19,12 +19,12 @@ rollback() {
     mv -Tf /opt/jobwatch/current.rollback /opt/jobwatch/current
     for instance in "$@"; do
         systemctl restart "jobwatch@$instance.service"
-        systemctl start "jobwatch-collect@$instance.timer"
+        systemctl start "jobwatch-collect@$instance.timer" "jobwatch-collect@$instance.path"
     done
 }
 trap 'rollback "$@"' ERR
 for slug in "$@"; do
-    systemctl stop "jobwatch-collect@$slug.timer" "jobwatch-collect@$slug.service" "jobwatch@$slug.service"
+    systemctl stop "jobwatch-collect@$slug.path" "jobwatch-collect@$slug.timer" "jobwatch-collect@$slug.service" "jobwatch@$slug.service"
 done
 ln -s "$release" /opt/jobwatch/current.next
 mv -Tf /opt/jobwatch/current.next /opt/jobwatch/current
@@ -34,5 +34,5 @@ for slug in "$@"; do
     curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 \
         --max-time 3 "http://127.0.0.1:$PORT/healthz" >/dev/null
 done
-for slug in "$@"; do systemctl start "jobwatch-collect@$slug.timer"; done
+for slug in "$@"; do systemctl start "jobwatch-collect@$slug.timer" "jobwatch-collect@$slug.path"; done
 trap - ERR
