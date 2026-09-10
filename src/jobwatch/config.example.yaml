@@ -77,10 +77,11 @@ enrich: {}
 
 # draft : génération de lettre de motivation depuis le dashboard (onglet « Lettre » des cartes).
 # Pour activer, supprimez la ligne « draft: {} » ci-dessous, puis décommentez et remplissez :
-#   runner: opencode                    # opencode (API) ou codex (CLI codex exec, abonnement ChatGPT)
+#   runner: codex                       # opencode (API), codex (CLI codex exec) ou openrouter (HTTP)
 #   opencode_bin: opencode              # binaire OpenCode (requis avec runner opencode)
 #   codex_bin: codex                    # binaire codex (runner codex)
-#   model: opencode-go/gpt-5.6-luna     # modèle de rédaction fort (lettre destinée à un employeur)
+#   model: opencode-go/gpt-5.6-luna     # modèle de rédaction (lettre destinée à un employeur)
+#   api_key: sk-or-v1-...               # clé OpenRouter (requise avec runner openrouter)
 #   variant: max                        # optionnel : effort de raisonnement
 #   examples:                           # lettres .tex existantes servant d'exemples de format et de ton
 #     engineer:

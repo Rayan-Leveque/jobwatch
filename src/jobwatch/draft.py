@@ -35,6 +35,7 @@ from jobwatch.enrich import _fetch_and_extract_result, _store_content
 from jobwatch.library import documents_dir, ensure_private_directory, protect_private_file
 from jobwatch.llm_runner import LLMRunnerError, opencode_text, run_codex, run_opencode
 from jobwatch.profile import draft_profile_context
+from jobwatch.research import OPENROUTER_URL
 
 log = logging.getLogger(__name__)
 
@@ -291,7 +292,33 @@ CODEX_TIMEOUT_SECONDS = 600
 def _call_llm(config: DraftConfig, prompt: str, attachment: str) -> str:
     if config.runner == "codex":
         return _call_codex(config, prompt, attachment)
+    if config.runner == "openrouter":
+        return _call_openrouter(config, prompt, attachment)
     return _call_opencode(config, prompt, attachment)
+
+
+def _call_openrouter(config: DraftConfig, prompt: str, attachment: str) -> str:
+    """Appel HTTP direct OpenRouter, même mécanique que le bloc enrich."""
+    try:
+        response = httpx.post(
+            OPENROUTER_URL,
+            headers={"Authorization": f"Bearer {config.api_key}"},
+            json={
+                "model": config.model,
+                "messages": [
+                    {"role": "user", "content": f"{prompt}\n\n<document>\n{attachment}\n</document>"}
+                ],
+                "reasoning": {"enabled": False},
+            },
+            timeout=CODEX_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        text = response.json()["choices"][0]["message"]["content"]
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+        raise DraftError(f"appel openrouter échoué : {exc}") from exc
+    if not text.strip():
+        raise DraftError("réponse vide du modèle")
+    return text
 
 
 def _call_codex(config: DraftConfig, prompt: str, attachment: str) -> str:
