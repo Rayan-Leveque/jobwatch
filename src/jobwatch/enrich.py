@@ -70,7 +70,9 @@ CONTRACT_PATTERNS = (
     ("fixed_term", re.compile(r"\bCDD\b|durée déterminée|CONTRACTOR|TEMPORARY", re.IGNORECASE)),
 )
 LIEU_LINE_RE = re.compile(r"^\s*Lieu\s*:\s*(\S.*?)\s*$", re.MULTILINE)
-POSTAL_TOWN_RE = re.compile(r"\b(\d{5})\s+([A-ZÀ-Þ][A-Za-zÀ-ÿ'’\- ]{1,30})\s*$", re.MULTILINE)
+POSTAL_TOWN_RE = re.compile(
+    r"\b(\d{5})\s+([A-ZÀ-Þ][A-Za-zÀ-ÿ'’\- ]{1,30})[.,;)…]?\s*$", re.MULTILINE
+)
 MAX_SUMMARY_ATTEMPTS = 3
 SUMMARY_RETRY_SQL_DELAY = "-1 hour"
 WTTJ_RECOVERY_VERSION = 1
