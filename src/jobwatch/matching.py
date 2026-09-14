@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from functools import lru_cache
 
 from jobwatch.config import SearchConfig
+from jobwatch.geography import filter_profile_locations, location_matches
 from jobwatch.seniority import OFFER_WINDOW_DAYS, assess_new_match
 
 
@@ -100,6 +103,12 @@ def _offer_candidates(conn: sqlite3.Connection, search_id: int) -> list[sqlite3.
     )
 
 
+@lru_cache(maxsize=512)
+def _keyword_pattern(keyword: str) -> re.Pattern[str]:
+    """Mot-clé avec bornes de mots : « IA » ne doit pas toucher « gestionnaire »."""
+    return re.compile(rf"(?<![0-9a-zà-ÿ]){re.escape(keyword)}(?![0-9a-zà-ÿ])")
+
+
 def offer_matches_search(offer: sqlite3.Row, search: sqlite3.Row) -> bool:
     """Renvoie True quand l'offre satisfait tous les critères de la recherche."""
     include = json.loads(search["include_json"])
@@ -107,16 +116,13 @@ def offer_matches_search(offer: sqlite3.Row, search: sqlite3.Row) -> bool:
     locations = json.loads(search["locations_json"])
 
     title = str(offer["title"] or "").lower()
-    if not any(keyword.lower() in title for keyword in include):
+    if not any(_keyword_pattern(keyword.lower()).search(title) for keyword in include):
         return False
-    if any(keyword.lower() in title for keyword in exclude):
+    if any(_keyword_pattern(keyword.lower()).search(title) for keyword in exclude):
         return False
 
-    offer_location = offer["location"]
-    if locations and offer_location:
-        offer_location_lower = str(offer_location).lower()
-        if not any(location.lower() in offer_location_lower for location in locations):
-            return False
+    if not location_matches(offer["location"], locations):
+        return False
 
     contract = search["contract"]
     if contract is None or offer["contract"] is None:
@@ -136,7 +142,7 @@ def run_matching(conn: sqlite3.Connection) -> list[int]:
     new_match_ids: list[int] = []
     for search_id in search_ids:
         search = _search_row(conn, search_id)
-        for offer in _offer_candidates(conn, search_id):
+        for offer in filter_profile_locations(conn, _offer_candidates(conn, search_id)):
             if not offer_matches_search(offer, search):
                 continue
             cur = conn.execute(

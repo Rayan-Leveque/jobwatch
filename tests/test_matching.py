@@ -278,3 +278,40 @@ def test_cli_run_filters_offers_and_resyncs_searches_without_resetting_triage(tm
     assert listing.exit_code == 0, listing.output
     assert "Machine Learning Engineer" in listing.output
     conn.close()
+
+
+def _search_row(include: list[str], exclude: list[str] | None = None) -> dict:
+    return {
+        "include_json": json.dumps(include),
+        "exclude_json": json.dumps(exclude or []),
+        "locations_json": "[]",
+        "contract": None,
+    }
+
+
+def test_keyword_matching_uses_word_boundaries() -> None:
+    """« IA » ne doit plus toucher « gestionnaire » ni « Mainframe » ; « IA » isolé reste bon."""
+    from jobwatch.matching import offer_matches_search
+
+    search = _search_row(["IA"])
+    offer = {"title": "2026-10565 - GESTIONNAIRE JURISTE PROTECTION JURIDIQUE F/H",
+             "location": None, "contract": None}
+    assert not offer_matches_search(offer, search)  # gestionn**ai**re
+
+    offer = {"title": "Référent(e) Technico fonctionnel Mainframe - Lille",
+             "location": None, "contract": None}
+    assert not offer_matches_search(offer, search)  # mainfr**ai**me
+
+    for title in ("Ingénieur IA (H/F)", "Ingénieur IA/LLM - Paris", "consultant ia"):
+        offer = {"title": title, "location": None, "contract": None}
+        assert offer_matches_search(offer, search), title
+
+
+def test_exclude_keyword_also_uses_word_boundaries() -> None:
+    from jobwatch.matching import offer_matches_search
+
+    search = _search_row(["data"], exclude=["data engineer"])
+    assert offer_matches_search({"title": "Chef de projet Data", "location": None,
+                                 "contract": None}, search)
+    assert not offer_matches_search({"title": "Lead Data Engineer", "location": None,
+                                     "contract": None}, search)
