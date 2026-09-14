@@ -14,6 +14,8 @@ exec 9>/run/lock/jobwatch-operations.lock
 flock 9
 previous=$(readlink -f /opt/jobwatch/current)
 test -x "$previous/.venv/bin/jw"
+shared_active=0
+if systemctl is-active --quiet jobwatch-shared.service; then shared_active=1; fi
 rollback() {
     ln -s "$previous" /opt/jobwatch/current.rollback
     mv -Tf /opt/jobwatch/current.rollback /opt/jobwatch/current
@@ -21,8 +23,10 @@ rollback() {
         systemctl restart "jobwatch@$instance.service"
         systemctl start "jobwatch-collect@$instance.timer" "jobwatch-collect@$instance.path"
     done
+    if (( shared_active )); then systemctl restart jobwatch-shared.service; fi
 }
 trap 'rollback "$@"' ERR
+if (( shared_active )); then systemctl stop jobwatch-shared.service; fi
 for slug in "$@"; do
     systemctl stop "jobwatch-collect@$slug.path" "jobwatch-collect@$slug.timer" "jobwatch-collect@$slug.service" "jobwatch@$slug.service"
 done
@@ -35,4 +39,9 @@ for slug in "$@"; do
         --max-time 3 "http://127.0.0.1:$PORT/healthz" >/dev/null
 done
 for slug in "$@"; do systemctl start "jobwatch-collect@$slug.timer" "jobwatch-collect@$slug.path"; done
+if (( shared_active )); then
+    systemctl start jobwatch-shared.service
+    curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 \
+        --max-time 3 "http://127.0.0.1:8810/healthz" >/dev/null
+fi
 trap - ERR

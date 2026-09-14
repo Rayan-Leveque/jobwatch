@@ -128,12 +128,12 @@ $EDITOR ~/.config/jobwatch/instances/alice/config.yaml
 .venv/bin/jw --instance alice serve --host 127.0.0.1 --port 8766
 ```
 
-Le chemin `/invite/...` affiché à l'étape 3 est à compléter avec l'URL publique propre à Alice.
-Utilisez de préférence un nom d'hôte distinct par personne, par exemple
-`https://alice.jobs.example/invite/...`, dirigé par le reverse proxy vers `127.0.0.1:8766`.
-Les préfixes de chemin ne sont pas supportés : l'application utilise des routes à la racine. Un simple
-partage du port ou de l'URL du capitaine n'isole rien. Les cookies ne sont pas séparés par port ; des
-noms d'hôte distincts évitent aussi qu'une session d'une instance gêne la connexion à une autre.
+Le chemin `/invite/...` affiché à l'étape 3 est à compléter avec
+`https://jobwatch.cloud`. En production, `python -m jobwatch.shared` reçoit toutes les
+requêtes publiques et les route vers cette instance privée. Il choisit l'instance par
+l'email lors de la connexion, puis par un préfixe du cookie. Chaque base valide encore
+son propre jeton opaque. Les ports internes ne sont jamais publics. Consultez
+[`ops/README.md`](ops/README.md) pour le registre et les unités systemd.
 
 Avant d'envoyer une invitation, vérifiez pour cette instance :
 

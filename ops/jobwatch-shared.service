@@ -1,0 +1,28 @@
+[Unit]
+Description=Application Jobwatch commune
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=jobwatch-shared
+Group=jobwatch-shared
+ExecStart=/opt/jobwatch/current/.venv/bin/python -m jobwatch.shared --registry /etc/jobwatch/shared.json --host 127.0.0.1 --port 8810
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=256M
+TasksMax=48
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

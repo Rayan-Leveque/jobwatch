@@ -1,6 +1,8 @@
 """Exécute le script de déploiement avec services simulés et vrais liens de version."""
+
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -34,17 +36,27 @@ def test_deploy_switches_release_or_rolls_back(tmp_path, healthy):
         path.chmod(0o755)
     script = tmp_path / "deploy.sh"
     original = Path("ops/deploy.sh").read_text()
-    script.write_text(original.replace("/opt/jobwatch", str(root))
-                     .replace("/run/lock", str(tmp_path))
-                     .replace("/etc/jobwatch", str(tmp_path / "etc")))
-    result = subprocess.run(["bash", str(script), str(new), "alice"],
-                            env={**os.environ, "PATH": f"{commands}:/usr/bin:/bin", "TEST_LOG": str(log)},
-                            capture_output=True, text=True, timeout=10, check=False)
+    script.write_text(
+        original.replace("/opt/jobwatch", str(root))
+        .replace("/run/lock", str(tmp_path))
+        .replace("/etc/jobwatch", str(tmp_path / "etc"))
+    )
+    result = subprocess.run(
+        ["bash", str(script), str(new), "alice"],
+        env={**os.environ, "PATH": f"{commands}:/usr/bin:/bin", "TEST_LOG": str(log)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
     assert (result.returncode == 0) is healthy, result.stderr
     assert (root / "current").resolve() == (new if healthy else old)
-    assert "start jobwatch-collect@alice.timer" in log.read_text()
+    calls = log.read_text()
+    assert "start jobwatch-collect@alice.timer" in calls
+    assert "stop jobwatch-shared.service" in calls
+    assert ("start" if healthy else "restart") + " jobwatch-shared.service" in calls
     if not healthy:
-        assert "restart jobwatch@alice.service" in log.read_text()
+        assert "restart jobwatch@alice.service" in calls
 
 
 def test_provision_creates_traversable_parents_and_private_instances(tmp_path):
@@ -52,20 +64,18 @@ def test_provision_creates_traversable_parents_and_private_instances(tmp_path):
     binary = root / "current/.venv/bin/jw"
     binary.parent.mkdir(parents=True)
     binary.write_text(
-        '#!/bin/bash\nset -eu\n'
+        "#!/bin/bash\nset -eu\n"
         'if [[ "$3" == init ]]; then\n'
         '  config="$XDG_CONFIG_HOME/jobwatch/instances/$2"\n'
         '  data="$XDG_DATA_HOME/jobwatch/instances/$2"\n'
         '  mkdir -p "$config" "$data"\n'
         '  printf "sources: {}\\n" > "$config/config.yaml"\n'
         '  touch "$data/jobwatch.db"\n'
-        'fi\n'
+        "fi\n"
     )
     binary.chmod(0o755)
-    (root / "current/ops").mkdir()
-    (root / "current/ops/nginx.conf").write_text(
-        "server_name alice.jobs.example; proxy_pass http://127.0.0.1:8801;\n"
-    )
+    python = root / "current/.venv/bin/python"
+    python.symlink_to("/usr/bin/python3")
     commands = tmp_path / "commands"
     commands.mkdir()
     for command in ("id", "useradd", "chown", "systemctl"):
@@ -78,17 +88,25 @@ def test_provision_creates_traversable_parents_and_private_instances(tmp_path):
     data_root.mkdir(parents=True, mode=0o755)
     script = tmp_path / "provision.sh"
     script.write_text(
-        Path("ops/provision.sh").read_text()
+        Path("ops/provision.sh")
+        .read_text()
         .replace("/opt/jobwatch", str(root))
         .replace("/etc", str(config_root))
         .replace("/var/lib", str(data_root))
         .replace("EUID == 0", "1 == 1")
     )
-    for slug in ("alice", "bob"):
+    for index, slug in enumerate(("alice", "bob"), start=1):
         result = subprocess.run(
-            ["bash", str(script), slug, f"{slug}@example.com", f"{slug}.jobs.example", "8801"],
-            env={**os.environ, "PATH": f"{commands}:/usr/bin:/bin"},
-            capture_output=True, text=True, timeout=10, check=False,
+            ["bash", str(script), slug, f"{slug}@example.com", str(8800 + index)],
+            env={
+                **os.environ,
+                "PATH": f"{commands}:/usr/bin:/bin",
+                "PYTHONPATH": str(Path("src").resolve()),
+            },
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         for shared_root in (config_root, data_root):
@@ -101,3 +119,8 @@ def test_provision_creates_traversable_parents_and_private_instances(tmp_path):
         for filename in ("config.yaml", "service.env"):
             assert (config / filename).stat().st_mode & 0o777 == 0o640
         assert (data / "jobwatch.db").stat().st_mode & 0o777 == 0o600
+    registry = config_root / "jobwatch/shared.json"
+    assert [item["slug"] for item in json.loads(registry.read_text())["instances"]] == [
+        "alice",
+        "bob",
+    ]

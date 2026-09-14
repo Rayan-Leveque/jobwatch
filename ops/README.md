@@ -4,13 +4,42 @@ Périmètre retenu pour quatre ou cinq personnes
 
 - Veille LinkedIn et suivi des candidatures.
 - Catégories individuelles, préréglage PO / MOA modifiable et localisation individuelle.
-- Une instance et un compte système par personne, derrière un nom DNS HTTPS distinct.
+- Une instance et un compte système par personne derrière l'application HTTPS commune `jobwatch.cloud`.
 - Aucun runner IA, aucune compilation LaTeX dans ces instances.
 
 Ces fichiers préparent une installation séparée de la production historique de Rayan.
 Ils ne modifient pas son service ni son timer de déploiement. Les scripts de ce dossier
 nécessitent root. Les identifiants d'instance sont limités à 23 caractères dans ces
 scripts pour rester compatibles avec les noms des comptes système.
+
+## Point d'entrée commun
+
+`python -m jobwatch.shared` expose une seule application publique tout en conservant
+une base et un service interne par personne. L'utilisateur se connecte toujours sur
+`jobwatch.cloud`. Le point d'entrée choisit l'instance par l'email lors de la connexion,
+puis préfixe le cookie de session par le slug. L'instance valide toujours le jeton
+opaque dans sa propre base. Modifier le préfixe ne donne donc accès à aucune autre base.
+Les liens d'invitation sont détectés auprès des instances sans conserver leur jeton dans
+le registre commun.
+
+Copier `shared-registry.example.json` vers `/etc/jobwatch/shared.json`, déclarer chaque
+email, slug et port interne, puis réserver le fichier à root et au compte du service.
+Créer ce compte sans connexion interactive et installer l'unité commune.
+
+```bash
+useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin jobwatch-shared
+chown root:jobwatch-shared /etc/jobwatch/shared.json
+chmod 0640 /etc/jobwatch/shared.json
+install -m 0644 ops/jobwatch-shared.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now jobwatch-shared.service
+```
+
+Installer ensuite `nginx-shared.conf` après remplacement de `PUBLIC_IP` et création du
+certificat de `jobwatch.cloud`. Charger `nginx-common.conf` une seule fois. Ne pas publier
+les ports des instances. Toute nouvelle invitation exige d'abord une instance privée et
+son entrée dans le registre. Écrire le registre dans un fichier temporaire, puis le
+renommer pour que les requêtes ne lisent jamais un JSON partiel.
 
 ## Préparer une version
 
@@ -32,24 +61,22 @@ Ne pas copier les configurations IA, notifications ou secrets de Rayan.
 Choisir un port local libre et une adresse email confirmée, puis exécuter par exemple
 
 ```bash
-/opt/jobwatch/current/ops/provision.sh alice alice@example.com alice.jobs.example 8801
+/opt/jobwatch/current/ops/provision.sh alice alice@example.com 8801
 ```
 
 Le script refuse une instance existante, crée son compte système, sa configuration
-et son invitation, puis active serveur, collecte et contrôle. Il génère un fichier
-nginx à relire sous `/etc/jobwatch/instances/alice/nginx.conf` sans le publier.
+et son invitation, puis active serveur, collecte et contrôle. Il ajoute enfin l'email,
+le slug et le port au registre commun. Il affiche le lien privé complet sous
+`https://jobwatch.cloud/invite/...`.
 
-Configurer le DNS, obtenir le certificat, charger `nginx-common.conf` une seule fois
-dans le bloc `http`, puis charger le fichier de cette instance. Valider avec `nginx -t`
-avant rechargement. Vérifier HTTPS avec un navigateur externe au Tailnet. Ne pas ouvrir
-le port 8801, qui écoute seulement sur localhost. Le proxy interdit l'accès public
-au contrôle de santé, limite les requêtes de connexion et masque les liens d'invitation
-dans les journaux d'accès. Ne pas activer les logs nginx de niveau debug.
+Ne pas ouvrir le port 8801, qui écoute seulement sur localhost. Le proxy public commun
+interdit l'accès au contrôle de santé, limite les requêtes de connexion et masque les
+liens d'invitation dans les journaux d'accès. Ne pas activer les logs nginx de niveau debug.
 
-Le cookie reste Secure. Les noms DNS distincts séparent les cookies, contrairement
-à deux ports d'un même hôte. La limite applicative utilise l'adresse du proxy, sans
-faire confiance à un en-tête IP envoyé par le client. La limite nginx s'applique à
-l'adresse réelle de connexion.
+Le cookie reste Secure. Avec le point d'entrée commun, son préfixe sélectionne l'instance
+et chaque base valide ensuite son propre jeton opaque. La limite applicative utilise
+l'adresse du proxy, sans faire confiance à un en-tête IP envoyé par le client. La limite
+nginx s'applique à l'adresse réelle de connexion.
 
 Transmettre manuellement le lien d'invitation HTTPS au destinataire, jamais dans un
 journal public. Il expire après 48 heures. À l'inscription, la personne peut choisir
