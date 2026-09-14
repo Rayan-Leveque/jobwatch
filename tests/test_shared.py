@@ -3,6 +3,8 @@ from __future__ import annotations
 import http.client
 import json
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlencode
@@ -10,6 +12,7 @@ from urllib.parse import urlencode
 from jobwatch.auth import accept_invite, create_invite
 from jobwatch.db import connect, init_db
 from jobwatch.serve import make_handler
+from jobwatch.shared import Instance, SharedError, register_instance
 from jobwatch.shared import make_handler as make_shared_handler
 
 
@@ -235,3 +238,104 @@ def test_shared_host_routes_each_account_to_its_private_database(tmp_path: Path)
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+
+def test_login_page_served_without_any_backend(tmp_path: Path) -> None:
+    """La page de connexion commune doit rester disponible même si tout est arrêté."""
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps({"instances": [{"slug": "zoe", "email": "zoe@example.com", "port": 1}]}),
+        encoding="utf-8",
+    )
+    shared = ThreadingHTTPServer(("127.0.0.1", 0), make_shared_handler(registry))
+    thread = threading.Thread(target=shared.serve_forever, daemon=True)
+    thread.start()
+    port = shared.server_port
+    try:
+        status, _headers, body = _request(port, "GET", "/login")
+        assert status == 200
+        assert b"Connexion" in body
+        assert b"Email" in body
+        body = urlencode({"email": "zoe@example.com", "password": "incorrect"}).encode()
+        status, _headers, body = _request(
+            port,
+            "POST",
+            "/login",
+            body,
+            {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": f"http://127.0.0.1:{port}",
+            },
+        )
+        assert status == 503
+        assert b"service indisponible" in body
+    finally:
+        shared.shutdown()
+        shared.server_close()
+        thread.join(timeout=5)
+
+
+def test_register_instance_is_atomic_under_concurrency(tmp_path: Path) -> None:
+    registry = tmp_path / "shared.json"
+
+    def add(index: int) -> None:
+        register_instance(
+            registry,
+            Instance(f"user{index}", f"user{index}@example.com", 9100 + index),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(add, range(2)))
+    entries = json.loads(registry.read_text(encoding="utf-8"))["instances"]
+    assert {item["slug"] for item in entries} == {"user0", "user1"}
+    try:
+        register_instance(registry, Instance("user0", "autre@example.com", 9200))
+    except SharedError:
+        pass
+    else:
+        raise AssertionError("doublon de slug accepté")
+    entries = json.loads(registry.read_text(encoding="utf-8"))["instances"]
+    assert len(entries) == 2
+
+
+def test_invite_discovery_skips_dead_instance(tmp_path: Path) -> None:
+    charlie, charlie_thread, charlie_invite = _instance(
+        tmp_path / "charlie" / "jobwatch.db",
+        "charlie",
+        "charlie@example.com",
+        "Société Charlie",
+        b"CV Charlie",
+        accept=False,
+    )
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "instances": [
+                    {"slug": "zoe", "email": "zoe@example.com", "port": 1},
+                    {
+                        "slug": "charlie",
+                        "email": "charlie@example.com",
+                        "port": charlie.server_port,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    shared = ThreadingHTTPServer(("127.0.0.1", 0), make_shared_handler(registry))
+    shared_thread = threading.Thread(target=shared.serve_forever, daemon=True)
+    shared_thread.start()
+    try:
+        started = time.monotonic()
+        status, _headers, body = _request(shared.server_port, "GET", f"/invite/{charlie_invite}")
+        assert status == 200
+        assert b"Cr\xc3\xa9er votre compte" in body
+        assert time.monotonic() - started < 10
+    finally:
+        shared.shutdown()
+        shared.server_close()
+        shared_thread.join(timeout=5)
+        charlie.shutdown()
+        charlie.server_close()
+        charlie_thread.join(timeout=5)

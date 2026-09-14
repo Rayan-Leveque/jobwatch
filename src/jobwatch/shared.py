@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import http.client
 import json
 import os
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,9 +19,13 @@ from urllib.parse import parse_qs, urlsplit
 from jobwatch.auth import AuthError, normalize_email
 from jobwatch.auth_http import security_headers
 from jobwatch.paths import validate_instance_name
+from jobwatch.serve_templates import _auth_page, _login_form
 
 SESSION_COOKIE = "id"
 _MAX_BODY_BYTES = 15 * 1024 * 1024
+_PROBE_TIMEOUT = 3.0
+_HEALTH_TIMEOUT = 5.0
+_INVITE_BUDGET = 20.0
 _HOP_BY_HOP = {
     "connection",
     "keep-alive",
@@ -78,39 +84,43 @@ def register_instance(path: Path, instance: Instance) -> None:
     """Ajoute atomiquement une instance au registre commun."""
     if not 1 <= instance.port <= 65535:
         raise SharedError(f"port invalide pour {instance.slug}")
-    current = list(load_registry(path)) if path.exists() else []
-    if any(
-        item.slug == instance.slug or item.email == instance.email or item.port == instance.port
-        for item in current
-    ):
-        raise SharedError("slug, email ou port déjà enregistré")
-    current.append(instance)
     path.parent.mkdir(parents=True, exist_ok=True)
-    previous = path.stat() if path.exists() else None
-    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
-            json.dump(
-                {
-                    "instances": [
-                        {"slug": item.slug, "email": item.email, "port": item.port}
-                        for item in current
-                    ]
-                },
-                temporary,
-                ensure_ascii=False,
-                indent=2,
-            )
-            temporary.write("\n")
-        os.chmod(temporary_name, previous.st_mode & 0o777 if previous else 0o640)
-        if previous:
-            os.chown(temporary_name, previous.st_uid, previous.st_gid)
-        os.replace(temporary_name, path)
-    finally:
+    # Verrou stable, distinct du JSON remplacé : deux provisionnements simultanés
+    # ne doivent jamais pouvoir perdre une entrée.
+    with open(path.with_name(path.name + ".lock"), "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        current = list(load_registry(path)) if path.exists() else []
+        if any(
+            item.slug == instance.slug or item.email == instance.email or item.port == instance.port
+            for item in current
+        ):
+            raise SharedError("slug, email ou port déjà enregistré")
+        current.append(instance)
+        previous = path.stat() if path.exists() else None
+        descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
         try:
-            os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+                json.dump(
+                    {
+                        "instances": [
+                            {"slug": item.slug, "email": item.email, "port": item.port}
+                            for item in current
+                        ]
+                    },
+                    temporary,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                temporary.write("\n")
+            os.chmod(temporary_name, previous.st_mode & 0o777 if previous else 0o640)
+            if previous:
+                os.chown(temporary_name, previous.st_uid, previous.st_gid)
+            os.replace(temporary_name, path)
+        finally:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
 
 
 def make_handler(registry_path: Path) -> type[BaseHTTPRequestHandler]:
@@ -138,6 +148,11 @@ def make_handler(registry_path: Path) -> type[BaseHTTPRequestHandler]:
                 token = scoped[1] if scoped else None
                 if path == "/healthz":
                     self._health(instances)
+                    return
+                if path == "/login" and self.command == "GET" and instance is None:
+                    # Formulaire servi localement : aucune indisponibilité d'instance
+                    # ne doit empêcher d'afficher la page de connexion commune.
+                    self._send_login_page()
                     return
                 if path.startswith("/invite/"):
                     instance = self._find_invite(instances)
@@ -191,10 +206,16 @@ def make_handler(registry_path: Path) -> type[BaseHTTPRequestHandler]:
             return (instance, token) if instance is not None and token else None
 
         def _find_invite(self, instances: tuple[Instance, ...]) -> Instance:
+            deadline = time.monotonic() + _INVITE_BUDGET
             fallback = None
             for instance in instances:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
                 try:
-                    status, _headers, _body = self._upstream(instance, b"", None, method="GET")
+                    status, _headers, _body = self._upstream(
+                        instance, b"", None, method="GET", timeout=min(_PROBE_TIMEOUT, remaining)
+                    )
                 except SharedError:
                     continue
                 fallback = fallback or instance
@@ -207,7 +228,7 @@ def make_handler(registry_path: Path) -> type[BaseHTTPRequestHandler]:
             for instance in instances:
                 try:
                     status, _headers, _body = self._upstream(
-                        instance, b"", None, method="GET", path="/healthz"
+                        instance, b"", None, method="GET", path="/healthz", timeout=_HEALTH_TIMEOUT
                     )
                 except SharedError:
                     status = 503
@@ -223,6 +244,7 @@ def make_handler(registry_path: Path) -> type[BaseHTTPRequestHandler]:
             *,
             method: str | None = None,
             path: str | None = None,
+            timeout: float = 35.0,
         ) -> tuple[int, list[tuple[str, str]], bytes]:
             headers = {
                 name: value
@@ -232,7 +254,7 @@ def make_handler(registry_path: Path) -> type[BaseHTTPRequestHandler]:
             if token:
                 headers["Cookie"] = f"{SESSION_COOKIE}={token}"
             headers["Connection"] = "close"
-            conn = http.client.HTTPConnection("127.0.0.1", instance.port, timeout=35)
+            conn = http.client.HTTPConnection("127.0.0.1", instance.port, timeout=timeout)
             try:
                 conn.request(method or self.command, path or self.path, body=body, headers=headers)
                 response = conn.getresponse()
@@ -276,25 +298,24 @@ def make_handler(registry_path: Path) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Length", "0")
             self.end_headers()
 
-        def _send_json(self, status: int, payload: dict[str, str]) -> None:
-            data = json.dumps(payload).encode("utf-8")
+        def _send_bytes(self, status: int, data: bytes, content_type: str) -> None:
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
             for name, value in security_headers().items():
                 self.send_header(name, value)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
 
+        def _send_json(self, status: int, payload: dict[str, str]) -> None:
+            self._send_bytes(status, json.dumps(payload).encode("utf-8"), "application/json")
+
+        def _send_login_page(self) -> None:
+            page = _auth_page("Connexion", _login_form())
+            self._send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
+
         def _send_text(self, status: int, text: str) -> None:
-            data = text.encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            for name, value in security_headers().items():
-                self.send_header(name, value)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            self._send_bytes(status, text.encode("utf-8"), "text/plain; charset=utf-8")
 
         def log_message(self, format: str, *args: object) -> None:
             pass
