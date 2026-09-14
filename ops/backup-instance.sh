@@ -7,9 +7,9 @@ slug=${1:?instance requise}
 export XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib
 exec 9>/run/lock/jobwatch-operations.lock
 flock 9
-systemctl stop "jobwatch-collect@$slug.timer"
+systemctl stop "jobwatch-collect@$slug.path" "jobwatch-collect@$slug.timer"
 restore_services() {
-    systemctl start "jobwatch@$slug.service" "jobwatch-collect@$slug.timer"
+    systemctl start "jobwatch@$slug.service" "jobwatch-collect@$slug.path" "jobwatch-collect@$slug.timer"
 }
 trap restore_services EXIT
 systemctl stop "jobwatch@$slug.service" "jobwatch-collect@$slug.service"

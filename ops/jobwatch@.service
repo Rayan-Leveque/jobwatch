@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 User=jobwatch-%i
 Group=jobwatch-%i
-Environment=XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib
+Environment=XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib JOBWATCH_COLLECT_ONBOARDING=1
 EnvironmentFile=/etc/jobwatch/instances/%i/service.env
 ExecStart=/usr/bin/flock --shared /var/lib/jobwatch/instances/%i/maintenance.lock /opt/jobwatch/current/.venv/bin/jw --instance %i serve --host 127.0.0.1 --port ${PORT}
 Restart=on-failure

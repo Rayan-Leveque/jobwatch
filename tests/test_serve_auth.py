@@ -23,6 +23,7 @@ def _start_server(
     workspace_slug: str | None = None,
     secure_cookie: bool = True,
     onboarding_enabled: bool = False,
+    collect_onboarding: bool = False,
 ) -> tuple[ThreadingHTTPServer, threading.Thread]:
     server = ThreadingHTTPServer(
         ("127.0.0.1", 0),
@@ -31,6 +32,7 @@ def _start_server(
             workspace_slug=workspace_slug,
             secure_cookie=secure_cookie,
             onboarding_enabled=onboarding_enabled,
+            collect_onboarding=collect_onboarding,
         ),
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -7,6 +7,7 @@ import logging
 import re
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
 from jobwatch import draft
 from jobwatch.config import DraftConfig, SearchConfig
@@ -373,6 +374,7 @@ def complete_profile(
     cover_letters_enabled: bool = True,
     locations: object = None,
     include_remote: bool | None = None,
+    collection_request_path: Path | None = None,
 ) -> list[CareerIntent]:
     if not isinstance(rows, list):
         raise OnboardingError("les pistes doivent être une liste")
@@ -396,6 +398,10 @@ def complete_profile(
     intents = validate_intents(rows)
     conn.execute("BEGIN IMMEDIATE")
     try:
+        first_confirmation = conn.execute(
+            "SELECT 1 FROM candidate_profile WHERE account_id = ? AND completed_at IS NOT NULL",
+            (account_id,),
+        ).fetchone() is None
         owned = {
             int(row["id"]): (None if row["search_id"] is None else int(row["search_id"]))
             for row in conn.execute(
@@ -488,6 +494,14 @@ def complete_profile(
     except (OnboardingError, sqlite3.Error):
         conn.rollback()
         raise
+    if first_confirmation and collection_request_path is not None:
+        try:
+            collection_request_path.touch(mode=0o600)
+        except OSError as exc:
+            raise OnboardingError(
+                "Profil enregistré, mais la première collecte n'a pas pu être demandée. "
+                "Contactez l'administrateur ou attendez la collecte planifiée."
+            ) from exc
     try:
         if not split_tracks:
             run_matching(conn)

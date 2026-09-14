@@ -29,5 +29,5 @@ chmod 750 "/etc/jobwatch/instances/$slug"
 chmod 640 "/etc/jobwatch/instances/$slug/config.yaml" "/etc/jobwatch/instances/$slug/service.env"
 sed -e "s/alice.jobs.example/$domain/g" -e "s/8801/$port/g" \
     /opt/jobwatch/current/ops/nginx.conf >"/etc/jobwatch/instances/$slug/nginx.conf"
-systemctl enable --now "jobwatch@$slug.service" "jobwatch-collect@$slug.timer" "jobwatch-check@$slug.timer"
+systemctl enable --now "jobwatch@$slug.service" "jobwatch-collect@$slug.timer" "jobwatch-collect@$slug.path" "jobwatch-check@$slug.timer"
 printf 'Instance prête. Configurer le certificat et le proxy pour https://%s avant de transmettre le lien.\n' "$domain"

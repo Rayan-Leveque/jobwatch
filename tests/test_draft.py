@@ -1138,6 +1138,34 @@ def test_render_page_keeps_swipe_button_and_only_prompts_for_new_offers(db_path:
     conn.close()
 
 
+def test_config_parses_openrouter_draft_runner(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "draft:\n"
+        "  runner: openrouter\n"
+        "  model: deepseek/deepseek-v4-flash-0731\n"
+        "  api_key: sk-or-test\n"
+    )
+    config = load_config(config_file).draft
+    assert config is not None
+    assert config.runner == "openrouter"
+    assert config.model == "deepseek/deepseek-v4-flash-0731"
+    assert config.api_key == "sk-or-test"
+
+    # Le runner openrouter exige une clé API.
+    config_file.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\n"
+        "searches:\n  - name: test\n    include: ['AI']\n"
+        "draft:\n"
+        "  runner: openrouter\n"
+        "  model: deepseek/deepseek-v4-flash-0731\n"
+    )
+    with pytest.raises(ConfigError, match="api_key"):
+        load_config(config_file)
+
+
 def test_config_parses_codex_draft_runner(tmp_path: Path) -> None:
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
@@ -1202,6 +1230,38 @@ def test_call_llm_codex_builds_command_and_reads_output(monkeypatch) -> None:
     assert disabled == {"shell_tool", "code_mode_host", "apps", "plugins"}
     assert captured["input"] == "# OFFRE\n\ncontenu"
     assert command[-1].endswith("Rédige la lettre.")
+
+
+def test_call_llm_openrouter_posts_bundle(monkeypatch) -> None:
+    import jobwatch.draft as draft_mod
+
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": MINIMAL_TEX}}]}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured["json"] = kwargs["json"]
+        return FakeResponse()
+
+    monkeypatch.setattr(draft_mod.httpx, "post", fake_post)
+    config = DraftConfig(model="deepseek/deepseek-v4-flash-0731", runner="openrouter",
+                         api_key="sk-or-test")
+    text = draft._call_llm(config, "Rédige la lettre.", "# OFFRE\n\ncontenu")
+
+    assert text == MINIMAL_TEX
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    body = captured["json"]
+    assert body["model"] == "deepseek/deepseek-v4-flash-0731"
+    assert body["reasoning"] == {"enabled": False}
+    content = body["messages"][0]["content"]
+    assert content.startswith("Rédige la lettre.")
+    assert "<document>\n# OFFRE\n\ncontenu\n</document>" in content
 
 
 def test_call_llm_codex_failure_raises_drafterror(monkeypatch) -> None:

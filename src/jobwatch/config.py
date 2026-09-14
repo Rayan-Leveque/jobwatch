@@ -127,7 +127,7 @@ class NotifyConfig:
         return self.ntfy is not None or self.smtp is not None
 
 
-STANDARD_LLM_RUNNERS = ("opencode", "codex")
+STANDARD_LLM_RUNNERS = ("opencode", "codex", "openrouter")
 ENRICH_RUNNERS = (*STANDARD_LLM_RUNNERS, "openrouter", "pi")
 RESEARCH_RUNNERS = (*STANDARD_LLM_RUNNERS, "openrouter")
 
@@ -142,6 +142,8 @@ class EnrichConfig:
     pi_bin: str = "pi"
     # Clé API OpenRouter, requise avec le runner 'openrouter'.
     api_key: str = ""
+    # Fournisseur OpenRouter imposé, par exemple 'fireworks'.
+    provider: str | None = None
     # Effort de raisonnement : --variant OpenCode, model_reasoning_effort Codex
     # ou --thinking Pi.
     variant: str | None = None
@@ -158,6 +160,8 @@ class ResearchConfig:
     # Requise avec le runner openrouter : appel HTTP direct, la recherche web
     # passant par le plugin `web` d'OpenRouter.
     api_key: str | None = None
+    # Fournisseur OpenRouter imposé, par exemple 'fireworks'.
+    provider: str | None = None
     variant: str | None = None
     instructions: str = ""
     recency_days: int = 7
@@ -175,6 +179,8 @@ class DraftConfig:
     runner: str = "opencode"
     opencode_bin: str = "opencode"
     codex_bin: str = "codex"
+    # Clé API OpenRouter, requise avec le runner 'openrouter'.
+    api_key: str = ""
     # Effort de raisonnement : --variant OpenCode ou model_reasoning_effort codex.
     variant: str | None = None
     # Lettres exemples .tex par piste métier ('engineer' | 'project' | 'all') : elles
@@ -423,6 +429,9 @@ def _research_from_dict(raw: object) -> ResearchConfig | None:
         raise ConfigError("research.api_key doit être une chaîne non vide")
     if runner == "openrouter" and not api_key:
         raise ConfigError("research.api_key est requise avec le runner openrouter")
+    provider = raw.get("provider")
+    if provider is not None and (not isinstance(provider, str) or not provider.strip()):
+        raise ConfigError("research.provider doit être une chaîne non vide")
     opencode_bin = raw.get("opencode_bin", "opencode")
     if not isinstance(opencode_bin, str) or not opencode_bin:
         raise ConfigError("research.opencode_bin doit être une chaîne non vide")
@@ -443,6 +452,7 @@ def _research_from_dict(raw: object) -> ResearchConfig | None:
         opencode_bin=opencode_bin,
         codex_bin=codex_bin,
         api_key=api_key,
+        provider=provider.strip() if provider else None,
         variant=variant,
         instructions=instructions.strip(),
         recency_days=recency_days,
@@ -485,6 +495,9 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
         raise ConfigError("enrich.api_key doit être une chaîne")
     if runner == "openrouter" and not api_key.strip():
         raise ConfigError("enrich.api_key est requis avec le runner openrouter")
+    provider = raw.get("provider")
+    if provider is not None and (not isinstance(provider, str) or not provider.strip()):
+        raise ConfigError("enrich.provider doit être une chaîne non vide")
     variant = raw.get("variant")
     if variant is not None and (not isinstance(variant, str) or not variant):
         raise ConfigError("enrich.variant doit être une chaîne non vide")
@@ -493,7 +506,9 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
         raise ConfigError("enrich.concurrency doit être un entier >= 1")
     return EnrichConfig(
         model=model, runner=runner, opencode_bin=opencode_bin, codex_bin=codex_bin,
-        pi_bin=pi_bin, api_key=api_key, variant=variant, concurrency=concurrency,
+        pi_bin=pi_bin, api_key=api_key,
+        provider=provider.strip() if provider else None,
+        variant=variant, concurrency=concurrency,
     )
 
 
@@ -517,6 +532,9 @@ def _draft_from_dict(raw: object) -> DraftConfig | None:
         raise ConfigError("draft.opencode_bin doit être une chaîne non vide")
     if runner == "opencode" and "opencode_bin" not in raw:
         raise ConfigError("draft.opencode_bin est requis avec le runner opencode")
+    api_key = str(raw.get("api_key", "") or "")
+    if runner == "openrouter" and not api_key.strip():
+        raise ConfigError("draft.api_key est requise avec le runner openrouter")
     codex_bin = raw.get("codex_bin", "codex")
     if not isinstance(codex_bin, str) or not codex_bin:
         raise ConfigError("draft.codex_bin doit être une chaîne non vide")
@@ -538,7 +556,7 @@ def _draft_from_dict(raw: object) -> DraftConfig | None:
         examples[track] = [Path(os.path.expanduser(p)) for p in entries]
     return DraftConfig(
         model=model, runner=runner, opencode_bin=opencode_bin, codex_bin=codex_bin,
-        variant=variant, examples=examples,
+        api_key=api_key, variant=variant, examples=examples,
     )
 
 

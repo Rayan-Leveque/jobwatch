@@ -189,6 +189,7 @@ def make_handler(
     secure_cookie: bool = True,
     onboarding_config: DraftConfig | None = None,
     onboarding_enabled: bool = False,
+    collect_onboarding: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
     """Fabrique une classe de gestionnaire HTTP branchée sur render_page.
 
@@ -940,6 +941,9 @@ def make_handler(
                         ),
                         locations=fields.get("locations"),
                         include_remote=fields.get("include_remote"),
+                        collection_request_path=(
+                            db_path.parent / "collect.request" if collect_onboarding else None
+                        ),
                     )
                 except OnboardingError as exc:
                     self._send_json(400, {"error": str(exc)})
@@ -1163,6 +1167,7 @@ def serve_http(
     workspace_slug: str | None = None,
     secure_cookie: bool = True,
     onboarding_enabled: bool = False,
+    collect_onboarding: bool = False,
 ) -> None:
     """Crée le serveur HTTP et le sert jusqu'à Ctrl-C."""
     _fail_interrupted_draft_jobs(db_path)
@@ -1176,6 +1181,7 @@ def serve_http(
                 secure_cookie=secure_cookie,
                 onboarding_config=draft_config,
                 onboarding_enabled=onboarding_enabled,
+                collect_onboarding=collect_onboarding,
             ),
         )
     except (OSError, OverflowError) as exc:

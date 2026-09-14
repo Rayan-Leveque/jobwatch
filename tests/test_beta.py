@@ -30,6 +30,7 @@ def test_manual_onboarding_has_preset_and_individual_location(tmp_path):
                              "locations": ["Lyon"], "include_remote": False}).encode(),
         )
         assert status == 200, body
+        assert not (db.parent / "collect.request").exists()  # Opt-in systemd absent.
         conn = connect(db)
         assert json.loads(conn.execute("SELECT locations_json FROM search").fetchone()[0]) == ["Lyon"]
         conn.close()

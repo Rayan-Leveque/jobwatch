@@ -7,6 +7,8 @@ Type=oneshot
 User=jobwatch-%i
 Group=jobwatch-%i
 Environment=XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib
+# Consommer avant le lancement, même si LinkedIn échoue. Le timer assure la reprise.
+ExecStartPre=/usr/bin/rm -f /var/lib/jobwatch/instances/%i/collect.request
 ExecStart=/usr/bin/flock --shared /var/lib/jobwatch/instances/%i/maintenance.lock /opt/jobwatch/current/.venv/bin/jw --instance %i run
 TimeoutStartSec=20min
 UMask=0077

@@ -43,11 +43,12 @@ def test_beta_preset_location_and_tracking(browser, tmp_path, width, height):  #
     ])
     conn.close()
     server, thread = _start_server(db, workspace_slug="alice", secure_cookie=False,
-                                   onboarding_enabled=True)
+                                   onboarding_enabled=True, collect_onboarding=True)
     url = f"http://127.0.0.1:{server.server_address[1]}"
     page = browser.new_page(viewport={"width": width, "height": height})
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
+    request = db.parent / "collect.request"
     try:
         page.goto(f"{url}/invite/{invite}")
         page.screenshot(path=str(tmp_path / f"invite-{width}.png"), full_page=True)
@@ -58,6 +59,14 @@ def test_beta_preset_location_and_tracking(browser, tmp_path, width, height):  #
         assert not page.locator("#choose-cv").is_visible()
         page.screenshot(path=str(tmp_path / f"choice-{width}.png"), full_page=True)
         page.locator("#choose-po-moa").click()
+        assert not request.exists()  # Ni visite ni inscription ne lancent la collecte.
+        csrf = page.locator('meta[name="csrf-token"]').get_attribute("content")
+        invalid = page.request.post(
+            f"{url}/onboarding/complete", data={"intents": []},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert invalid.status == 400
+        assert not request.exists()
         assert page.locator(".intent-label").count() == 2
         page.locator("#locations").fill("Lyon")
         _assert_readable_seniority(page)
@@ -71,6 +80,8 @@ def test_beta_preset_location_and_tracking(browser, tmp_path, width, height):  #
         page.screenshot(path=str(tmp_path / f"onboarding-{width}.png"), full_page=True)
         page.locator("#confirm").click()
         page.wait_for_url(f"{url}/options?welcome=1")
+        assert request.is_file()  # Contrat consommé par le service systemd existant.
+        request.unlink()
         assert not page.get_by_role("tab", name="Lettres", exact=True).is_visible()
         _assert_readable_seniority(page)
         page.screenshot(path=str(tmp_path / f"options-{width}.png"), full_page=True)
@@ -91,6 +102,7 @@ def test_beta_preset_location_and_tracking(browser, tmp_path, width, height):  #
         page.locator(".intent-label").first.fill("Mon objectif PO")
         page.locator("#confirm").click()
         page.wait_for_url(f"{url}/")
+        assert not request.exists()  # Modifier le profil ne relance pas la première collecte.
         conn = connect(db)
         assert conn.execute("SELECT state FROM match").fetchone()[0] == "later"
         conn.close()
