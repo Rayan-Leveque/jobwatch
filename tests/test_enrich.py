@@ -1501,11 +1501,11 @@ def test_enrich_backfills_contract_and_location_from_announcement(
     conn: sqlite3.Connection, monkeypatch
 ) -> None:
     """Sources sans métadonnées (RSS Talentsoft, API Workday) : enrich complète contrat et lieu."""
-    offer_id = _seed_offer(conn, title="Ingénieur IA - Fontenay-aux-Roses H/F")
+    offer_id = _seed_offer(conn, title="2026-41446 - Ingénieur IA H/F")
     conn.execute(
         "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
         "VALUES (?, ?, 'http', 'ok')",
-        (offer_id, "Contrat : CDI. Poste basé à Fontenay-aux-Roses. " * 5),
+        (offer_id, "Contrat : CDI. Poste basé au 40 avenue des Terroirs 75012 PARIS. " * 3),
     )
     conn.commit()
     monkeypatch.setattr(
@@ -1519,10 +1519,37 @@ def test_enrich_backfills_contract_and_location_from_announcement(
     offer = conn.execute(
         "SELECT contract, location FROM offer WHERE id = ?", (offer_id,)
     ).fetchone()
-    assert tuple(offer) == ("permanent", "Fontenay-aux-Roses")
+    assert tuple(offer) == ("permanent", "75012 PARIS")
     assert result.contracts_backfilled == 1
     assert result.locations_backfilled == 1
     assert "1 contrat(s) et 1 lieu(x) complété(s)" in result.summary_line()
+
+
+def test_enrich_backfill_never_invents_a_location_from_title(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """« 2026-41446 - Correspondant travaux H/F » ne devient jamais une localisation."""
+    offer_id = _seed_offer(conn, title="2026-41446 - Correspondant travaux H/F")
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
+        "VALUES (?, ?, 'http', 'ok')",
+        (offer_id, "Emploi ouvert aux contractuels. Mission au sein du BGSAC. " * 5),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize", lambda config, markdown: ({"stack": "Python"}, {}, ["IA"])
+    )
+
+    result = enrich(conn, _config(), client=_http_client(
+        lambda request: (_ for _ in ()).throw(AssertionError("contenu déjà en base"))
+    ), sleep=_no_sleep)
+
+    offer = conn.execute(
+        "SELECT contract, location FROM offer WHERE id = ?", (offer_id,)
+    ).fetchone()
+    assert tuple(offer) == (None, None)
+    assert result.contracts_backfilled == 0
+    assert result.locations_backfilled == 0
 
 
 def test_enrich_backfill_never_overwrites_and_skips_unfound(conn: sqlite3.Connection, monkeypatch) -> None:

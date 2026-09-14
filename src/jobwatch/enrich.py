@@ -70,9 +70,7 @@ CONTRACT_PATTERNS = (
     ("fixed_term", re.compile(r"\bCDD\b|durée déterminée|CONTRACTOR|TEMPORARY", re.IGNORECASE)),
 )
 LIEU_LINE_RE = re.compile(r"^\s*Lieu\s*:\s*(\S.*?)\s*$", re.MULTILINE)
-TITLE_LOCATION_RE = re.compile(
-    r"\s-\s([A-Za-zÀ-ÿ0-9'’\- ]{2,40}?)\s*(?:\(\s*H\s*/\s*F\s*\)|H\s*/\s*F|F\s*/\s*H)\s*$"
-)
+POSTAL_TOWN_RE = re.compile(r"\b(\d{5})\s+([A-ZÀ-Þ][A-Za-zÀ-ÿ'’\- ]{1,30})\s*$", re.MULTILINE)
 MAX_SUMMARY_ATTEMPTS = 3
 SUMMARY_RETRY_SQL_DELAY = "-1 hour"
 WTTJ_RECOVERY_VERSION = 1
@@ -341,7 +339,9 @@ def _backfill_meta(conn: sqlite3.Connection, offer_id: int, markdown: str) -> tu
     """Complète contrat et lieu manquants depuis le texte de l'annonce, sans écraser.
 
     Renvoie (contrat rempli ?, lieu rempli ?). Le lieu vient de la ligne « Lieu : »
-    du JSON-LD quand il a gagné, sinon d'un titre qui finit par « - Ville H/F ».
+    du JSON-LD quand il a gagné, sinon d'une ligne avec code postal suivi de la
+    ville. Un titre ne suffit jamais : « 2026-41446 - Correspondant travaux H/F »
+    inventerait une localisation depuis le titre du poste.
     """
     offer = conn.execute(
         "SELECT title, contract, location FROM offer WHERE id = ?", (offer_id,)
@@ -365,10 +365,10 @@ def _backfill_meta(conn: sqlite3.Connection, offer_id: int, markdown: str) -> tu
     lieu = LIEU_LINE_RE.search(markdown)
     if lieu:
         location = lieu.group(1)
-    elif offer["location"] is None:
-        title_match = TITLE_LOCATION_RE.search(str(offer["title"] or ""))
-        if title_match:
-            location = title_match.group(1).strip()
+    else:
+        postal = POSTAL_TOWN_RE.search(markdown)
+        if postal:
+            location = f"{postal.group(1)} {postal.group(2).strip()}"
     if location and offer["location"] is None:
         conn.execute(
             "UPDATE offer SET location = ? WHERE id = ? AND location IS NULL",
