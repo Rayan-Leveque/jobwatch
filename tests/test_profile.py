@@ -183,5 +183,7 @@ def test_profile_page_guides_empty_user_and_escapes_identity() -> None:
     )
     assert "Tous les champs sont facultatifs" in page
     assert "Passer pour l’instant" in page
-    assert "alice&lt;unsafe&gt;" in page
+    # Le libellé espace a été retiré de l'interface (fe1097d) : le slug ne doit
+    # plus apparaître du tout, et surtout jamais en clair non échappé.
+    assert "alice<unsafe>" not in page
     assert 'name="highlights"' in page
