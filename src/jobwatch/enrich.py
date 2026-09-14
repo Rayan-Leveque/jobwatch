@@ -43,7 +43,7 @@ from jobwatch import llm_runner
 from jobwatch.config import EnrichConfig
 from jobwatch.extraction import Extraction, extract
 from jobwatch.llm_runner import LLMRunnerError, opencode_text, run_codex, run_opencode, run_pi
-from jobwatch.research import OPENROUTER_URL
+from jobwatch.research import OPENROUTER_URL, openrouter_model_payload
 from jobwatch.seniority import reclassify_all_profiles
 
 OPENCODE_TOOLS = llm_runner.OPENCODE_TOOLS
@@ -391,7 +391,7 @@ def _openrouter_summary(config: EnrichConfig, prompt: str, markdown: str) -> str
             OPENROUTER_URL,
             headers={"Authorization": f"Bearer {config.api_key}"},
             json={
-                "model": config.model,
+                **openrouter_model_payload(config.model, config.provider),
                 "messages": [
                     {"role": "user", "content": f"{prompt}\n\n<offre>{markdown}</offre>"}
                 ],

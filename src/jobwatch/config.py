@@ -142,6 +142,8 @@ class EnrichConfig:
     pi_bin: str = "pi"
     # Clé API OpenRouter, requise avec le runner 'openrouter'.
     api_key: str = ""
+    # Fournisseur OpenRouter imposé, par exemple 'fireworks'.
+    provider: str | None = None
     # Effort de raisonnement : --variant OpenCode, model_reasoning_effort Codex
     # ou --thinking Pi.
     variant: str | None = None
@@ -158,6 +160,8 @@ class ResearchConfig:
     # Requise avec le runner openrouter : appel HTTP direct, la recherche web
     # passant par le plugin `web` d'OpenRouter.
     api_key: str | None = None
+    # Fournisseur OpenRouter imposé, par exemple 'fireworks'.
+    provider: str | None = None
     variant: str | None = None
     instructions: str = ""
     recency_days: int = 7
@@ -425,6 +429,9 @@ def _research_from_dict(raw: object) -> ResearchConfig | None:
         raise ConfigError("research.api_key doit être une chaîne non vide")
     if runner == "openrouter" and not api_key:
         raise ConfigError("research.api_key est requise avec le runner openrouter")
+    provider = raw.get("provider")
+    if provider is not None and (not isinstance(provider, str) or not provider.strip()):
+        raise ConfigError("research.provider doit être une chaîne non vide")
     opencode_bin = raw.get("opencode_bin", "opencode")
     if not isinstance(opencode_bin, str) or not opencode_bin:
         raise ConfigError("research.opencode_bin doit être une chaîne non vide")
@@ -445,6 +452,7 @@ def _research_from_dict(raw: object) -> ResearchConfig | None:
         opencode_bin=opencode_bin,
         codex_bin=codex_bin,
         api_key=api_key,
+        provider=provider.strip() if provider else None,
         variant=variant,
         instructions=instructions.strip(),
         recency_days=recency_days,
@@ -487,6 +495,9 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
         raise ConfigError("enrich.api_key doit être une chaîne")
     if runner == "openrouter" and not api_key.strip():
         raise ConfigError("enrich.api_key est requis avec le runner openrouter")
+    provider = raw.get("provider")
+    if provider is not None and (not isinstance(provider, str) or not provider.strip()):
+        raise ConfigError("enrich.provider doit être une chaîne non vide")
     variant = raw.get("variant")
     if variant is not None and (not isinstance(variant, str) or not variant):
         raise ConfigError("enrich.variant doit être une chaîne non vide")
@@ -495,7 +506,9 @@ def _enrich_from_dict(raw: object) -> EnrichConfig | None:
         raise ConfigError("enrich.concurrency doit être un entier >= 1")
     return EnrichConfig(
         model=model, runner=runner, opencode_bin=opencode_bin, codex_bin=codex_bin,
-        pi_bin=pi_bin, api_key=api_key, variant=variant, concurrency=concurrency,
+        pi_bin=pi_bin, api_key=api_key,
+        provider=provider.strip() if provider else None,
+        variant=variant, concurrency=concurrency,
     )
 
 

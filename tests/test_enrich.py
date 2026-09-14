@@ -687,7 +687,8 @@ def test_enrich_summarizes_with_openrouter(conn: sqlite3.Connection, monkeypatch
         return httpx.Response(200, text=LONG_HTML)
 
     config = EnrichConfig(
-        model="deepseek/deepseek-v4-flash-0731", runner="openrouter", api_key="sk-or-test"
+        model="deepseek/deepseek-v4.1-flash", runner="openrouter",
+        api_key="sk-or-test", provider="fireworks"
     )
     result = enrich(conn, config, client=_http_client(handler), sleep=_no_sleep)
 
@@ -697,6 +698,8 @@ def test_enrich_summarizes_with_openrouter(conn: sqlite3.Connection, monkeypatch
     url, headers, payload = calls[0]
     assert url == OPENROUTER_URL
     assert headers["Authorization"] == "Bearer sk-or-test"
+    assert payload["model"] == "deepseek/deepseek-v4.1-flash"
+    assert payload["provider"] == {"only": ["fireworks"], "allow_fallbacks": False}
     assert "Ingénieur IA Paris" in payload["messages"][0]["content"]
     assert "plugins" not in payload
     field = conn.execute(
@@ -1227,20 +1230,22 @@ def test_config_parses_openrouter_runner_and_requires_api_key(tmp_path) -> None:
     base = f"db: {tmp_path / 'db.sqlite'}\nsearches:\n  - name: test\n    include: ['AI']\n"
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        base + "enrich:\n  runner: openrouter\n  model: deepseek/deepseek-v4-flash-0731\n"
+        base + "enrich:\n  runner: openrouter\n  model: deepseek/deepseek-v4.1-flash\n"
+        "  provider: fireworks\n"
     )
     with pytest.raises(ConfigError, match="api_key"):
         load_config(config_file)
 
     config_file.write_text(
-        base + "enrich:\n  runner: openrouter\n  model: deepseek/deepseek-v4-flash-0731\n"
-        "  api_key: sk-or-v1-test\n"
+        base + "enrich:\n  runner: openrouter\n  model: deepseek/deepseek-v4.1-flash\n"
+        "  provider: fireworks\n  api_key: sk-or-v1-test\n"
     )
     config = load_config(config_file).enrich
     assert config is not None
     assert config.runner == "openrouter"
     assert config.api_key == "sk-or-v1-test"
-    assert config.model == "deepseek/deepseek-v4-flash-0731"
+    assert config.model == "deepseek/deepseek-v4.1-flash"
+    assert config.provider == "fireworks"
 
 
 def test_config_fails_loudly_when_codex_bin_missing_from_path(tmp_path, monkeypatch) -> None:

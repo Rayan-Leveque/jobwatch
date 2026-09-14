@@ -27,6 +27,14 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # contexte : un seul appel, sans boucle d'outils ni sous-processus.
 OPENROUTER_WEB_RESULTS = 8
 
+
+def openrouter_model_payload(model: str, provider: str | None = None) -> dict[str, object]:
+    payload: dict[str, object] = {"model": model}
+    if provider:
+        payload["provider"] = {"only": [provider], "allow_fallbacks": False}
+    return payload
+
+
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 OUTPUT_SCHEMA = {
@@ -224,7 +232,7 @@ def _run_openrouter(config: ResearchConfig, prompt: str, candidates: str) -> str
             OPENROUTER_URL,
             headers={"Authorization": f"Bearer {config.api_key}"},
             json={
-                "model": config.model,
+                **openrouter_model_payload(config.model, config.provider),
                 "messages": [
                     {"role": "user", "content": f"{prompt}\n\n<candidates>{candidates}</candidates>"}
                 ],

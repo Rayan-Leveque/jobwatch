@@ -74,16 +74,18 @@ sources: {{}}
 notify: {{}}
 research:
   runner: openrouter
-  model: deepseek/deepseek-v4-flash
+  model: deepseek/deepseek-v4.1-flash
+  provider: fireworks
   api_key: sk-or-test
   recency_days: 3
 """
     )
     config = load_config(path)
     assert config.research == ResearchConfig(
-        model="deepseek/deepseek-v4-flash",
+        model="deepseek/deepseek-v4.1-flash",
         runner="openrouter",
         api_key="sk-or-test",
+        provider="fireworks",
         recency_days=3,
     )
 
@@ -238,8 +240,8 @@ def test_openrouter_research_sends_web_plugin_and_direct_key(monkeypatch) -> Non
     monkeypatch.setattr("jobwatch.research.httpx.post", fake_post)
 
     result = research_offers(
-        _config(runner="openrouter", model="deepseek/deepseek-v4-flash",
-                api_key="sk-or-test"),
+        _config(runner="openrouter", model="deepseek/deepseek-v4.1-flash",
+                api_key="sk-or-test", provider="fireworks"),
         _searches(),
         [],
     )
@@ -248,7 +250,8 @@ def test_openrouter_research_sends_web_plugin_and_direct_key(monkeypatch) -> Non
     assert result.fits_by_url == {"https://jobs.example/1": "high"}
     assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer sk-or-test"
-    assert captured["json"]["model"] == "deepseek/deepseek-v4-flash"
+    assert captured["json"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert captured["json"]["provider"] == {"only": ["fireworks"], "allow_fallbacks": False}
     assert captured["json"]["plugins"] == [{"id": "web", "max_results": 8}]
     assert captured["json"]["reasoning"] == {"enabled": False}
     assert captured["timeout"] == 1800
