@@ -126,6 +126,20 @@ class WorkdaySource:
 
 
 @dataclass
+class RenderedSite:
+    url: str
+    name: str
+    link_pattern: str
+    interval_days: int = 1
+
+
+@dataclass
+class RenderedSource:
+    sites: list[RenderedSite]
+    interval_days: int = 1
+
+
+@dataclass
 class TalentsoftSource:
     sites: list[TalentsoftSite]
     interval_days: int = 1
@@ -139,6 +153,7 @@ class SourcesConfig:
     wttj: WttjSource | None = None
     talentsoft: TalentsoftSource | None = None
     workday: WorkdaySource | None = None
+    playwright: RenderedSource | None = None
 
 
 @dataclass
@@ -469,12 +484,59 @@ def _workday_from_dict(raw: object) -> WorkdaySource:
     return WorkdaySource(sites=sites, interval_days=interval_days)
 
 
+def _rendered_from_dict(raw: object) -> RenderedSource:
+    if not isinstance(raw, dict):
+        raise ConfigError("sources.playwright doit être un mapping")
+    interval_days = _interval_days(
+        raw.get("interval_days", 1), "sources.playwright.interval_days"
+    )
+    sites_raw = raw.get("sites")
+    if not isinstance(sites_raw, list) or not sites_raw:
+        raise ConfigError("sources.playwright.sites doit être une liste non vide")
+    sites: list[RenderedSite] = []
+    for index, site_raw in enumerate(sites_raw):
+        if not isinstance(site_raw, dict):
+            raise ConfigError(f"sources.playwright.sites[{index}] doit être un mapping")
+        url = site_raw.get("url")
+        name = site_raw.get("name")
+        link_pattern = site_raw.get("link_pattern")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            raise ConfigError(f"sources.playwright.sites[{index}].url doit être une URL HTTP(S)")
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"sources.playwright.sites[{index}].name est requis")
+        if not isinstance(link_pattern, str) or not link_pattern:
+            raise ConfigError(f"sources.playwright.sites[{index}].link_pattern est requis")
+        try:
+            re.compile(link_pattern)
+        except re.error as exc:
+            raise ConfigError(
+                f"sources.playwright.sites[{index}].link_pattern est une regex invalide : {exc}"
+            ) from exc
+        sites.append(
+            RenderedSite(
+                url=url.rstrip("/"),
+                name=name,
+                link_pattern=link_pattern,
+                interval_days=_interval_days(
+                    site_raw.get("interval_days", interval_days),
+                    f"sources.playwright.sites[{index}].interval_days",
+                ),
+            )
+        )
+    if len({site.url.casefold() for site in sites}) != len(sites):
+        raise ConfigError("sources.playwright.sites contient une URL en double")
+    return RenderedSource(sites=sites, interval_days=interval_days)
+
+
 def _sources_from_dict(raw: object) -> SourcesConfig:
     if raw is None:
         return SourcesConfig()
     if not isinstance(raw, dict):
         raise ConfigError("'sources' doit être un mapping")
-    known = {"france_travail", "smartrecruiters", "linkedin", "wttj", "talentsoft", "workday"}
+    known = {
+        "france_travail", "smartrecruiters", "linkedin", "wttj",
+        "talentsoft", "workday", "playwright",
+    }
     unknown = set(raw) - known
     if unknown:
         raise ConfigError(f"type(s) de source inconnu(s) : {sorted(unknown)}")
@@ -489,6 +551,7 @@ def _sources_from_dict(raw: object) -> SourcesConfig:
         wttj=_wttj_from_dict(raw.get("wttj")) if "wttj" in raw else None,
         talentsoft=_talentsoft_from_dict(raw.get("talentsoft")) if "talentsoft" in raw else None,
         workday=_workday_from_dict(raw.get("workday")) if "workday" in raw else None,
+        playwright=_rendered_from_dict(raw.get("playwright")) if "playwright" in raw else None,
     )
 
 

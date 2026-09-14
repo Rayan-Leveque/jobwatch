@@ -34,6 +34,15 @@ searches:
 #     sites:
 #       - url: https://onepoint.wd3.myworkdayjobs.com/en-US/OnepointFR
 #         name: Onepoint
+#   playwright:                        # pages de listes rendues par Chromium (lourd : à réserver aux sites bloquants)
+#     interval_days: 4
+#     sites:
+#       - url: https://emploi.cnrs.fr/
+#         name: CNRS
+#         link_pattern: "/Offres/[^/]+/[^/]+/Default\\.aspx"
+#       - url: https://www.lacantine.co/jobboard/
+#         name: La Cantine (Nantes)
+#         link_pattern: "/job/.+"
 #   linkedin:
 #     hours: 48
 #     queries:

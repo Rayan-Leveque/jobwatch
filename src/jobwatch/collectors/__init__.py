@@ -12,6 +12,7 @@ import httpx
 from jobwatch.collectors.base import Collector, store_offers
 from jobwatch.collectors.france_travail import FranceTravailCollector
 from jobwatch.collectors.linkedin import LinkedInCollector
+from jobwatch.collectors.rendered import PlaywrightCollector
 from jobwatch.collectors.smartrecruiters import SmartRecruitersCollector
 from jobwatch.collectors.talentsoft import TalentsoftCollector, site_slug
 from jobwatch.collectors.workday import WorkdayCollector, cxs_site_name
@@ -89,6 +90,14 @@ def build_collectors(sources: SourcesConfig, client: httpx.Client | None = None)
                 interval_days=site.interval_days,
             )
             collector.name = f"workday:{cxs_site_name(site.url).casefold()}"
+            collectors.append(collector)
+    if sources.playwright is not None:
+        for site in sources.playwright.sites:
+            collector = PlaywrightCollector(
+                url=site.url, company=site.name, link_pattern=site.link_pattern,
+                client=client, interval_days=site.interval_days,
+            )
+            collector.name = f"playwright:{site_slug(site.url)}"
             collectors.append(collector)
     return collectors
 
