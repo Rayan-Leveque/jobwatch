@@ -29,6 +29,8 @@ class Collector(Protocol):
     name: str
     source_type: str
     platform: str
+    interval_days: int
+    failed_requests: int
 
     def fetch(self) -> list[RawOffer]:
         """Renvoie les offres de la source. Ne lève jamais d'erreur réseau."""
@@ -48,6 +50,8 @@ def store_offers(
     source_name: str,
     source_type: str,
     offers: list[RawOffer],
+    *,
+    successful_at: str | None = None,
 ) -> list[int]:
     """Upsert des sociétés et offres, en renvoyant les ids des offres nouvellement insérées.
 
@@ -111,6 +115,10 @@ def store_offers(
         existing_titles[key] = offer_id
         locations[offer_id] = offer.location
 
-    conn.execute("UPDATE source SET last_run_at = datetime('now') WHERE id = ?", (source_id,))
+    conn.execute(
+        "UPDATE source SET last_run_at = datetime('now'), "
+        "last_success_at = COALESCE(?, last_success_at) WHERE id = ?",
+        (successful_at, source_id),
+    )
     conn.commit()
     return new_ids

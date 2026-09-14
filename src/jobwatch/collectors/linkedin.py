@@ -78,9 +78,11 @@ class LinkedInCollector:
         queries: list[LinkedInQuery],
         hours: int = 48,
         client: httpx.Client | None = None,
+        interval_days: int = 1,
     ) -> None:
         self.queries = queries
         self.hours = hours
+        self.interval_days = interval_days
         self._client = client
         self.failed_requests = 0
 

@@ -48,12 +48,15 @@ class FranceTravailCollector:
         keywords: str,
         department: str | None = None,
         client: httpx.Client | None = None,
+        interval_days: int = 1,
     ) -> None:
         self.client_id = client_id
         self.client_secret = client_secret
         self.keywords = keywords
         self.department = department
         self._client = client
+        self.interval_days = interval_days
+        self.failed_requests = 0
 
     def _request_client(self) -> httpx.Client:
         if self._client is None:
@@ -74,15 +77,18 @@ class FranceTravailCollector:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
+            self.failed_requests += 1
             log.warning("france_travail token request failed: %s", exc)
             return None
         try:
             payload = response.json()
         except ValueError:
+            self.failed_requests += 1
             log.warning("france_travail token response was not valid JSON")
             return None
         token = payload.get("access_token") if isinstance(payload, dict) else None
         if not isinstance(token, str) or not token:
+            self.failed_requests += 1
             log.warning("france_travail token response had no access_token")
             return None
         return token
@@ -97,25 +103,30 @@ class FranceTravailCollector:
                 SEARCH_URL, params=params, headers={"Authorization": f"Bearer {token}"}
             )
         except httpx.HTTPError as exc:
+            self.failed_requests += 1
             log.warning("france_travail search request failed: %s", exc)
             return []
-        if response.status_code in (204, 206):
-            if not response.content:
-                return []
-            try:
-                return response.json().get("resultats", [])
-            except ValueError:
-                return []
-        if response.status_code != 200:
+        if response.status_code == 204:
+            return []
+        if response.status_code not in (200, 206):
+            self.failed_requests += 1
             log.warning("france_travail search returned status %s", response.status_code)
             return []
         try:
             payload = response.json()
         except ValueError:
+            self.failed_requests += 1
+            log.warning("france_travail search returned invalid JSON")
             return []
-        return payload.get("resultats", []) if isinstance(payload, dict) else []
+        items = payload.get("resultats") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            self.failed_requests += 1
+            log.warning("france_travail search returned invalid results")
+            return []
+        return items
 
     def fetch(self) -> list[RawOffer]:
+        self.failed_requests = 0
         token = self._access_token()
         if token is None:
             return []

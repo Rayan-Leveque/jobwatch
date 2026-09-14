@@ -2,7 +2,8 @@ CREATE TABLE IF NOT EXISTS source (
   id INTEGER PRIMARY KEY,
   type TEXT NOT NULL,                -- 'france_travail' | 'smartrecruiters'
   name TEXT NOT NULL UNIQUE,
-  last_run_at TEXT
+  last_run_at TEXT,
+  last_success_at TEXT
 );
 CREATE TABLE IF NOT EXISTS company (
   id INTEGER PRIMARY KEY,

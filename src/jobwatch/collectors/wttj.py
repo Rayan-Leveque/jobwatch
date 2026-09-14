@@ -79,6 +79,7 @@ class WttjCollector:
         index: str,
         hours: int = 48,
         client: httpx.Client | None = None,
+        interval_days: int = 1,
     ) -> None:
         self.queries = queries
         self.countries = countries
@@ -88,6 +89,8 @@ class WttjCollector:
         self.index = index
         self.hours = hours
         self._client = client
+        self.interval_days = interval_days
+        self.failed_requests = 0
 
     @property
     def search_url(self) -> str:
@@ -99,6 +102,7 @@ class WttjCollector:
         return self._client
 
     def fetch(self) -> list[RawOffer]:
+        self.failed_requests = 0
         offers: list[RawOffer] = []
         since = int(time.time()) - self.hours * 3600
         country_filter = " OR ".join(
@@ -130,20 +134,26 @@ class WttjCollector:
                     self.search_url, json=payload, headers=headers
                 )
             except httpx.HTTPError as exc:
+                self.failed_requests += 1
                 log.warning("wttj request for %r failed: %s", query, exc)
                 continue
             if response.status_code != 200:
+                self.failed_requests += 1
                 log.warning("wttj request for %r returned status %s", query, response.status_code)
                 continue
             try:
                 data = response.json()
             except ValueError:
+                self.failed_requests += 1
                 log.warning("wttj request for %r returned invalid JSON", query)
                 continue
-            hits = data.get("hits", []) if isinstance(data, dict) else []
-            for hit in hits if isinstance(hits, list) else []:
-                if isinstance(hit, dict):
-                    offer = _offer_from_hit(hit, self.cities)
-                    if offer is not None:
-                        offers.append(offer)
+            hits = data.get("hits") if isinstance(data, dict) else None
+            if not isinstance(hits, list) or any(not isinstance(hit, dict) for hit in hits):
+                self.failed_requests += 1
+                log.warning("wttj request for %r returned invalid hits", query)
+                continue
+            for hit in hits:
+                offer = _offer_from_hit(hit, self.cities)
+                if offer is not None:
+                    offers.append(offer)
         return offers

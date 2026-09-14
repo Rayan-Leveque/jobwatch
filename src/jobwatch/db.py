@@ -10,6 +10,7 @@ SCHEMA_FILE = "schema.sql"
 
 # Colonnes ajoutées après la création de la table (migration d'une base v0.2 existante).
 COLUMN_MIGRATIONS = (
+    ("source", "last_success_at", "TEXT"),
     ("offer", "deadline", "TEXT"),
     ("match", "fit", "TEXT"),
     ("offer_summary", "source", "TEXT DEFAULT 'manual'"),

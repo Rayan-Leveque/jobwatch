@@ -13,7 +13,7 @@ from jobwatch import __version__, importing
 from jobwatch.applications import ApplicationError, record_application
 from jobwatch.auth import AuthError, auth_required, create_invite
 from jobwatch.backup import BackupError, create_backup, restore_backup
-from jobwatch.collectors import build_collectors
+from jobwatch.collectors import collect_due
 from jobwatch.collectors.base import store_offers
 from jobwatch.config import Config, ConfigError, example_config_text, load_config
 from jobwatch.db import connect, init_db
@@ -186,14 +186,9 @@ def run(config_path: Path | None) -> None:
         sync_searches(conn, config.searches)
         sync_profile_searches(conn)
         searches = active_search_configs(conn)
-        collected = 0
-        collection_failed = False
-        for collector in build_collectors(sources_for_profile(conn, config.sources)):
-            offers = collector.fetch()
-            collection_failed |= bool(getattr(collector, "failed_requests", 0))
-            new_ids = store_offers(conn, collector.name, collector.source_type, offers)
-            collected += len(new_ids)
-            logger.info("collected %d new offers from %s", len(new_ids), collector.name)
+        collected, skipped, collection_failed = collect_due(
+            conn, sources_for_profile(conn, config.sources)
+        )
         # Un premier matching avant la recherche large : les offres du jour,
         # même venues du pont, entrent ainsi dans ses candidats à évaluer.
         new_matches = run_matching(conn)
@@ -221,11 +216,12 @@ def run(config_path: Path | None) -> None:
         conn.close()
 
     notified = f", notifié via {', '.join(channels)}" if channels else ""
+    schedule_note = f", {skipped} source(s) différée(s)" if skipped else ""
     research_note = ", recherche large en échec" if research_failed else ""
     fit_note = f", {fitted} fit(s) renseigné(s)" if fitted else ""
     click.echo(
         f"{collected} nouvelles offres collectées, {len(new_matches)} nouveaux matchs"
-        f"{fit_note}{notified}{research_note}"
+        f"{fit_note}{notified}{research_note}{schedule_note}"
     )
     if collection_failed:
         _fatal("collecte incomplète, consultez les journaux et réessayez")

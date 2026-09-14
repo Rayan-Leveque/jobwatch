@@ -58,11 +58,14 @@ class FranceTravailSource:
     client_secret: str
     keywords: str
     department: str | None = None
+    interval_days: int = 1
 
 
 @dataclass
 class SmartRecruitersSource:
     companies: list[str]
+    interval_days: int = 1
+    company_intervals: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -77,6 +80,7 @@ class LinkedInSource:
     queries: list[LinkedInQuery]
     hours: int = 48
     from_profile: bool = False
+    interval_days: int = 1
 
 
 @dataclass
@@ -93,6 +97,20 @@ class WttjSource:
     cities: dict[str, list[str]]
     algolia: WttjAlgoliaConfig
     hours: int = 48
+    interval_days: int = 1
+
+
+@dataclass
+class TalentsoftSite:
+    url: str
+    name: str
+    interval_days: int = 1
+
+
+@dataclass
+class TalentsoftSource:
+    sites: list[TalentsoftSite]
+    interval_days: int = 1
 
 
 @dataclass
@@ -101,6 +119,7 @@ class SourcesConfig:
     smartrecruiters: SmartRecruitersSource | None = None
     linkedin: LinkedInSource | None = None
     wttj: WttjSource | None = None
+    talentsoft: TalentsoftSource | None = None
 
 
 @dataclass
@@ -231,6 +250,12 @@ def _search_from_dict(raw: object) -> SearchConfig:
     )
 
 
+def _interval_days(value: object, field_name: str) -> int:
+    if type(value) is not int or value not in (1, 4):
+        raise ConfigError(f"{field_name} doit être 1 ou 4 jours")
+    return value
+
+
 def _france_travail_from_dict(raw: object) -> FranceTravailSource:
     if not isinstance(raw, dict):
         raise ConfigError("sources.france_travail doit être un mapping")
@@ -256,6 +281,7 @@ def _france_travail_from_dict(raw: object) -> FranceTravailSource:
         client_secret=client_secret,
         keywords=keywords,
         department=department,
+        interval_days=_interval_days(raw.get("interval_days", 1), "sources.france_travail.interval_days"),
     )
 
 
@@ -267,7 +293,20 @@ def _smartrecruiters_from_dict(raw: object) -> SmartRecruitersSource:
         raise ConfigError(
             "sources.smartrecruiters.companies doit être une liste non vide de chaînes"
         )
-    return SmartRecruitersSource(companies=list(companies))
+    overrides = raw.get("company_intervals", {})
+    if not isinstance(overrides, dict):
+        raise ConfigError("sources.smartrecruiters.company_intervals doit être un mapping")
+    intervals: dict[str, int] = {}
+    for slug, days in overrides.items():
+        if slug not in companies:
+            raise ConfigError(f"sources.smartrecruiters.company_intervals société inconnue {slug!r}")
+        intervals[slug] = _interval_days(days, f"sources.smartrecruiters.company_intervals.{slug}")
+    if len({slug.casefold() for slug in companies}) != len(companies):
+        raise ConfigError("sources.smartrecruiters.companies contient une société en double")
+    return SmartRecruitersSource(
+        companies=list(companies), company_intervals=intervals,
+        interval_days=_interval_days(raw.get("interval_days", 1), "sources.smartrecruiters.interval_days"),
+    )
 
 
 def _positive_hours(value: object, field_name: str) -> int:
@@ -300,6 +339,7 @@ def _linkedin_from_dict(raw: object) -> LinkedInSource:
         queries=queries,
         hours=_positive_hours(raw.get("hours", 48), "sources.linkedin.hours"),
         from_profile=from_profile,
+        interval_days=_interval_days(raw.get("interval_days", 1), "sources.linkedin.interval_days"),
     )
 
 
@@ -335,7 +375,42 @@ def _wttj_from_dict(raw: object) -> WttjSource:
         cities=cities,
         algolia=WttjAlgoliaConfig(**algolia_values),
         hours=_positive_hours(raw.get("hours", 48), "sources.wttj.hours"),
+        interval_days=_interval_days(raw.get("interval_days", 1), "sources.wttj.interval_days"),
     )
+
+
+def _talentsoft_from_dict(raw: object) -> TalentsoftSource:
+    if not isinstance(raw, dict):
+        raise ConfigError("sources.talentsoft doit être un mapping")
+    interval_days = _interval_days(
+        raw.get("interval_days", 1), "sources.talentsoft.interval_days"
+    )
+    sites_raw = raw.get("sites")
+    if not isinstance(sites_raw, list) or not sites_raw:
+        raise ConfigError("sources.talentsoft.sites doit être une liste non vide")
+    sites: list[TalentsoftSite] = []
+    for index, site_raw in enumerate(sites_raw):
+        if not isinstance(site_raw, dict):
+            raise ConfigError(f"sources.talentsoft.sites[{index}] doit être un mapping")
+        url = site_raw.get("url")
+        name = site_raw.get("name")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            raise ConfigError(f"sources.talentsoft.sites[{index}].url doit être une URL HTTP(S)")
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"sources.talentsoft.sites[{index}].name est requis")
+        sites.append(
+            TalentsoftSite(
+                url=url.rstrip("/"),
+                name=name,
+                interval_days=_interval_days(
+                    site_raw.get("interval_days", interval_days),
+                    f"sources.talentsoft.sites[{index}].interval_days",
+                ),
+            )
+        )
+    if len({site.url.casefold() for site in sites}) != len(sites):
+        raise ConfigError("sources.talentsoft.sites contient une URL en double")
+    return TalentsoftSource(sites=sites, interval_days=interval_days)
 
 
 def _sources_from_dict(raw: object) -> SourcesConfig:
@@ -343,7 +418,7 @@ def _sources_from_dict(raw: object) -> SourcesConfig:
         return SourcesConfig()
     if not isinstance(raw, dict):
         raise ConfigError("'sources' doit être un mapping")
-    known = {"france_travail", "smartrecruiters", "linkedin", "wttj"}
+    known = {"france_travail", "smartrecruiters", "linkedin", "wttj", "talentsoft"}
     unknown = set(raw) - known
     if unknown:
         raise ConfigError(f"type(s) de source inconnu(s) : {sorted(unknown)}")
@@ -356,6 +431,7 @@ def _sources_from_dict(raw: object) -> SourcesConfig:
         else None,
         linkedin=_linkedin_from_dict(raw.get("linkedin")) if "linkedin" in raw else None,
         wttj=_wttj_from_dict(raw.get("wttj")) if "wttj" in raw else None,
+        talentsoft=_talentsoft_from_dict(raw.get("talentsoft")) if "talentsoft" in raw else None,
     )
 
 

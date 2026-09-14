@@ -20,6 +20,15 @@ searches:
 #     department: "75"
 #   smartrecruiters:
 #     companies: [Wavestone1, Devoteam]
+#   talentsoft:                        # portails carrières Talentsoft (flux RSS public, 20 dernières offres)
+#     interval_days: 1                 # 1 ou 4 ; 20 offres seulement par flux, donc collecte quotidienne conseillée
+#     sites:
+#       - url: https://ministereinterieur-career.talent-soft.com
+#         name: Ministère de l'Intérieur
+#       - url: https://passerelles.economie.gouv.fr
+#         name: Passerelles (ministères économiques et financiers)
+#       - url: https://cea-recrute.talent-soft.com
+#         name: CEA
 #   linkedin:
 #     hours: 48
 #     queries:

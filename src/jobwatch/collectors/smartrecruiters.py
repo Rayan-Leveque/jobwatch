@@ -24,9 +24,13 @@ class SmartRecruitersCollector:
     source_type = "smartrecruiters"
     platform = PLATFORM
 
-    def __init__(self, companies: list[str], client: httpx.Client | None = None) -> None:
+    def __init__(
+        self, companies: list[str], client: httpx.Client | None = None, interval_days: int = 1,
+    ) -> None:
         self.companies = companies
         self._client = client
+        self.interval_days = interval_days
+        self.failed_requests = 0
 
     def _request_client(self) -> httpx.Client:
         if self._client is None:
@@ -44,9 +48,11 @@ class SmartRecruitersCollector:
                     BASE_URL.format(slug=slug), params={"limit": 100, "offset": offset}
                 )
             except httpx.HTTPError as exc:
+                self.failed_requests += 1
                 log.warning("smartrecruiters request for '%s' failed: %s", slug, exc)
                 break
             if response.status_code != 200:
+                self.failed_requests += 1
                 log.warning(
                     "smartrecruiters request for '%s' returned status %s",
                     slug,
@@ -56,11 +62,18 @@ class SmartRecruitersCollector:
             try:
                 payload = response.json()
             except ValueError:
+                self.failed_requests += 1
+                log.warning("smartrecruiters response for '%s' was not valid JSON", slug)
                 break
-            if not isinstance(payload, dict):
+            content = payload.get("content") if isinstance(payload, dict) else None
+            if not isinstance(content, list) or any(not isinstance(item, dict) for item in content):
+                self.failed_requests += 1
+                log.warning("smartrecruiters response for '%s' had invalid content", slug)
                 break
-            content = payload.get("content", [])
-            if not isinstance(content, list) or not content:
+            if not content:
+                if offset < total and (offset or payload.get("totalFound", 0)):
+                    self.failed_requests += 1
+                    log.warning("smartrecruiters response for '%s' ended before totalFound", slug)
                 break
             postings.extend(item for item in content if isinstance(item, dict))
             offset += len(content)
@@ -69,6 +82,7 @@ class SmartRecruitersCollector:
         return postings
 
     def fetch(self) -> list[RawOffer]:
+        self.failed_requests = 0
         offers = []
         for slug in self.companies:
             for item in self._postings_for(slug):
