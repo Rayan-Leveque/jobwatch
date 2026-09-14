@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from importlib import resources
@@ -12,6 +13,10 @@ import yaml
 
 CONTRACTS = {"permanent", "fixed_term", "internship", "other"}
 CONFIG_EXAMPLE = "config.example.yaml"
+
+WORKDAY_URL_RE = re.compile(
+    r"https://[a-z0-9-]+\.wd\d+\.myworkdayjobs\.com/[A-Za-z-]+/[A-Za-z0-9_-]+"
+)
 
 
 class ConfigError(Exception):
@@ -108,6 +113,19 @@ class TalentsoftSite:
 
 
 @dataclass
+class WorkdaySite:
+    url: str
+    name: str
+    interval_days: int = 1
+
+
+@dataclass
+class WorkdaySource:
+    sites: list[WorkdaySite]
+    interval_days: int = 1
+
+
+@dataclass
 class TalentsoftSource:
     sites: list[TalentsoftSite]
     interval_days: int = 1
@@ -120,6 +138,7 @@ class SourcesConfig:
     linkedin: LinkedInSource | None = None
     wttj: WttjSource | None = None
     talentsoft: TalentsoftSource | None = None
+    workday: WorkdaySource | None = None
 
 
 @dataclass
@@ -413,12 +432,49 @@ def _talentsoft_from_dict(raw: object) -> TalentsoftSource:
     return TalentsoftSource(sites=sites, interval_days=interval_days)
 
 
+def _workday_from_dict(raw: object) -> WorkdaySource:
+    if not isinstance(raw, dict):
+        raise ConfigError("sources.workday doit être un mapping")
+    interval_days = _interval_days(
+        raw.get("interval_days", 1), "sources.workday.interval_days"
+    )
+    sites_raw = raw.get("sites")
+    if not isinstance(sites_raw, list) or not sites_raw:
+        raise ConfigError("sources.workday.sites doit être une liste non vide")
+    sites: list[WorkdaySite] = []
+    for index, site_raw in enumerate(sites_raw):
+        if not isinstance(site_raw, dict):
+            raise ConfigError(f"sources.workday.sites[{index}] doit être un mapping")
+        url = site_raw.get("url")
+        name = site_raw.get("name")
+        if not isinstance(url, str) or not WORKDAY_URL_RE.fullmatch(url.rstrip("/")):
+            raise ConfigError(
+                f"sources.workday.sites[{index}].url doit être une URL Workday "
+                "(https://<tenant>.wd<N>.myworkdayjobs.com/<locale>/<site>)"
+            )
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"sources.workday.sites[{index}].name est requis")
+        sites.append(
+            WorkdaySite(
+                url=url.rstrip("/"),
+                name=name,
+                interval_days=_interval_days(
+                    site_raw.get("interval_days", interval_days),
+                    f"sources.workday.sites[{index}].interval_days",
+                ),
+            )
+        )
+    if len({site.url.casefold() for site in sites}) != len(sites):
+        raise ConfigError("sources.workday.sites contient une URL en double")
+    return WorkdaySource(sites=sites, interval_days=interval_days)
+
+
 def _sources_from_dict(raw: object) -> SourcesConfig:
     if raw is None:
         return SourcesConfig()
     if not isinstance(raw, dict):
         raise ConfigError("'sources' doit être un mapping")
-    known = {"france_travail", "smartrecruiters", "linkedin", "wttj", "talentsoft"}
+    known = {"france_travail", "smartrecruiters", "linkedin", "wttj", "talentsoft", "workday"}
     unknown = set(raw) - known
     if unknown:
         raise ConfigError(f"type(s) de source inconnu(s) : {sorted(unknown)}")
@@ -432,6 +488,7 @@ def _sources_from_dict(raw: object) -> SourcesConfig:
         linkedin=_linkedin_from_dict(raw.get("linkedin")) if "linkedin" in raw else None,
         wttj=_wttj_from_dict(raw.get("wttj")) if "wttj" in raw else None,
         talentsoft=_talentsoft_from_dict(raw.get("talentsoft")) if "talentsoft" in raw else None,
+        workday=_workday_from_dict(raw.get("workday")) if "workday" in raw else None,
     )
 
 

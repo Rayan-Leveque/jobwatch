@@ -29,6 +29,11 @@ searches:
 #         name: Passerelles (ministères économiques et financiers)
 #       - url: https://cea-recrute.talent-soft.com
 #         name: CEA
+#   workday:                           # portails carrières Workday (API cxs publique, 20 dernières offres)
+#     interval_days: 1
+#     sites:
+#       - url: https://onepoint.wd3.myworkdayjobs.com/en-US/OnepointFR
+#         name: Onepoint
 #   linkedin:
 #     hours: 48
 #     queries:

@@ -14,6 +14,7 @@ from jobwatch.collectors.france_travail import FranceTravailCollector
 from jobwatch.collectors.linkedin import LinkedInCollector
 from jobwatch.collectors.smartrecruiters import SmartRecruitersCollector
 from jobwatch.collectors.talentsoft import TalentsoftCollector, site_slug
+from jobwatch.collectors.workday import WorkdayCollector, cxs_site_name
 from jobwatch.collectors.wttj import WttjCollector
 from jobwatch.config import (
     FranceTravailSource,
@@ -80,6 +81,14 @@ def build_collectors(sources: SourcesConfig, client: httpx.Client | None = None)
                 interval_days=site.interval_days,
             )
             collector.name = f"talentsoft:{site_slug(site.url)}"
+            collectors.append(collector)
+    if sources.workday is not None:
+        for site in sources.workday.sites:
+            collector = WorkdayCollector(
+                base_url=site.url, company=site.name, client=client,
+                interval_days=site.interval_days,
+            )
+            collector.name = f"workday:{cxs_site_name(site.url).casefold()}"
             collectors.append(collector)
     return collectors
 
