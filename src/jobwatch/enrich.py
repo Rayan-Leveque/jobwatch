@@ -59,6 +59,20 @@ FETCH_RETRY_SQL_DELAY = "-1 day"
 TERMINAL_HTTP_STATUSES = frozenset({404, 410})
 #: Causes d'échec définitives : jamais retentées, pas de résumé « retryable ».
 TERMINAL_FAILURES = frozenset({"http_404", "http_410", "unsupported_scheme"})
+
+# Backfill déterministe du contrat et du lieu depuis l'annonce extraite, pour les
+# sources qui ne les portent pas (RSS Talentsoft, API Workday). Jamais d'écrasement :
+# seules les colonnes NULL sont remplies. L'ordre des motifs va du plus spécifique
+# au plus large (un stage qui promet un CDI ensuite reste un stage).
+CONTRACT_PATTERNS = (
+    ("internship", re.compile(r"\b(stage|alternance|apprentissage|intern)\b", re.IGNORECASE)),
+    ("permanent", re.compile(r"\bCDI\b|durée indéterminée|FULL_TIME", re.IGNORECASE)),
+    ("fixed_term", re.compile(r"\bCDD\b|durée déterminée|CONTRACTOR|TEMPORARY", re.IGNORECASE)),
+)
+LIEU_LINE_RE = re.compile(r"^\s*Lieu\s*:\s*(\S.*?)\s*$", re.MULTILINE)
+TITLE_LOCATION_RE = re.compile(
+    r"\s-\s([A-Za-zÀ-ÿ0-9'’\- ]{2,40}?)\s*(?:\(\s*H\s*/\s*F\s*\)|H\s*/\s*F|F\s*/\s*H)\s*$"
+)
 MAX_SUMMARY_ATTEMPTS = 3
 SUMMARY_RETRY_SQL_DELAY = "-1 hour"
 WTTJ_RECOVERY_VERSION = 1
@@ -142,6 +156,8 @@ class EnrichResult:
     quotes_rejected: int = 0
     wttj_recovery_attempted: int = 0
     wttj_recovery_recovered: int = 0
+    contracts_backfilled: int = 0
+    locations_backfilled: int = 0
 
     def summary_line(self) -> str:
         """Bilan lisible d'un run, affiché même sans -v (donc visible en cron)."""
@@ -152,6 +168,11 @@ class EnrichResult:
         ]
         if self.limited_written:
             parts.append(f"{self.limited_written} résumé(s) limité(s) aux métadonnées")
+        if self.contracts_backfilled or self.locations_backfilled:
+            parts.append(
+                f"{self.contracts_backfilled} contrat(s) et "
+                f"{self.locations_backfilled} lieu(x) complété(s)"
+            )
         if self.summaries_failed:
             parts.append(f"{self.summaries_failed} échec(s) de génération")
         if self.extract_methods:
@@ -314,6 +335,47 @@ def _fetch_playwright(url: str) -> FetchPage:
     except Exception as exc:  # noqa: BLE001 - un site tiers cassé ne doit jamais arrêter le run
         log.warning("enrich: playwright fetch failed for %s: %s", url, exc)
         return FetchPage(None, "browser_error")
+
+
+def _backfill_meta(conn: sqlite3.Connection, offer_id: int, markdown: str) -> tuple[int, int]:
+    """Complète contrat et lieu manquants depuis le texte de l'annonce, sans écraser.
+
+    Renvoie (contrat rempli ?, lieu rempli ?). Le lieu vient de la ligne « Lieu : »
+    du JSON-LD quand il a gagné, sinon d'un titre qui finit par « - Ville H/F ».
+    """
+    offer = conn.execute(
+        "SELECT title, contract, location FROM offer WHERE id = ?", (offer_id,)
+    ).fetchone()
+    contract_filled = location_filled = 0
+    contract = next(
+        (
+            label
+            for label, pattern in CONTRACT_PATTERNS
+            if pattern.search(markdown)
+        ),
+        None,
+    )
+    if contract is not None and offer["contract"] is None:
+        conn.execute(
+            "UPDATE offer SET contract = ? WHERE id = ? AND contract IS NULL",
+            (contract, offer_id),
+        )
+        contract_filled = 1
+    location = None
+    lieu = LIEU_LINE_RE.search(markdown)
+    if lieu:
+        location = lieu.group(1)
+    elif offer["location"] is None:
+        title_match = TITLE_LOCATION_RE.search(str(offer["title"] or ""))
+        if title_match:
+            location = title_match.group(1).strip()
+    if location and offer["location"] is None:
+        conn.execute(
+            "UPDATE offer SET location = ? WHERE id = ? AND location IS NULL",
+            (location, offer_id),
+        )
+        location_filled = 1
+    return contract_filled, location_filled
 
 
 def _fetch_and_extract_result(url: str, client: httpx.Client) -> FetchOutcome:
@@ -756,6 +818,9 @@ def enrich(
                 if extracted.fields:
                     jsonld_fields[offer_id] = extracted.fields
                 markdown = extracted.markdown
+                contracts, locations = _backfill_meta(conn, offer_id, markdown)
+                result.contracts_backfilled += contracts
+                result.locations_backfilled += locations
                 futures[pool.submit(_summarize, config, markdown)] = offer_id
                 # Le sommeil ne s'applique qu'entre deux fetchs réels : résumer
                 # un texte déjà en base ne martèle personne.
@@ -767,6 +832,9 @@ def enrich(
                 ).fetchone()
                 markdown = str(row["markdown"]) if row and row["markdown"] else None
                 if markdown is not None:
+                    contracts, locations = _backfill_meta(conn, offer_id, markdown)
+                    result.contracts_backfilled += contracts
+                    result.locations_backfilled += locations
                     futures[pool.submit(_summarize, config, markdown)] = offer_id
             elif content_status != "ok" and not offer["fetch_due"]:
                 attempts = int(offer["fetch_attempts"] or 0)

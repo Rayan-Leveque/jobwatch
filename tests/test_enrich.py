@@ -1495,3 +1495,76 @@ def test_enrich_logs_one_line_per_offer_and_counts_the_run(
     line = result.summary_line()
     assert "extraction" in line
     assert "citation(s) vérifiée(s)" in line
+
+
+def test_enrich_backfills_contract_and_location_from_announcement(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """Sources sans métadonnées (RSS Talentsoft, API Workday) : enrich complète contrat et lieu."""
+    offer_id = _seed_offer(conn, title="Ingénieur IA - Fontenay-aux-Roses H/F")
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
+        "VALUES (?, ?, 'http', 'ok')",
+        (offer_id, "Contrat : CDI. Poste basé à Fontenay-aux-Roses. " * 5),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize", lambda config, markdown: ({"stack": "Python"}, {}, ["IA"])
+    )
+
+    result = enrich(conn, _config(), client=_http_client(
+        lambda request: (_ for _ in ()).throw(AssertionError("contenu déjà en base"))
+    ), sleep=_no_sleep)
+
+    offer = conn.execute(
+        "SELECT contract, location FROM offer WHERE id = ?", (offer_id,)
+    ).fetchone()
+    assert tuple(offer) == ("permanent", "Fontenay-aux-Roses")
+    assert result.contracts_backfilled == 1
+    assert result.locations_backfilled == 1
+    assert "1 contrat(s) et 1 lieu(x) complété(s)" in result.summary_line()
+
+
+def test_enrich_backfill_never_overwrites_and_skips_unfound(conn: sqlite3.Connection, monkeypatch) -> None:
+    """Un contrat connu reste intact ; sans indice, rien n'est inventé."""
+    conn.execute("INSERT OR IGNORE INTO company (name) VALUES ('Acme')")
+    company_id = conn.execute("SELECT id FROM company WHERE name = 'Acme'").fetchone()["id"]
+    conn.execute("INSERT OR IGNORE INTO source (type, name) VALUES ('test', 't')")
+    source_id = conn.execute("SELECT id FROM source WHERE name = 't'").fetchone()["id"]
+    conn.execute("INSERT OR IGNORE INTO search (name, include_json, exclude_json, locations_json) "
+                 "VALUES ('s', '[]', '[]', '[]')")
+    search_id = conn.execute("SELECT id FROM search").fetchone()["id"]
+    offer_id = conn.execute(
+        "INSERT INTO offer (source_id, company_id, title, url, contract, location) "
+        "VALUES (?, ?, 'Chef de projet data', 'https://example.com/cdp', 'permanent', NULL)",
+        (source_id, company_id),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO match (search_id, offer_id, state) VALUES (?, ?, 'new')",
+        (search_id, offer_id),
+    )
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, markdown, fetch_method, status) "
+        "VALUES (?, ?, 'http', 'ok')",
+        (offer_id, "Annonce sans contrat explicite " * 8),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "jobwatch.enrich._summarize", lambda config, markdown: ({"stack": "SQL"}, {}, ["Data"])
+    )
+
+    enrich(conn, _config(), client=_http_client(
+        lambda request: (_ for _ in ()).throw(AssertionError("contenu déjà en base"))
+    ), sleep=_no_sleep)
+
+    offer = conn.execute(
+        "SELECT contract, location FROM offer WHERE id = ?", (offer_id,)
+    ).fetchone()
+    assert tuple(offer) == ("permanent", None)
+
+    result = enrich(conn, _config(), client=_http_client(
+        lambda request: (_ for _ in ()).throw(AssertionError("contenu déjà en base"))
+    ), sleep=_no_sleep)
+    assert result.contracts_backfilled == 0
+    assert result.locations_backfilled == 0
+    assert "complété(s)" not in result.summary_line()
