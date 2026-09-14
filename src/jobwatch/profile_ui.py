@@ -46,6 +46,8 @@ def render_profile(
     cv_documents: list[sqlite3.Row] | None = None,
     career_intents: list[CareerIntent] | None = None,
     draft_enabled: bool = True,
+    locations: list[str] | None = None,
+    include_remote: bool = False,
 ) -> str:
     preferences = preferences or ProfilePreferences()
     intro = (
@@ -203,7 +205,21 @@ textarea:focus {{ outline:3px solid rgba(112,82,200,.24); border-color:#7052c8 }
       <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-securite" data-settings-tab="securite">Sécurité</button>
     </nav><div class="settings-content">
     <div class="settings-panel" id="panel-recherche" role="tabpanel" data-settings-panel="recherche">
-      <div class="panel-heading"><h2>Recherche</h2><p>Définissez les postes et les niveaux que Jobwatch doit vous montrer.</p></div>
+      <div class="panel-heading"><h2>Recherche</h2><p>Définissez les postes, les localisations et les niveaux que Jobwatch doit vous montrer.</p></div>
+    <section class="preferences" aria-labelledby="locations-heading">
+      <h2 id="locations-heading">Mes localisations</h2>
+      <label class="field" for="locations"><span>Villes ou régions</span>
+        <small id="locations-help">Jusqu'à cinq localisations, séparées par des virgules.
+        Sans localisation, aucun filtre géographique ne s'applique.</small>
+        <textarea id="locations" name="locations" rows="2" maxlength="504" aria-label="Villes ou régions"
+          aria-describedby="locations-help" placeholder="Paris, Lyon">{html.escape(', '.join(locations or []))}</textarea>
+      </label>
+      <label class="radio-label"><input type="checkbox" id="include_remote" name="include_remote"
+        {'checked' if include_remote else ''}><span>Inclure le télétravail complet</span></label>
+      <p>Ce choix filtre les nouvelles offres de toutes les sources et les offres non triées déjà reçues.
+        Vos offres à candidater et vos candidatures restent conservées.
+        Les offres sans localisation connue restent visibles.</p>
+    </section>
     <section class="categories" aria-labelledby="categories-heading">
       <div class="categories-head"><div><h2 id="categories-heading">Mes catégories</h2>
         <p>Voici les métiers et les mots-clés utilisés pour classer vos offres.</p></div>
@@ -326,6 +342,8 @@ document.getElementById('profile-form').addEventListener('submit', async event =
   const status=document.getElementById('status'); button.disabled=true;
   status.textContent='Enregistrement…'; status.classList.remove('error');
   const payload=Object.fromEntries(new FormData(event.currentTarget).entries());
+  payload.locations=String(payload.locations||'').split(',').map(city=>city.trim()).filter(Boolean);
+  payload.include_remote=document.getElementById('include_remote').checked;
   payload.seniority_min=Number(payload.seniority_min);
   payload.seniority_max=Number(payload.seniority_max);
   payload.cover_letters_enabled=payload.cover_letters_enabled==='true';

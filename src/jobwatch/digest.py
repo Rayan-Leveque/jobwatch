@@ -10,6 +10,7 @@ from email.message import EmailMessage
 import httpx
 
 from jobwatch.config import Config, SmtpConfig
+from jobwatch.geography import filter_profile_locations
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ def _collect_unnotified(conn: sqlite3.Connection) -> dict[str, list[sqlite3.Row]
         "ORDER BY s.name, m.id"
     ).fetchall()
     groups: dict[str, list[sqlite3.Row]] = {}
-    for row in rows:
+    for row in filter_profile_locations(conn, rows):
         groups.setdefault(str(row["search_name"]), []).append(row)
     return groups
 

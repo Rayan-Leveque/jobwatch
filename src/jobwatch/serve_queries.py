@@ -10,6 +10,8 @@ import sqlite3
 from dataclasses import dataclass
 from dataclasses import field as dataclasses_field
 
+from jobwatch.geography import filter_profile_locations
+
 # Deux onglets étanches : la piste « Chef de projet / PO » (track « project »)
 # regroupe offres et candidatures dont le titre contient un des motifs LIKE
 # ci-dessous (insensibles à la casse ASCII) ; l'onglet « Ingénieur IA »
@@ -71,7 +73,7 @@ def _matches(
     conn: sqlite3.Connection, state: str, track: str, account_id: int | None = None
 ) -> list[sqlite3.Row]:
     seniority_sql, seniority_params = _seniority_filter(account_id)
-    return conn.execute(
+    rows = conn.execute(
         f"{_MATCH_SELECT_SQL}"
         "WHERE m.state = ? AND (m.fit IS NULL OR m.fit != 'high') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
@@ -82,13 +84,14 @@ def _matches(
         "         o.collected_at DESC, m.id DESC",
         (state, *seniority_params, *_track_params(track)),
     ).fetchall()
+    return filter_profile_locations(conn, rows, account_id)
 
 
 def _priority_matches(
     conn: sqlite3.Connection, track: str, account_id: int | None = None
 ) -> list[sqlite3.Row]:
     seniority_sql, seniority_params = _seniority_filter(account_id)
-    return conn.execute(
+    rows = conn.execute(
         f"{_MATCH_SELECT_SQL}"
         "WHERE m.fit = 'high' AND m.state IN ('new', 'seen') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
@@ -97,6 +100,7 @@ def _priority_matches(
         "ORDER BY o.collected_at DESC, m.id DESC",
         (*seniority_params, *_track_params(track)),
     ).fetchall()
+    return filter_profile_locations(conn, rows, account_id)
 
 
 def _later_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
@@ -278,7 +282,7 @@ def _swipe_deck(
 ) -> list[sqlite3.Row]:
     """Offres 'new' de la piste à trier : fit high d'abord, puis par date de collecte."""
     seniority_sql, seniority_params = _seniority_filter(account_id)
-    return conn.execute(
+    rows = conn.execute(
         "SELECT m.id AS id, o.id AS offer_id, m.state AS state, m.fit AS fit, "
         "       s.name AS search_name, c.name AS company, o.title AS title, "
         "       o.location AS location, o.contract AS contract, o.platform AS platform, "
@@ -295,6 +299,7 @@ def _swipe_deck(
         "         o.collected_at DESC, m.id DESC",
         (*seniority_params, *_track_params(track)),
     ).fetchall()
+    return filter_profile_locations(conn, rows, account_id)
 
 
 # Cibles de la génération groupée : offres « À candidater » sans lettre générée

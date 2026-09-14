@@ -11,6 +11,7 @@ from pathlib import Path
 
 from jobwatch import draft
 from jobwatch.config import DraftConfig, SearchConfig
+from jobwatch.geography import REMOTE_LOCATIONS, profile_geography, validate_locations
 from jobwatch.matching import run_matching
 from jobwatch.seniority import (
     DEFAULT_MAX_LEVEL,
@@ -49,25 +50,6 @@ PO_MOA_PRESET = [
     {"label": "MOA / Business Analyst",
      "keywords": ["MOA", "AMOA", "business analyst", "analyste fonctionnel"], "exclude": []},
 ]
-REMOTE_LOCATIONS = ["Télétravail complet", "full remote"]
-
-
-def profile_geography(conn: sqlite3.Connection, account_id: int) -> tuple[list[str], bool]:
-    row = conn.execute(
-        "SELECT locations_json, include_remote FROM candidate_profile WHERE account_id = ?",
-        (account_id,),
-    ).fetchone()
-    return (json.loads(row["locations_json"]), bool(row["include_remote"])) if row else ([], False)
-
-
-def validate_locations(value: object) -> list[str]:
-    if not isinstance(value, list) or len(value) > 5 or any(
-        not isinstance(item, str) or not item.strip() or len(item) > 100 for item in value
-    ):
-        raise OnboardingError("indiquez au maximum cinq villes ou régions de 100 caractères")
-    return list(dict.fromkeys(item.strip() for item in value))
-
-
 @dataclass(frozen=True)
 class CareerIntent:
     label: str
@@ -391,7 +373,10 @@ def complete_profile(
     if not isinstance(cover_letters_enabled, bool):
         raise OnboardingError("le choix de génération de lettres est invalide")
     previous_locations, previous_remote = profile_geography(conn, account_id)
-    locations = validate_locations(previous_locations if locations is None else locations)
+    try:
+        locations = validate_locations(previous_locations if locations is None else locations)
+    except ValueError as exc:
+        raise OnboardingError(str(exc)) from exc
     include_remote = previous_remote if include_remote is None else include_remote
     if not isinstance(include_remote, bool):
         raise OnboardingError("le choix de télétravail est invalide")

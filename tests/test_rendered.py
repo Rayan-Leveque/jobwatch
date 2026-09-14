@@ -47,7 +47,7 @@ def _config(tmp_path, url: str) -> None:
         f"""db: {tmp_path / 'db.sqlite'}
 searches:
   - name: ai
-    include: [AI]
+    include: [IA]
 sources:
   playwright:
     interval_days: 4
@@ -156,9 +156,12 @@ def test_run_stores_rendered_offers_and_defers_rerun(tmp_path, listing_server) -
 
     conn = sqlite3.connect(db)
     titles = {row[0] for row in conn.execute("SELECT title FROM offer")}
+    matches = [row[0] for row in conn.execute(
+        "SELECT o.title FROM match m JOIN offer o ON o.id=m.offer_id")]
     conn.close()
     assert titles == {"Ingénieur IA", "pwd 7", "Data Engineer",
                       "Offre externe au domaine mais au motif"}
+    assert matches == ["Ingénieur IA"]  # « domaine » ne déclenche plus « AI ».
 
     second = runner.invoke(cli, args)
     assert second.exit_code == 0, second.output

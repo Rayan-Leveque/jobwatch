@@ -103,6 +103,17 @@ def test_beta_preset_location_and_tracking(browser, tmp_path, width, height):  #
         page.locator("#confirm").click()
         page.wait_for_url(f"{url}/")
         assert not request.exists()  # Modifier le profil ne relance pas la première collecte.
+        page.goto(f"{url}/options")
+        cities = page.get_by_label("Villes ou régions", exact=True)
+        assert cities.input_value() == "Lyon"
+        cities.fill("Paris")
+        page.get_by_role("button", name="Enregistrer mes options").click()
+        page.wait_for_url(f"{url}/")
+        if page.locator("#swipe-popup").is_visible():
+            page.locator(".swipe-popup-later").click()
+        expect(page.locator('.company:text-is("Paris Test")')).to_be_visible()
+        page.goto(f"{url}/options")
+        assert page.get_by_label("Villes ou régions", exact=True).input_value() == "Paris"
         conn = connect(db)
         assert conn.execute("SELECT state FROM match").fetchone()[0] == "later"
         conn.close()

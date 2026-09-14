@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import asdict, dataclass
 
+from jobwatch.geography import profile_geography, validate_locations
+from jobwatch.matching import run_matching
 from jobwatch.seniority import (
     DEFAULT_MAX_LEVEL,
     DEFAULT_MIN_LEVEL,
@@ -113,6 +116,14 @@ def save_profile_details(
     }
     current_details = profile_details(conn, account_id)
     current_preferences = profile_preferences(conn, account_id)
+    current_locations, current_remote = profile_geography(conn, account_id)
+    try:
+        locations = validate_locations(payload.get("locations", current_locations))
+    except ValueError as exc:
+        raise ProfileError(str(exc)) from exc
+    include_remote = payload.get("include_remote", current_remote)
+    if not isinstance(include_remote, bool):
+        raise ProfileError("le choix de télétravail est invalide")
     values = {
         column: _clean_value(payload.get(column, getattr(current_details, column)), labels[column])
         for column in PROFILE_COLUMNS
@@ -133,17 +144,26 @@ def save_profile_details(
         "UPDATE candidate_profile SET motivations = ?, targets = ?, highlights = ?, "
         "preferred_tone = ?, constraints_text = ?, reusable_details = ?, "
         "seniority_min = ?, seniority_max = ?, cover_letters_enabled = ?, "
+        "locations_json = ?, include_remote = ?, "
         "updated_at = datetime('now') WHERE account_id = ? AND workspace_id = ?",
         (
             *values.values(),
             seniority_min,
             seniority_max,
             int(cover_letters_enabled),
+            json.dumps(locations, ensure_ascii=False),
+            int(include_remote),
             account_id,
             workspace_id,
         ),
     )
     conn.commit()
+    if locations != current_locations or include_remote != current_remote:
+        # Import différé - l'onboarding utilise aussi les préférences de profil.
+        from jobwatch.onboarding import sync_profile_searches
+
+        sync_profile_searches(conn)
+        run_matching(conn)
     if (
         seniority_min != current_preferences.seniority_min
         or seniority_max != current_preferences.seniority_max

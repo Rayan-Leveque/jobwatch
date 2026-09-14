@@ -373,6 +373,7 @@ def make_handler(
                     excluded_count = profile_excluded_count(conn, session.account_id)
                     cv_documents = list_library(conn, "cv")
                     career_intents = profile_intents(conn, session.account_id)
+                    locations, include_remote = profile_geography(conn, session.account_id)
                 self._send_bytes(
                     200,
                     render_profile(
@@ -385,6 +386,8 @@ def make_handler(
                         excluded_count=excluded_count,
                         cv_documents=cv_documents,
                         career_intents=career_intents,
+                        locations=locations,
+                        include_remote=include_remote,
                         draft_enabled=draft_config is not None or onboarding_config is not None,
                     ).encode("utf-8"),
                     "text/html; charset=utf-8",
