@@ -427,7 +427,7 @@ def test_run_enriches_bridge_and_research_before_notifying(
         assert set(fetched) == {"/bridge", "/research"}
         assert len(summarized) == 2
         assert all("Développer des applications IA" in text for text in summarized)
-        expected = ("ok", "metadata", "limited_retryable", None) if summary_fails else (
+        expected = ("ok", "metadata", "limited_pending", None) if summary_fails else (
             "ok", "auto", "ready", None
         )
         assert len(notifications) == 1

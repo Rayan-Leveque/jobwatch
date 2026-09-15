@@ -162,7 +162,10 @@ def _summary_fields_html(fields: list[tuple[str, str]]) -> str:
 
 def _summary_provenance_html(summary: Summary) -> str:
     if summary.source == "metadata":
-        label = "Résumé limité - basé uniquement sur les métadonnées enregistrées"
+        if summary.status == "limited_pending":
+            label = "Résumé en attente - l'annonce complète reste disponible"
+        else:
+            label = "Résumé limité - basé uniquement sur les métadonnées enregistrées"
         return f'<p class="summary-provenance limited">{label}</p>'
     if summary.source == "auto":
         return '<p class="summary-provenance grounded">Résumé basé sur le texte de l’annonce</p>'

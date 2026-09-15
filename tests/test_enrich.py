@@ -711,6 +711,36 @@ def test_enrich_summarizes_with_openrouter(conn: sqlite3.Connection, monkeypatch
     assert tuple(field) == ("3 ans", "Ingénieur IA Paris")
 
 
+def test_openrouter_429_stops_the_rest_of_the_batch(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    for index in range(3):
+        _seed_offer(conn, url=f"https://example.com/rate-{index}")
+    calls = 0
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("jobwatch.enrich.httpx.post", fake_post)
+    config = EnrichConfig(
+        model="deepseek/deepseek-v4.1-flash", runner="openrouter",
+        api_key="sk-or-test", concurrency=1,
+    )
+    result = enrich(
+        conn,
+        config,
+        client=_http_client(lambda request: httpx.Response(200, text=LONG_HTML)),
+        sleep=_no_sleep,
+    )
+
+    assert calls == 1
+    assert result.summaries_failed == 1
+    assert result.summaries_deferred == 2
+    assert conn.execute("SELECT count(*) FROM offer_summary").fetchone()[0] == 1
+
+
 def test_enrich_retries_transient_pi_summary_failure_without_refetch(
     conn: sqlite3.Connection, monkeypatch
 ) -> None:
@@ -734,11 +764,16 @@ def test_enrich_retries_transient_pi_summary_failure_without_refetch(
     client = _http_client(handler)
     first = enrich(conn, _pi_config(), client=client, sleep=_no_sleep)
     limited = conn.execute(
-        "SELECT source, status, attempt_count FROM offer_summary WHERE offer_id = ?",
+        "SELECT id, source, status, attempt_count FROM offer_summary WHERE offer_id = ?",
         (offer_id,),
     ).fetchone()
     assert first.fetched_ok == 1
-    assert tuple(limited) == ("metadata", "limited_retryable", 1)
+    assert tuple(limited)[1:] == ("metadata", "limited_pending", 1)
+    first_bullet = conn.execute(
+        "SELECT text FROM summary_bullet WHERE summary_id = ? AND position = 0",
+        (limited["id"],),
+    ).fetchone()
+    assert "annonce complète reste disponible" in first_bullet["text"]
 
     conn.execute(
         "UPDATE offer_summary SET attempted_at = datetime('now', '-2 hours') "

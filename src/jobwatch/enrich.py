@@ -34,6 +34,7 @@ from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from dataclasses import field as dataclasses_field
+from threading import Event
 from urllib.parse import urlsplit
 
 import httpx
@@ -137,6 +138,14 @@ class EnrichError(Exception):
     """Échec attendu (config manquante). La CLI affiche un message clair et sort."""
 
 
+class LLMRateLimited(LLMRunnerError):
+    """OpenRouter refuse temporairement les appels du lot."""
+
+
+_RATE_LIMITED = object()
+_RATE_LIMIT_DEFERRED = object()
+
+
 @dataclass
 class EnrichResult:
     """Bilan déterministe d'un `jw enrich`."""
@@ -145,6 +154,7 @@ class EnrichResult:
     fetched_failed: int = 0
     summaries_written: int = 0
     summaries_failed: int = 0
+    summaries_deferred: int = 0
     limited_written: int = 0
     fields_written: int = 0
     #: Nombre d'offres par méthode d'extraction retenue ('jsonld'/'readable'/'raw').
@@ -175,6 +185,8 @@ class EnrichResult:
             )
         if self.summaries_failed:
             parts.append(f"{self.summaries_failed} échec(s) de génération")
+        if self.summaries_deferred:
+            parts.append(f"{self.summaries_deferred} résumé(s) différé(s) après limitation")
         if self.extract_methods:
             methods = ", ".join(
                 f"{name}:{count}" for name, count in sorted(self.extract_methods.items())
@@ -463,6 +475,8 @@ def _openrouter_summary(config: EnrichConfig, prompt: str, markdown: str) -> str
             },
             timeout=CODEX_TIMEOUT_SECONDS,
         )
+        if response.status_code == 429:
+            raise LLMRateLimited("appel openrouter limité par HTTP 429")
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
@@ -499,6 +513,8 @@ def _summarize(config: EnrichConfig, markdown: str) -> SummaryParts | None:
                 timeout=120, variant=config.variant, pass_variant=True,
                 attachment_name="offer.md",
             ))
+    except LLMRateLimited:
+        raise
     except LLMRunnerError as exc:
         log.warning("enrich: %s", exc)
         return None
@@ -506,6 +522,19 @@ def _summarize(config: EnrichConfig, markdown: str) -> SummaryParts | None:
     if not fields and not bullets:
         return None
     return fields, _verified_quotes(quotes, markdown), bullets
+
+
+def _summarize_with_circuit(
+    config: EnrichConfig, markdown: str, rate_limited: Event,
+) -> SummaryParts | None | object:
+    if rate_limited.is_set():
+        return _RATE_LIMIT_DEFERRED
+    try:
+        return _summarize(config, markdown)
+    except LLMRateLimited as exc:
+        rate_limited.set()
+        log.warning("enrich: %s, reste du lot différé", exc)
+        return _RATE_LIMITED
 
 
 def _parse_summary(text: str) -> tuple[dict[str, str], dict[str, str], list[str]]:
@@ -636,7 +665,9 @@ def _write_summary(
     return summary_written, fields_written
 
 
-def _metadata_summary_bullets(conn: sqlite3.Connection, offer_id: int) -> list[str]:
+def _metadata_summary_bullets(
+    conn: sqlite3.Connection, offer_id: int, *, has_content: bool
+) -> list[str]:
     """Résumé déterministe limité aux métadonnées fiables déjà stockées."""
     row = conn.execute(
         "SELECT o.title AS title, c.name AS company, o.location AS location, "
@@ -653,8 +684,12 @@ def _metadata_summary_bullets(conn: sqlite3.Connection, offer_id: int) -> list[s
     ).fetchone()
     if row is None:
         return ["Informations limitées : métadonnées de l'offre indisponibles."]
+    if has_content:
+        first = "Résumé en attente de génération ; l'annonce complète reste disponible."
+    else:
+        first = "Résumé limité aux métadonnées enregistrées ; le texte de l'annonce n'est pas disponible."
     bullets = [
-        "Résumé limité aux métadonnées enregistrées ; le texte de l'annonce n'est pas disponible.",
+        first,
         f"Poste enregistré : {row['title']} chez {row['company'] or 'société inconnue'}.",
     ]
     if row["location"]:
@@ -694,9 +729,15 @@ def _write_metadata_summary(
     row = conn.execute(
         "SELECT id, source FROM offer_summary WHERE offer_id = ?", (offer_id,)
     ).fetchone()
-    status = "limited_retryable" if retryable else "limited_no_content"
     if row is not None and row["source"] != "metadata":
         return False
+    has_content = conn.execute(
+        "SELECT 1 FROM offer_content WHERE offer_id = ? AND status = 'ok'", (offer_id,)
+    ).fetchone() is not None
+    status = (
+        "limited_pending" if has_content
+        else ("limited_retryable" if retryable else "limited_no_content")
+    )
     if row is None:
         cur = conn.execute(
             "INSERT INTO offer_summary "
@@ -720,7 +761,9 @@ def _write_metadata_summary(
         "INSERT INTO summary_bullet (summary_id, position, text) VALUES (?, ?, ?)",
         (
             (summary_id, position, bullet)
-            for position, bullet in enumerate(_metadata_summary_bullets(conn, offer_id))
+            for position, bullet in enumerate(
+                _metadata_summary_bullets(conn, offer_id, has_content=has_content)
+            )
         ),
     )
     conn.commit()
@@ -759,6 +802,7 @@ def enrich(
     # pool, chaque résumé étant soumis dès que son texte est disponible. Toutes
     # les écritures SQLite restent dans ce thread.
     pool = ThreadPoolExecutor(max_workers=config.concurrency)
+    rate_limited = Event()
     futures: dict[Future, int] = {}
     # Champs déjà publiés par la page en JSON-LD : ils complètent ce que le LLM
     # n'a pas trouvé, sans coûter un seul token.
@@ -823,7 +867,9 @@ def enrich(
                 contracts, locations = _backfill_meta(conn, offer_id, markdown)
                 result.contracts_backfilled += contracts
                 result.locations_backfilled += locations
-                futures[pool.submit(_summarize, config, markdown)] = offer_id
+                futures[
+                    pool.submit(_summarize_with_circuit, config, markdown, rate_limited)
+                ] = offer_id
                 # Le sommeil ne s'applique qu'entre deux fetchs réels : résumer
                 # un texte déjà en base ne martèle personne.
                 if fetch_remaining > 0:
@@ -837,7 +883,9 @@ def enrich(
                     contracts, locations = _backfill_meta(conn, offer_id, markdown)
                     result.contracts_backfilled += contracts
                     result.locations_backfilled += locations
-                    futures[pool.submit(_summarize, config, markdown)] = offer_id
+                    futures[
+                        pool.submit(_summarize_with_circuit, config, markdown, rate_limited)
+                    ] = offer_id
             elif content_status != "ok" and not offer["fetch_due"]:
                 attempts = int(offer["fetch_attempts"] or 0)
                 terminal = offer["failure_reason"] in TERMINAL_FAILURES
@@ -854,7 +902,10 @@ def enrich(
             except Exception:  # un résumé qui plante ne doit pas emporter le run
                 log.exception("enrich: summary worker failed for offer %d", offer_id)
                 summarized = None
-            if summarized is None:
+            if summarized is _RATE_LIMIT_DEFERRED:
+                result.summaries_deferred += 1
+                continue
+            if summarized is None or summarized is _RATE_LIMITED:
                 result.summaries_failed += 1
                 if _write_metadata_summary(
                     conn, offer_id, retryable=True, summary_attempted=True
