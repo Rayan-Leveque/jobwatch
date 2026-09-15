@@ -151,6 +151,7 @@ def _sr_item(
     company_name: str | None = None,
     city: str = "Paris",
     country: str = "fr",
+    region: str = "IDF",
     experience: str = "professional",
     employment: str = "Full-Time",
 ) -> dict:
@@ -158,7 +159,7 @@ def _sr_item(
         "name": name,
         "id": posting_id,
         "company": {"name": company_name, "identifier": company},
-        "location": {"city": city, "country": country},
+        "location": {"city": city, "country": country, "region": region},
         "experienceLevel": {"id": experience},
         "typeOfEmployment": {"label": employment},
         "releasedDate": "2026-01-02",
@@ -212,6 +213,7 @@ def test_smartrecruiters_filters_configured_countries() -> None:
     items = [
         _sr_item(posting_id="fr", country="FR"),
         _sr_item(posting_id="in", city="Mumbai", country="in"),
+        _sr_item(posting_id="lyon", city="Lyon", region="Auvergne-Rhône-Alpes"),
         _sr_item(posting_id="missing", country=None),
     ]
 
@@ -219,7 +221,7 @@ def test_smartrecruiters_filters_configured_countries() -> None:
         return httpx.Response(200, json={"content": items})
 
     collector = SmartRecruitersCollector(
-        companies=["Acme"], countries=["fr"], client=_client(handler)
+        companies=["Acme"], countries=["fr"], regions=["IDF"], client=_client(handler)
     )
     assert [offer.url.rsplit("/", 1)[-1] for offer in collector.fetch()] == ["fr"]
 
@@ -469,11 +471,13 @@ def test_config_parses_smartrecruiters_countries(tmp_path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
         f"db: {tmp_path / 'db.sqlite'}\nsearches:\n  - name: ai\n    include: [AI]\n"
-        "sources:\n  smartrecruiters:\n    companies: [Sia]\n    countries: [FR]\n"
+        "sources:\n  smartrecruiters:\n    companies: [Sia]\n"
+        "    countries: [FR]\n    regions: [IDF]\n"
     )
     source = load_config(path).sources.smartrecruiters
     assert source is not None
     assert source.countries == ["fr"]
+    assert source.regions == ["idf"]
 
 
 @pytest.mark.parametrize(

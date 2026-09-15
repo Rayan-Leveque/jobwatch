@@ -30,9 +30,11 @@ class SmartRecruitersCollector:
         client: httpx.Client | None = None,
         interval_days: int = 1,
         countries: list[str] | None = None,
+        regions: list[str] | None = None,
     ) -> None:
         self.companies = companies
         self.countries = {country.casefold() for country in countries or []}
+        self.regions = {region.casefold() for region in regions or []}
         self._client = client
         self.interval_days = interval_days
         self.failed_requests = 0
@@ -93,6 +95,8 @@ class SmartRecruitersCollector:
             for item in self._postings_for(slug):
                 if self.countries and _country(item) not in self.countries:
                     continue
+                if self.regions and _region(item) not in self.regions:
+                    continue
                 offer = _offer_from_json(slug, item)
                 if offer is not None:
                     offers.append(offer)
@@ -149,6 +153,14 @@ def _country(item: dict) -> str | None:
         return None
     country = location.get("country")
     return country.casefold() if isinstance(country, str) else None
+
+
+def _region(item: dict) -> str | None:
+    location = item.get("location")
+    if not isinstance(location, dict):
+        return None
+    region = location.get("region")
+    return region.casefold() if isinstance(region, str) else None
 
 
 def _contract(item: dict) -> str | None:

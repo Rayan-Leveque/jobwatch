@@ -70,6 +70,7 @@ class FranceTravailSource:
 class SmartRecruitersSource:
     companies: list[str]
     countries: list[str] = field(default_factory=list)
+    regions: list[str] = field(default_factory=list)
     interval_days: int = 1
     company_intervals: dict[str, int] = field(default_factory=dict)
 
@@ -341,9 +342,10 @@ def _smartrecruiters_from_dict(raw: object) -> SmartRecruitersSource:
     countries = _string_list(raw.get("countries", []), "sources.smartrecruiters.countries")
     if any(not re.fullmatch(r"[A-Za-z]{2}", country) for country in countries):
         raise ConfigError("sources.smartrecruiters.countries doit contenir des codes ISO à 2 lettres")
+    regions = _string_list(raw.get("regions", []), "sources.smartrecruiters.regions")
     return SmartRecruitersSource(
         companies=list(companies), countries=[country.casefold() for country in countries],
-        company_intervals=intervals,
+        regions=[region.casefold() for region in regions], company_intervals=intervals,
         interval_days=_interval_days(raw.get("interval_days", 1), "sources.smartrecruiters.interval_days"),
     )
 
