@@ -529,6 +529,8 @@ h1 span { color:var(--muted-2); font-weight:620 }
 .apply-input::placeholder { color:var(--muted-2); opacity:1 }
 .apply-input:focus-visible { outline:3px solid var(--violet); outline-offset:2px }
 .apply-submit { justify-self:start }
+.apply-status { min-height:18px; margin:0; color:var(--muted); font-size:.78rem }
+.apply-status.is-error { color:var(--danger) }
 .doc-field { display:grid; grid-template-columns:minmax(0, 1fr); gap:6px; min-width:0;
   padding:8px; border:1px dashed var(--line-strong);
   border-radius:11px; transition:border-color .15s ease, background .15s ease }
@@ -990,22 +992,40 @@ _JS = """\
     });
   });
   [...document.querySelectorAll('.apply-form')].forEach(form => {
-    form.addEventListener('submit', event => {
+    form.addEventListener('submit', async event => {
       event.preventDefault();
       const row = form.closest('.row');
       const matchId = form.dataset.matchId;
+      const submit = form.querySelector('.apply-submit');
+      const status = form.querySelector('.apply-status');
       const toId = value => value ? Number(value) : null;
-      fetch(`/match/${matchId}/apply`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          cv_library_id: toId(form.elements.cv_library_id?.value),
-          cover_letter_library_id: toId(form.elements.cover_letter_library_id?.value),
-        }),
-      }).then(resp => {
-        if (!resp.ok) return;
+      submit.disabled = true;
+      status.textContent = 'Enregistrement…';
+      status.classList.remove('is-error');
+      let errorMessage = 'Connexion interrompue. Réessayez.';
+      try {
+        const resp = await fetch(`/match/${matchId}/apply`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            cv_library_id: toId(form.elements.cv_library_id?.value),
+            cover_letter_library_id: toId(form.elements.cover_letter_library_id?.value),
+          }),
+        });
+        const payload = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          errorMessage = payload.error || (resp.status === 401 || resp.status === 403
+            ? 'Session expirée. Rechargez la page et reconnectez-vous.'
+            : 'Candidature non enregistrée. Réessayez.');
+          throw new Error(errorMessage);
+        }
         removeRow(row, () => showToast(row, 'Candidature enregistrée.'));
-      });
+      } catch (_) {
+        status.textContent = errorMessage;
+        status.classList.add('is-error');
+      } finally {
+        submit.disabled = false;
+      }
     });
   });
 

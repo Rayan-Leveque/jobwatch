@@ -479,6 +479,7 @@ def _card_actions(
         f'{_document_field(match_id, "cv", "cv_library_id", "CV", library["cv"])}'
         f"{cover_letter_field}"
         '<button class="card-action apply-submit" type="submit">Enregistrer la candidature</button>'
+        '<p class="apply-status" aria-live="polite"></p>'
         "</form>"
     )
 

@@ -971,6 +971,39 @@ def test_triage_and_undo_persist_without_waiting_for_transitions(
     page.close()
 
 
+def test_apply_without_documents_reports_network_failure_then_retries(browser, dashboard) -> None:
+    url, db_path = dashboard
+    page = _open_page(browser, url)
+    page.locator('[data-section="later"] > summary').click()
+    card = _card(page, "LaterCo")
+    card.locator(".action-apply").click()
+    form = card.locator(".apply-form")
+    form.wait_for(state="visible", timeout=5000)
+    assert form.locator('[name="cv_library_id"]').input_value() == ""
+    assert form.locator('[name="cover_letter_library_id"]').input_value() == ""
+
+    page.route("**/match/*/apply", lambda route: route.abort())
+    form.locator(".apply-submit").click()
+    expect(form.locator(".apply-status")).to_have_text("Connexion interrompue. Réessayez.")
+    expect(form.locator(".apply-submit")).to_be_enabled()
+
+    page.unroute("**/match/*/apply")
+    form.locator(".apply-submit").click()
+    page.locator(".undo-toast").wait_for(state="visible", timeout=5000)
+
+    conn = connect(db_path)
+    application = conn.execute(
+        "SELECT a.id FROM application a JOIN offer o ON o.id = a.offer_id "
+        "JOIN company c ON c.id = o.company_id WHERE c.name = 'LaterCo'"
+    ).fetchone()
+    assert application is not None
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM document WHERE application_id = ?", (application["id"],)
+    ).fetchone()["n"] == 0
+    conn.close()
+    page.close()
+
+
 def test_apply_form_submits_and_removes_card_without_reload(browser, dashboard, tmp_path: Path) -> None:
     url, db_path = dashboard
     cv_src = tmp_path / "moncv.pdf"
