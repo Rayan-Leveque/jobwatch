@@ -47,7 +47,7 @@ def build_collectors(sources: SourcesConfig, client: httpx.Client | None = None)
         sr: SmartRecruitersSource = sources.smartrecruiters
         for slug in sr.companies:
             collector = SmartRecruitersCollector(
-                companies=[slug], client=client,
+                companies=[slug], client=client, countries=sr.countries,
                 interval_days=sr.company_intervals.get(slug, sr.interval_days),
             )
             collector.name = f"smartrecruiters:{slug.casefold()}"

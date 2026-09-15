@@ -19,7 +19,8 @@ searches:
 #     keywords: "ingénieur IA"           # requête côté serveur
 #     department: "75"
 #   smartrecruiters:
-#     companies: [Wavestone1, Devoteam]
+#     companies: [Devoteam]
+#     countries: [FR]                  # filtre les catalogues mondiaux côté client
 #   talentsoft:                        # portails carrières Talentsoft (flux RSS public, 20 dernières offres)
 #     interval_days: 1                 # 1 ou 4 ; 20 offres seulement par flux, donc collecte quotidienne conseillée
 #     sites:

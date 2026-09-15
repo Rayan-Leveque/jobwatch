@@ -150,6 +150,7 @@ def _sr_item(
     company: str = "Acme",
     company_name: str | None = None,
     city: str = "Paris",
+    country: str = "fr",
     experience: str = "professional",
     employment: str = "Full-Time",
 ) -> dict:
@@ -157,7 +158,7 @@ def _sr_item(
         "name": name,
         "id": posting_id,
         "company": {"name": company_name, "identifier": company},
-        "location": {"city": city},
+        "location": {"city": city, "country": country},
         "experienceLevel": {"id": experience},
         "typeOfEmployment": {"label": employment},
         "releasedDate": "2026-01-02",
@@ -205,6 +206,22 @@ def test_smartrecruiters_skips_internships() -> None:
     offers = _sr_collector(handler).fetch()
     assert len(offers) == 1
     assert offers[0].url.endswith("/2")
+
+
+def test_smartrecruiters_filters_configured_countries() -> None:
+    items = [
+        _sr_item(posting_id="fr", country="FR"),
+        _sr_item(posting_id="in", city="Mumbai", country="in"),
+        _sr_item(posting_id="missing", country=None),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"content": items})
+
+    collector = SmartRecruitersCollector(
+        companies=["Acme"], countries=["fr"], client=_client(handler)
+    )
+    assert [offer.url.rsplit("/", 1)[-1] for offer in collector.fetch()] == ["fr"]
 
 
 def test_smartrecruiters_fetches_all_companies() -> None:
@@ -306,6 +323,19 @@ def test_linkedin_fetch_maps_guest_cards_and_query_params() -> None:
     assert offers[0].location == "Paris"
     assert offers[0].published_at == "2026-08-09"
     assert offers[0].url == "https://www.linkedin.com/jobs/view/12345"
+
+
+def test_linkedin_rejects_results_outside_queried_city() -> None:
+    page = LINKEDIN_HTML.replace(" Paris ", " Utrecht, Netherlands ")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=page)
+
+    collector = LinkedInCollector(
+        queries=[LinkedInQuery(keywords="AI Engineer", location="Amsterdam, Netherlands")],
+        client=_client(handler),
+    )
+    assert collector.fetch() == []
 
 
 def test_linkedin_continues_after_failed_query() -> None:
@@ -426,12 +456,24 @@ sources:
     assert sources.linkedin is not None
     assert sources.linkedin.hours == 72
     assert sources.linkedin.queries == [LinkedInQuery("LLM engineer", "Paris")]
+    assert sources.smartrecruiters is None
     assert sources.wttj is not None
     assert sources.wttj.cities == {"DE": ["berlin"]}
     assert [collector.name for collector in build_collectors(sources, _client(lambda r: None))] == [
         "linkedin",
         "wttj",
     ]
+
+
+def test_config_parses_smartrecruiters_countries(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"db: {tmp_path / 'db.sqlite'}\nsearches:\n  - name: ai\n    include: [AI]\n"
+        "sources:\n  smartrecruiters:\n    companies: [Sia]\n    countries: [FR]\n"
+    )
+    source = load_config(path).sources.smartrecruiters
+    assert source is not None
+    assert source.countries == ["fr"]
 
 
 @pytest.mark.parametrize(

@@ -42,6 +42,11 @@ def _clean(fragment: str) -> str:
     return html.unescape(re.sub(r"\s+", " ", _TAG_RE.sub("", fragment))).strip()
 
 
+def _location_matches_query(location: str, query_location: str) -> bool:
+    target = query_location.split(",", 1)[0].strip().casefold()
+    return target in location.casefold()
+
+
 def _offers_from_html(page: str, fallback_location: str) -> list[RawOffer]:
     offers: list[RawOffer] = []
     for card_match in _CARD_RE.finditer(page):
@@ -120,7 +125,10 @@ class LinkedInCollector:
                 self.failed_requests += 1
                 log.warning("linkedin request returned status %s", response.status_code)
                 continue
-            fetched = _offers_from_html(response.text, query.location)
+            fetched = [
+                offer for offer in _offers_from_html(response.text, query.location)
+                if _location_matches_query(offer.location or query.location, query.location)
+            ]
             if query.remote:
                 for offer in fetched:
                     offer.location = f"{offer.location or query.location} · Télétravail complet"
