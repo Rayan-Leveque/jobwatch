@@ -37,6 +37,7 @@ from jobwatch.research import apply_research_fits, research_offers, unfitted_rec
 from jobwatch.serve import ServeError, serve_http
 from jobwatch.submit import (
     MAILCODE_CONFIG_ENV,
+    OfferExpired,
     SubmitError,
     agent_args,
     apply_agent_result,
@@ -683,6 +684,8 @@ def submission_finish(config_path: Path | None, job_id: int) -> None:
             dossier = load_dossier(config.db, job_id)
             if report.get("timeout"):
                 raise subprocess.TimeoutExpired("claude", config.autoapply.timeout_seconds)
+            if report.get("expired"):
+                raise OfferExpired(f"offre expirée (HTTP {int(report['expired'])})")
             if report.get("error"):
                 raise SubmitError(f"poste d'envoi : {report['error']}"[:1000])
             if report.get("proof_b64"):
