@@ -1,7 +1,7 @@
 #!/bin/bash
-# Installe le poste d'envoi jobwatch sur un Mac : vérifie les outils, enregistre
-# le jeton de l'extension Playwright et l'accès SSH au serveur, puis installe une
-# tâche launchd lancée toutes les 2 minutes. Relançable sans risque.
+# Installe le poste d'envoi jobwatch sur un Mac : vérifie les outils et l'accès
+# SSH au serveur, installe une tâche launchd lancée toutes les 2 minutes, puis
+# ouvre une fois le Chrome dédié pour s'y connecter. Relançable sans risque.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -18,12 +18,6 @@ if ! command -v playwright-cli >/dev/null 2>&1; then
   npm install -g @playwright/cli@0.1.22
 fi
 
-echo
-echo "1. Dans ton Chrome habituel, installe l'extension « Playwright MCP Bridge »"
-echo "   (Chrome Web Store), ouvre-la et copie le jeton qu'elle affiche."
-read -rsp "Jeton de l'extension (masqué) : " TOKEN; echo
-[ -n "$TOKEN" ] || { echo "jeton vide"; exit 1; }
-
 DEFAULT_SSH="ssh -p 2222 rayan@100.116.111.35"
 read -rp "Accès SSH au VPS [$DEFAULT_SSH] : " SSH_CMD
 SSH_CMD="${SSH_CMD:-$DEFAULT_SSH}"
@@ -37,16 +31,22 @@ cp "$HERE/jobwatch-worker.mjs" "$APP/jobwatch-worker.mjs"
 umask 077
 cat >"$CONF/env" <<EOF
 export JOBWATCH_SSH='$SSH_CMD'
-export PLAYWRIGHT_MCP_EXTENSION_TOKEN='$TOKEN'
 export CLAUDE_BIN='$(command -v claude)'
 export PLAYWRIGHT_CLI='$(command -v playwright-cli)'
 export PATH='$(dirname "$(command -v node)"):$(dirname "$(command -v claude)"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 EOF
 umask 022
+# Le lanceur récupère la dernière version du worker sur le serveur : plus besoin
+# de réinstaller après une mise à jour. Sans réseau, il garde la version locale.
 cat >"$APP/run.sh" <<EOF
 #!/bin/bash
 . "$CONF/env"
-exec "$(command -v node)" "$APP/jobwatch-worker.mjs"
+\$JOBWATCH_SSH -o BatchMode=yes -o ConnectTimeout=8 \\
+  "cat /home/rayan/jobwatch-prod/ops/mac-worker/jobwatch-worker.mjs" >"$APP/.worker.new" 2>/dev/null \\
+  && node --check "$APP/.worker.new" 2>/dev/null \\
+  && mv "$APP/.worker.new" "$APP/jobwatch-worker.mjs"
+rm -f "$APP/.worker.new"
+exec "$(command -v node)" "$APP/jobwatch-worker.mjs" "\$@"
 EOF
 chmod 700 "$APP/run.sh"
 
@@ -67,6 +67,11 @@ EOF
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 
+echo
+echo "Ouverture du Chrome dédié : connecte-toi à LinkedIn (via Google si besoin) et WTTJ,"
+echo "puis ferme la fenêtre. À refaire seulement si une session expire :"
+echo "  \"$APP/run.sh\" login"
+"$APP/run.sh" login
 echo
 echo "Poste d'envoi installé. Journal : tail -f ~/Library/Logs/jobwatch-worker.log"
 echo "Désinstaller : launchctl bootout gui/\$(id -u)/$LABEL && rm \"$PLIST\""
