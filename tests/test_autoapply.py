@@ -309,7 +309,7 @@ def test_server_restart_hands_interrupted_submission_back(instance) -> None:
     conn = connect(db_path)
     conn.execute("UPDATE submission_job SET status = 'running' WHERE match_id = ?", (match_id,))
     conn.commit()
-    serve._interrupt_submission_jobs(db_path)
+    serve._interrupt_submission_jobs(db_path, None)
     job = conn.execute("SELECT * FROM submission_job WHERE match_id = ?", (match_id,)).fetchone()
     conn.close()
     assert job["status"] == "needs_human"

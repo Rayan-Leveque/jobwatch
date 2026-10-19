@@ -25,6 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from jobwatch.applications import ApplicationError, record_application
@@ -68,8 +69,8 @@ navigateur est déjà ouvert sur l'offre : pilote-le avec `playwright-cli`
 (session déjà sélectionnée ; commandes utiles : snapshot, click, fill, select,
 check, upload, press, goto, tab-list, tab-select, screenshot). Chaque snapshot
 est écrit dans un fichier .yml du dossier courant : lis-le pour obtenir les
-références d'éléments. N'ouvre jamais un autre navigateur et ne ferme pas
-celui-ci.
+références d'éléments. N'ouvre jamais un autre navigateur, ne le ferme pas
+et ne touche pas aux onglets ouverts avant toi.
 
 Objectif : envoyer cette candidature, sur n'importe quel site. Depuis LinkedIn,
 Welcome to the Jungle, un agrégateur ou un site public, suis le bouton
@@ -164,17 +165,18 @@ def _browser(config: AutoApplyConfig, env: dict[str, str], cwd: Path, *args: str
         raise SubmitError(f"navigateur : {args[0]} a échoué ({completed.stderr.strip()[:300]})")
 
 
-def _claude_command(config: AutoApplyConfig, prompt: str) -> list[str]:
-    allowed = [f"Bash({config.browser_bin} *)", "Bash(jw mail-code*)", "Read(./**)"]
-    denied = [f"Bash({config.browser_bin} {name}*)" for name in _DENIED_BROWSER]
+def agent_args(browser_bin: str, prompt: str, model: str | None) -> list[str]:
+    """Arguments de `claude` (sans le binaire), communs au VPS et au poste d'envoi."""
+    allowed = [f"Bash({browser_bin} *)", "Bash(jw mail-code*)", "Read(./**)"]
+    denied = [f"Bash({browser_bin} {name}*)" for name in _DENIED_BROWSER]
     # Upload restreint au dossier de travail : ni chemin absolu, ni remontée.
     denied += [
-        f"Bash({config.browser_bin} upload /*)",
-        f"Bash({config.browser_bin} upload ~*)",
-        f"Bash({config.browser_bin} upload *..*)",
+        f"Bash({browser_bin} upload /*)",
+        f"Bash({browser_bin} upload ~*)",
+        f"Bash({browser_bin} upload *..*)",
     ]
-    command = [
-        config.claude_bin, "-p", prompt,
+    args = [
+        "-p", prompt,
         "--tools", "Bash,Read",
         "--allowedTools", *allowed,
         "--disallowedTools", *denied,
@@ -185,9 +187,9 @@ def _claude_command(config: AutoApplyConfig, prompt: str) -> list[str]:
         "--output-format", "json",
         "--json-schema", json.dumps(OUTPUT_SCHEMA),
     ]
-    if config.model:
-        command += ["--model", config.model]
-    return command
+    if model:
+        args += ["--model", model]
+    return args
 
 
 def _parse_agent_output(stdout: str) -> dict:
@@ -260,41 +262,58 @@ def _finish(conn: sqlite3.Connection, job_id: int, **fields: object) -> None:
     conn.commit()
 
 
-def run_submission(db_path: Path, config: AutoApplyConfig, job_id: int) -> None:
-    """Exécute un job de bout en bout ; ne lève jamais (le résultat est en base)."""
-    try:
-        conn = connect(db_path)
-    except sqlite3.Error:
-        log.exception("submit: connexion SQLite impossible pour le job %d", job_id)
-        return
-    try:
-        with _browser_slot:
-            try:
-                _run_inner(conn, db_path, config, job_id)
-            except (SubmitError, DraftError) as exc:
-                _finish(conn, job_id, status="failed", reason=str(exc))
-            except subprocess.TimeoutExpired:
-                _finish(conn, job_id, status="needs_human",
-                        reason="l'agent a dépassé le temps imparti, vérifiez le site")
-            except Exception as exc:  # un bug ne doit jamais laisser un job bloqué en 'running'
-                log.exception("submit: échec inattendu du job %d", job_id)
-                _finish(conn, job_id, status="failed", reason=f"erreur interne : {exc}")
-    finally:
-        conn.close()
+@dataclass
+class Dossier:
+    """Dossier de travail d'un envoi : fichiers joints, prompt et URL de départ."""
+
+    job_id: int
+    match_id: int
+    url: str
+    work_dir: Path
+    cv_name: str
+    letter_name: str
+    prompt: str
 
 
-def _run_inner(
-    conn: sqlite3.Connection, db_path: Path, config: AutoApplyConfig, job_id: int
-) -> None:
-    conn.execute(
+_PENDING_PASSWORD = ".mot_de_passe_nouveau_compte"
+_DOSSIER_META = ".dossier.json"
+
+
+def claim_submission(conn: sqlite3.Connection, job_id: int | None = None) -> int | None:
+    """Passe un job 'queued' à 'running' (le plus ancien si `job_id` est absent)."""
+    if job_id is None:
+        row = conn.execute(
+            "SELECT id FROM submission_job WHERE status = 'queued' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        job_id = int(row["id"])
+    cur = conn.execute(
         "UPDATE submission_job SET status = 'running', started_at = datetime('now') "
         "WHERE id = ? AND status = 'queued'",
         (job_id,),
     )
     conn.commit()
+    return job_id if cur.rowcount == 1 else None
+
+
+def expire_stale_submissions(conn: sqlite3.Connection, timeout_seconds: int) -> int:
+    """Rend la main sur les envois dont le poste d'envoi ne donne plus signe de vie."""
+    cur = conn.execute(
+        "UPDATE submission_job SET status = 'needs_human', finished_at = datetime('now'), "
+        "reason = 'le poste d''envoi ne répond plus, vérifiez le site avant de relancer' "
+        "WHERE status = 'running' AND started_at < datetime('now', ?)",
+        (f"-{2 * timeout_seconds} seconds",),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def build_dossier(conn: sqlite3.Connection, db_path: Path, job_id: int) -> Dossier:
+    """Copie CV et lettre dans le dossier de travail et écrit le contexte de l'agent."""
     job = conn.execute("SELECT * FROM submission_job WHERE id = ?", (job_id,)).fetchone()
-    if job is None or job["status"] != "running":
-        return
+    if job is None:
+        raise SubmitError(f"job {job_id} introuvable")
     match = conn.execute(
         "SELECT m.id AS id, o.id AS offer_id, o.title AS title, o.url AS url, "
         "       o.location AS location, c.name AS company "
@@ -320,11 +339,12 @@ def _run_inner(
     shutil.copyfile(cv["file_path"], work_dir / cv_name)
     shutil.copyfile(letter["pdf_path"], work_dir / letter_name)
 
-    context = _context(conn, job, match)
     accounts = _load_accounts(db_path)
     new_password = secrets.token_urlsafe(12) + "!7a"
+    (work_dir / _PENDING_PASSWORD).write_text(new_password, encoding="utf-8")
+    protect_private_file(work_dir / _PENDING_PASSWORD)
     attachment = (
-        context
+        _context(conn, job, match)
         + "\n\n# COMPTES\n\n"
         + (json.dumps(accounts, ensure_ascii=False) if accounts else "(aucun)")
         + f"\n\n# MOT_DE_PASSE_NOUVEAU_COMPTE\n\n{new_password}\n"
@@ -335,36 +355,58 @@ def _run_inner(
         cv_name=cv_name, letter_name=letter_name,
         company=company, title=match["title"], url=match["url"],
     ) + "\nLe dossier complet (CANDIDAT, CV, OFFRE, LETTRE_TEXTE, COMPTES) est dans ./dossier.md."
+    dossier = Dossier(
+        job_id=job_id, match_id=int(match["id"]), url=str(match["url"]), work_dir=work_dir,
+        cv_name=cv_name, letter_name=letter_name, prompt=prompt,
+    )
+    meta = {k: v for k, v in dossier.__dict__.items() if k != "work_dir"}
+    (work_dir / _DOSSIER_META).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    protect_private_file(work_dir / _DOSSIER_META)
+    return dossier
 
-    env = _browser_env(config)
-    config.browser_profile.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _browser(config, env, work_dir, "open", str(match["url"]),
-             "--browser=chrome", f"--profile={config.browser_profile}")
+
+def load_dossier(db_path: Path, job_id: int) -> Dossier:
+    """Relit le dossier écrit par build_dossier, sans le régénérer."""
+    work_dir = documents_dir(db_path) / "submissions" / str(job_id)
     try:
-        completed = subprocess.run(
-            _claude_command(config, prompt),
-            capture_output=True, text=True, timeout=config.timeout_seconds,
-            check=False, cwd=work_dir, env=env,
-        )
-    finally:
-        subprocess.run(
-            [config.browser_bin, "close"], capture_output=True, timeout=60,
-            check=False, cwd=work_dir, env=env,
-        )
-    log_path = work_dir / "agent.json"
-    log_path.write_text(completed.stdout + "\n" + completed.stderr, encoding="utf-8")
+        meta = json.loads((work_dir / _DOSSIER_META).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SubmitError(f"dossier de travail du job {job_id} introuvable") from exc
+    return Dossier(work_dir=work_dir, **meta)
+
+
+def dossier_files(dossier: Dossier) -> list[str]:
+    """Fichiers que le poste d'envoi doit recevoir (jamais le mot de passe en attente)."""
+    return [dossier.cv_name, dossier.letter_name, "dossier.md"]
+
+
+def apply_agent_result(
+    conn: sqlite3.Connection,
+    db_path: Path,
+    config: AutoApplyConfig,
+    dossier: Dossier,
+    *,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> None:
+    """Enregistre le verdict de l'agent ; la preuve est déjà dans le dossier de travail."""
+    log_path = dossier.work_dir / "agent.json"
+    log_path.write_text(stdout + "\n" + stderr, encoding="utf-8")
     protect_private_file(log_path)
-    if completed.returncode != 0:
-        raise SubmitError(f"agent en échec (code {completed.returncode}), voir {log_path}")
-    result = _parse_agent_output(completed.stdout)
+    if returncode != 0:
+        raise SubmitError(f"agent en échec (code {returncode}), voir {log_path}")
+    result = _parse_agent_output(stdout)
 
     domain = result.get("account_created_on")
-    if isinstance(domain, str) and domain.strip():
+    pending = dossier.work_dir / _PENDING_PASSWORD
+    if isinstance(domain, str) and domain.strip() and pending.exists():
         # Les comptes sont créés avec l'adresse dont `jw mail-code` lit la boîte.
         email = config.imap.user if config.imap is not None else (_profile_email(conn) or "")
-        _save_account(db_path, domain.strip(), email, new_password)
+        _save_account(db_path, domain.strip(), email, pending.read_text(encoding="utf-8"))
+    pending.unlink(missing_ok=True)
 
-    proof = work_dir / "preuve.png"
+    proof = dossier.work_dir / "preuve.png"
     fields = {
         "reason": str(result.get("reason") or "")[:1000],
         "final_url": str(result.get("final_url") or "")[:2000],
@@ -374,16 +416,74 @@ def _run_inner(
     if result["status"] == "submitted":
         try:
             record_application(
-                conn, int(match["id"]),
+                conn, dossier.match_id,
                 note="envoyée par l'agent jobwatch",
-                cv_path=str(work_dir / cv_name),
-                cover_letter_path=str(work_dir / letter_name),
+                cv_path=str(dossier.work_dir / dossier.cv_name),
+                cover_letter_path=str(dossier.work_dir / dossier.letter_name),
             )
         except ApplicationError as exc:
             fields["reason"] = f"{fields['reason']} ({exc})"
-        _finish(conn, int(job["id"]), status="submitted", **fields)
+        _finish(conn, dossier.job_id, status="submitted", **fields)
     else:
-        _finish(conn, int(job["id"]), status="needs_human", **fields)
+        _finish(conn, dossier.job_id, status="needs_human", **fields)
+
+
+def fail_submission(conn: sqlite3.Connection, job_id: int, exc: BaseException) -> None:
+    """Traduit une erreur d'envoi en statut final, sans jamais laisser 'running'."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        _finish(conn, job_id, status="needs_human",
+                reason="l'agent a dépassé le temps imparti, vérifiez le site")
+    elif isinstance(exc, (SubmitError, DraftError)):
+        _finish(conn, job_id, status="failed", reason=str(exc))
+    else:
+        _finish(conn, job_id, status="failed", reason=f"erreur interne : {exc}")
+
+
+def run_submission(db_path: Path, config: AutoApplyConfig, job_id: int) -> None:
+    """Exécute un job sur ce serveur ; ne lève jamais (le résultat est en base)."""
+    try:
+        conn = connect(db_path)
+    except sqlite3.Error:
+        log.exception("submit: connexion SQLite impossible pour le job %d", job_id)
+        return
+    try:
+        with _browser_slot:
+            if claim_submission(conn, job_id) is None:
+                return
+            try:
+                _run_local(conn, db_path, config, job_id)
+            except (SubmitError, DraftError, subprocess.TimeoutExpired) as exc:
+                fail_submission(conn, job_id, exc)
+            except Exception as exc:  # un bug ne doit jamais laisser un job bloqué en 'running'
+                log.exception("submit: échec inattendu du job %d", job_id)
+                fail_submission(conn, job_id, exc)
+    finally:
+        conn.close()
+
+
+def _run_local(
+    conn: sqlite3.Connection, db_path: Path, config: AutoApplyConfig, job_id: int
+) -> None:
+    dossier = build_dossier(conn, db_path, job_id)
+    env = _browser_env(config)
+    config.browser_profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _browser(config, env, dossier.work_dir, "open", dossier.url,
+             "--browser=chrome", f"--profile={config.browser_profile}")
+    try:
+        completed = subprocess.run(
+            [config.claude_bin, *agent_args(config.browser_bin, dossier.prompt, config.model)],
+            capture_output=True, text=True, timeout=config.timeout_seconds,
+            check=False, cwd=dossier.work_dir, env=env,
+        )
+    finally:
+        subprocess.run(
+            [config.browser_bin, "close"], capture_output=True, timeout=60,
+            check=False, cwd=dossier.work_dir, env=env,
+        )
+    apply_agent_result(
+        conn, db_path, config, dossier,
+        returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr,
+    )
 
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
