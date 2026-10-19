@@ -246,6 +246,32 @@ class DraftConfig:
 
 
 @dataclass
+class ImapConfig:
+    """Boîte lue par `jw mail-code` pour les codes de vérification des ATS."""
+
+    host: str
+    user: str
+    password: str
+    port: int = 993
+
+
+@dataclass
+class AutoApplyConfig:
+    """Candidature assistée : `jw prepare` choisit et prépare, l'agent soumet après validation."""
+
+    browser_profile: Path
+    daily_limit: int = 3
+    claude_bin: str = "claude"
+    model: str | None = None
+    browser_bin: str = "playwright-cli"
+    dashboard_url: str | None = None
+    timeout_seconds: int = 900
+    imap: ImapConfig | None = None
+    # Fichier d'où vient ce bloc : `jw mail-code`, lancé par l'agent, le relit.
+    config_path: Path | None = None
+
+
+@dataclass
 class Config:
     db: Path
     searches: list[SearchConfig]
@@ -254,6 +280,7 @@ class Config:
     research: ResearchConfig | None = None
     enrich: EnrichConfig | None = None
     draft: DraftConfig | None = None
+    autoapply: AutoApplyConfig | None = None
 
 
 def _string_list(value: object, field_name: str) -> list[str]:
@@ -763,6 +790,68 @@ def _draft_from_dict(raw: object) -> DraftConfig | None:
     )
 
 
+def _optional_string(raw: dict, key: str, field_name: str) -> str | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{field_name} doit être une chaîne non vide")
+    return value.strip()
+
+
+def _optional_path(raw: dict, key: str, field_name: str) -> Path | None:
+    value = _optional_string(raw, key, field_name)
+    return Path(os.path.expanduser(value)) if value is not None else None
+
+
+def _positive_int(raw: dict, key: str, default: int, field_name: str) -> int:
+    value = raw.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ConfigError(f"{field_name} doit être un entier >= 1")
+    return value
+
+
+def _imap_from_dict(raw: object) -> ImapConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'autoapply.imap' doit être un mapping")
+    values = {}
+    for key in ("host", "user", "password"):
+        value = _optional_string(raw, key, f"autoapply.imap.{key}")
+        if value is None:
+            raise ConfigError(f"autoapply.imap.{key} est requis quand imap est présent")
+        values[key] = value
+    return ImapConfig(**values, port=_positive_int(raw, "port", 993, "autoapply.imap.port"))
+
+
+def _autoapply_from_dict(
+    raw: object, draft: DraftConfig | None, config_path: Path
+) -> AutoApplyConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'autoapply' doit être un mapping")
+    if not raw:
+        return None
+    if draft is None:
+        raise ConfigError("autoapply exige le bloc 'draft' : chaque dossier contient une lettre")
+    profile = _optional_path(raw, "browser_profile", "autoapply.browser_profile")
+    if profile is None:
+        raise ConfigError("autoapply.browser_profile est requis quand autoapply est présent")
+    return AutoApplyConfig(
+        browser_profile=profile,
+        daily_limit=_positive_int(raw, "daily_limit", 3, "autoapply.daily_limit"),
+        claude_bin=_optional_string(raw, "claude_bin", "autoapply.claude_bin") or "claude",
+        model=_optional_string(raw, "model", "autoapply.model"),
+        browser_bin=_optional_string(raw, "browser_bin", "autoapply.browser_bin") or "playwright-cli",
+        dashboard_url=_optional_string(raw, "dashboard_url", "autoapply.dashboard_url"),
+        timeout_seconds=_positive_int(raw, "timeout_seconds", 900, "autoapply.timeout_seconds"),
+        imap=_imap_from_dict(raw.get("imap")),
+        config_path=config_path,
+    )
+
+
 def load_config(path: Path) -> Config:
     """Analyse et valide un fichier de config, levant ConfigError en cas de problème."""
     try:
@@ -790,6 +879,7 @@ def load_config(path: Path) -> Config:
     if not searches_raw and (sources.linkedin is None or not sources.linkedin.from_profile):
         raise ConfigError("'searches' vide nécessite sources.linkedin.from_profile")
     searches = [_search_from_dict(s) for s in searches_raw]
+    draft = _draft_from_dict(raw.get("draft"))
 
     return Config(
         db=db_path,
@@ -798,7 +888,8 @@ def load_config(path: Path) -> Config:
         notify=_notify_from_dict(raw.get("notify")),
         research=_research_from_dict(raw.get("research")),
         enrich=_enrich_from_dict(raw.get("enrich")),
-        draft=_draft_from_dict(raw.get("draft")),
+        draft=draft,
+        autoapply=_autoapply_from_dict(raw.get("autoapply"), draft, path),
     )
 
 

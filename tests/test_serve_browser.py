@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import threading
+from datetime import UTC, datetime, timedelta
 from http.server import ThreadingHTTPServer
 from itertools import pairwise
 from pathlib import Path
@@ -139,9 +140,19 @@ def onboarding_instance(tmp_path: Path):
     thread.join(timeout=5)
 
 
+def _recent(minutes: int) -> str:
+    """Horodatage SQLite d'hier, décalé de `minutes` pour garder l'ordre de collecte."""
+    moment = datetime.now(UTC) - timedelta(days=1) + timedelta(minutes=minutes)
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+
 @pytest.fixture()
 def preferences_instance(tmp_path: Path):
-    """Instance isolée avec offres explicites, offre ambiguë et brouillon existant."""
+    """Instance isolée avec offres explicites, offre ambiguë et brouillon existant.
+
+    Les dates restent dans la fenêtre de reclassification de séniorité (60 jours) :
+    des dates fixes ont fait échouer ce test une fois cette fenêtre dépassée.
+    """
     db_path = tmp_path / "jw.db"
     conn = connect(db_path)
     init_db(conn)
@@ -150,21 +161,21 @@ def preferences_instance(tmp_path: Path):
         company="Smile",
         title="Product Owner IA H/F - Asnières-sur-Seine",
         search="production-like",
-        collected_at="2026-08-12 10:00:00",
+        collected_at=_recent(0),
     )
     compatible_match, compatible_offer = _seed_offer(
         conn,
         company="Novaspace",
         title="AI Solutions engineer",
         search="production-like",
-        collected_at="2026-08-12 10:01:00",
+        collected_at=_recent(1),
     )
     _unknown_match, unknown_offer = _seed_offer(
         conn,
         company="Thales",
         title="AI Research Engineer",
         search="production-like",
-        collected_at="2026-08-12 10:02:00",
+        collected_at=_recent(2),
     )
     _later_match, _later_offer = _seed_offer(
         conn,
@@ -172,7 +183,7 @@ def preferences_instance(tmp_path: Path):
         title="AI Delivery Engineer",
         search="production-like",
         state="later",
-        collected_at="2026-08-12 10:03:00",
+        collected_at=_recent(3),
     )
     for offer_id, value, quote in (
         (
@@ -1148,3 +1159,70 @@ def test_onboarding_refuses_to_drop_an_incomplete_category(browser, onboarding_i
     page.get_by_role("link", name="Passer pour l’instant").click()
     page.wait_for_url(f"{url}/")
     page.close()
+
+
+@pytest.fixture()
+def review_dashboard(tmp_path: Path, monkeypatch):
+    """Un dossier préparé par `jw prepare` ; l'agent d'envoi est simulé dans le thread."""
+    from jobwatch.config import AutoApplyConfig
+
+    db_path = tmp_path / "jw.db"
+    conn = connect(db_path)
+    init_db(conn)
+    match_id, _offer_id = _seed_offer(
+        conn, company="ReviewCo", title="AI Engineer", state="later", fit="high"
+    )
+    conn.execute("INSERT INTO submission_job (match_id) VALUES (?)", (match_id,))
+    conn.commit()
+    conn.close()
+
+    def fake_spawn(path: Path, _config, job_id: int) -> None:
+        def finish() -> None:
+            done = connect(path)
+            done.execute(
+                "UPDATE submission_job SET status = 'submitted', "
+                "reason = 'Confirmation affichée par le site.' WHERE id = ?",
+                (job_id,),
+            )
+            done.commit()
+            done.close()
+
+        threading.Timer(0.5, finish).start()
+
+    monkeypatch.setattr(serve_module, "_spawn_submission_job", fake_spawn)
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        make_handler(
+            db_path,
+            DraftConfig(model="test-model"),
+            autoapply_config=AutoApplyConfig(browser_profile=tmp_path / "profile"),
+        ),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", db_path
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+def test_send_prepared_application_from_phone_without_reload(browser, review_dashboard) -> None:
+    url, _db_path = review_dashboard
+    context = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True)
+    page = context.new_page()
+    page.goto(url)
+    page.evaluate("window.__jw_no_reload = true")
+    section = page.locator('[data-section="review"]')
+    expect(section).to_have_attribute("open", "")
+    card = section.locator('.row:has(.company:text-is("ReviewCo"))')
+    _assert_no_horizontal_overflow(page)
+
+    card.get_by_role("button", name="Envoyer la candidature").tap()
+    expect(card.locator(".submit-area")).to_contain_text("Envoi en cours")
+    expect(card.locator(".submit-ok")).to_contain_text(
+        "Confirmation affichée par le site.", timeout=12_000
+    )
+    expect(card.get_by_role("button", name="Envoyer la candidature")).to_have_count(0)
+    _assert_not_reloaded(page)
+    _assert_no_horizontal_overflow(page)
+    context.close()

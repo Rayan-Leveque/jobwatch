@@ -123,6 +123,25 @@ CREATE TABLE IF NOT EXISTS draft_job (
 );
 CREATE INDEX IF NOT EXISTS idx_draft_job_match ON draft_job(match_id, id);
 
+-- Candidature assistée (bloc autoapply) : `jw prepare` crée le dossier, le
+-- dashboard le valide, un agent navigateur le soumet chez l'employeur.
+CREATE TABLE IF NOT EXISTS submission_job (
+  id INTEGER PRIMARY KEY,
+  match_id INTEGER NOT NULL REFERENCES match(id),
+  cv_library_id INTEGER REFERENCES document_library(id),
+  draft_job_id INTEGER REFERENCES draft_job(id),
+  -- 'prepared' | 'queued' | 'running' | 'submitted' | 'needs_human' | 'failed'
+  status TEXT NOT NULL DEFAULT 'prepared',
+  reason TEXT,                       -- explication de l'agent ou message d'échec
+  final_url TEXT,                    -- page atteinte après la soumission
+  proof_path TEXT,                   -- capture d'écran de la confirmation
+  log_path TEXT,                     -- transcript de l'agent
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_submission_job_match ON submission_job(match_id, id);
+
 -- Authentification et espaces. Une base d'instance ne contient actuellement qu'un
 -- espace, mais ce modèle permet la future mutualisation de plusieurs espaces.
 CREATE TABLE IF NOT EXISTS workspace (

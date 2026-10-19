@@ -103,11 +103,28 @@ def _priority_matches(
     return filter_profile_locations(conn, rows, account_id)
 
 
+_HAS_SUBMISSION_SQL = "EXISTS (SELECT 1 FROM submission_job sj WHERE sj.match_id = m.id) "
+
+
+def _review_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
+    """Dossiers de candidature assistée pas encore envoyés : section « À valider »."""
+    return conn.execute(
+        f"{_MATCH_SELECT_SQL}"
+        "WHERE m.state = 'later' AND NOT EXISTS "
+        "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+        f"AND {_HAS_SUBMISSION_SQL}"
+        f"{_track_filter(track)}"
+        "ORDER BY o.collected_at DESC, m.id DESC",
+        _track_params(track),
+    ).fetchall()
+
+
 def _later_matches(conn: sqlite3.Connection, track: str) -> list[sqlite3.Row]:
     return conn.execute(
         f"{_MATCH_SELECT_SQL}"
         "WHERE m.state = 'later' AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
+        f"AND NOT {_HAS_SUBMISSION_SQL}"
         f"{_track_filter(track)}"
         "ORDER BY CASE m.fit WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
         "         WHEN 'low' THEN 2 ELSE 3 END, "
@@ -275,6 +292,22 @@ def _draft_rows(conn: sqlite3.Connection, match_ids: list[int]) -> dict[int, sql
         for row in rows:
             drafts[int(row["match_id"])] = row
     return drafts
+
+
+def _submission_rows(conn: sqlite3.Connection, match_ids: list[int]) -> dict[int, sqlite3.Row]:
+    """Dernier dossier de candidature assistée par match."""
+    jobs: dict[int, sqlite3.Row] = {}
+    for start in range(0, len(match_ids), 500):
+        chunk = match_ids[start : start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            "SELECT * FROM submission_job "
+            f"WHERE match_id IN ({placeholders}) ORDER BY match_id, id",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            jobs[int(row["match_id"])] = row
+    return jobs
 
 
 def _swipe_deck(

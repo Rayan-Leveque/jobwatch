@@ -116,3 +116,21 @@ enrich: {}
 #     project:
 #       - ~/lettres/exemple_chef_de_projet.tex
 draft: {}
+
+# autoapply : candidature assistée (exige le bloc draft). `jw prepare` prépare chaque jour
+# les meilleurs matchs (CV du profil + lettre) dans la section « À valider » ; le bouton
+# « Envoyer » lance un agent Claude Code qui remplit le formulaire de l'employeur dans un
+# Chrome headless. Rien ne part sans ce bouton. Pour activer, supprimez « autoapply: {} »
+# ci-dessous, puis décommentez et remplissez :
+#   browser_profile: ~/.local/share/jobwatch/browser-profile  # sessions LinkedIn, WTTJ, ATS
+#   daily_limit: 3                      # dossiers préparés par jour au plus
+#   claude_bin: claude                  # binaire Claude Code
+#   model: claude-sonnet-5-5            # optionnel : modèle de l'agent
+#   browser_bin: playwright-cli         # CLI navigateur (npm @playwright/cli)
+#   dashboard_url: https://exemple.org  # lien de la notification ntfy
+#   timeout_seconds: 900                # durée maximale d'un envoi
+#   imap:                               # optionnel : codes de vérification des ATS
+#     host: imap.gmail.com
+#     user: vous@gmail.com
+#     password: mot-de-passe-d-application
+autoapply: {}

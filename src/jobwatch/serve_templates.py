@@ -604,6 +604,12 @@ h1 span { color:var(--muted-2); font-weight:620 }
 @keyframes draft-spin { to { transform:rotate(360deg) } }
 .draft-error { margin:0; color:var(--danger); overflow-wrap:anywhere }
 .draft-error a, .letter-links a { position:relative; z-index:3; pointer-events:auto }
+.submit-area { position:relative; z-index:3; display:flex; align-items:center; flex-wrap:wrap;
+  gap:9px; margin:10px 0 0; pointer-events:auto; color:var(--muted); font-size:.75rem }
+.submit-area a { position:relative; z-index:3; pointer-events:auto }
+.submit-note { margin:0; flex:1 1 100%; overflow-wrap:anywhere }
+.submit-ok { color:var(--accent) }
+.submit-human { color:var(--amber) }
 .draft-warning { margin:0 0 8px; color:var(--amber); overflow-wrap:anywhere }
 .letter-page { display:block; width:100%; max-width:560px; margin:0 auto 10px;
   border:1px solid var(--line-strong); border-radius:10px; background:#fff }
@@ -1139,6 +1145,59 @@ _JS = """\
         }
       }).catch(() => {});
     });
+  });
+
+  const SUBMIT_POLL_MS = 5000;
+  const submitPolls = new Map();
+  const setSubmitArea = (matchId, html, status) => {
+    const area = document.getElementById(`submit-area-${matchId}`);
+    if (!area) return;
+    area.innerHTML = html;
+    area.dataset.status = status;
+  };
+  const pollSubmit = matchId => {
+    if (submitPolls.has(matchId)) return;
+    const timer = setInterval(() => {
+      fetch(`/match/${matchId}/submit/status`)
+        .then(resp => resp.ok ? resp.json() : null)
+        .then(payload => {
+          if (!payload) return;
+          if (payload.status !== 'running' && payload.status !== 'queued') {
+            clearInterval(timer);
+            submitPolls.delete(matchId);
+          }
+          setSubmitArea(matchId, payload.html, payload.status);
+        })
+        .catch(() => {});
+    }, SUBMIT_POLL_MS);
+    submitPolls.set(matchId, timer);
+  };
+  [...document.querySelectorAll('.submit-area[data-status="running"], .submit-area[data-status="queued"]')]
+    .forEach(area => pollSubmit(area.dataset.matchId));
+  // Délégation : le bouton est recréé à chaque mise à jour du fragment d'état.
+  document.addEventListener('click', event => {
+    const button = event.target.closest('.submit-send');
+    if (!button) return;
+    event.preventDefault();
+    const matchId = button.dataset.matchId;
+    button.disabled = true;
+    fetch(`/match/${matchId}/submit`, {method: 'POST'})
+      .then(resp => resp.json().then(data => ({ok: resp.ok, data})))
+      .then(({ok, data}) => {
+        if (ok) {
+          setSubmitArea(matchId, data.html, data.status);
+          pollSubmit(matchId);
+          return;
+        }
+        button.disabled = false;
+        const area = document.getElementById(`submit-area-${matchId}`);
+        if (!area) return;
+        const p = document.createElement('p');
+        p.className = 'draft-error';
+        p.textContent = data.error || 'Erreur';
+        area.append(p);
+      })
+      .catch(() => { button.disabled = false; });
   });
 
   [...document.querySelectorAll('.action-edit-body')].forEach(button => {
