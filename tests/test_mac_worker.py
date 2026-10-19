@@ -10,6 +10,9 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -29,7 +32,9 @@ SUBMITTED = {
 }
 
 
-def _worker_env(tmp_path: Path, config_path: Path, open_ok: bool = True) -> dict[str, str]:
+def _worker_env(
+    tmp_path: Path, config_path: Path, open_ok: bool = True, open_stdout: str = ""
+) -> dict[str, str]:
     bins = tmp_path / "mac-bin"
     bins.mkdir(exist_ok=True)
     calls = tmp_path / "browser-calls.txt"
@@ -37,6 +42,7 @@ def _worker_env(tmp_path: Path, config_path: Path, open_ok: bool = True) -> dict
         bins, "fake-playwright-cli",
         "import sys\n"
         f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+        f"print({open_stdout!r} if sys.argv[1] == 'open' else '')\n"
         f"sys.exit(0 if {open_ok!r} or sys.argv[1] != 'open' else 1)\n",
     )
     claude = _fake_bin(
@@ -110,10 +116,13 @@ def test_worker_claims_dossier_runs_agent_and_records_application(
     assert not any(name.startswith(".mot_de_passe") for name in received)
     # Le faux `jw` du Mac refuse toute autre commande que mail-code.
     assert (mac_dir / "shim_rc.txt").read_text() != "0"
-    # Chrome headless sur le profil dédié, fermé après l'agent : le Chrome habituel n'est pas touché.
+    # Fenêtre visible sur le profil dédié, fermée après l'agent : le Chrome habituel n'est pas touché.
     calls = (tmp_path / "browser-calls.txt").read_text().splitlines()
     assert calls == [
-        f"open https://example.com/offer --browser=chrome --profile={tmp_path / 'mac-profile'}",
+        (
+            f"open https://example.com/offer --browser=chrome --profile={tmp_path / 'mac-profile'}"
+            " --headed"
+        ),
         "close",
     ]
     argv = json.loads((tmp_path / "argv.json").read_text())
@@ -130,25 +139,65 @@ def test_worker_without_queued_dossier_launches_no_browser(
     assert not (tmp_path / "browser-calls.txt").exists()
 
 
-def test_worker_reports_chrome_failure_instead_of_keeping_the_job(
-    instance, tmp_path: Path  # noqa: F811
+@pytest.fixture
+def offer_site() -> Iterator[ThreadingHTTPServer]:
+    """Site d'offre local qui répond le code HTTP posé dans `server.status`."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(self.server.status)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server
+    server.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("site_status", "open_ok", "open_stdout", "job_status", "reason"),
+    [
+        (200, False, "", "failed", "Chrome ne s'ouvre pas"),
+        # Chrome échoue sur une offre retirée (ERR_HTTP_RESPONSE_CODE_FAILURE) :
+        # ce n'est pas une panne du Mac, l'humain décide d'écarter l'offre.
+        (410, False, "", "needs_human", "offre expirée (HTTP 410)"),
+        # En fenêtre visible, Chrome affiche la page 410 : l'agent n'est pas lancé.
+        (200, True, "### Page\n- HTTP status: 410\n", "needs_human", "offre expirée (HTTP 410)"),
+    ],
+)
+def test_worker_hands_back_dossier_when_offer_page_does_not_open(
+    instance, tmp_path: Path, offer_site,  # noqa: F811
+    site_status, open_ok, open_stdout, job_status, reason,
 ) -> None:
     db_path, config_path, cv_id = instance
     _worker_config(config_path)
     match_id = _prepared(db_path, cv_id)
+    offer_site.status = site_status
     conn = connect(db_path)
+    conn.execute(
+        "UPDATE offer SET url = ? WHERE id = (SELECT offer_id FROM match WHERE id = ?)",
+        (f"http://127.0.0.1:{offer_site.server_port}/offre", match_id),
+    )
+    conn.commit()
     queue_submission(conn, match_id)
     conn.close()
 
-    done = _run_worker(_worker_env(tmp_path, config_path, open_ok=False))
+    done = _run_worker(_worker_env(tmp_path, config_path, open_ok, open_stdout))
     assert done.returncode == 0, done.stdout + done.stderr
     conn = connect(db_path)
     job = conn.execute(
         "SELECT status, reason FROM submission_job WHERE match_id = ?", (match_id,)
     ).fetchone()
     conn.close()
-    assert job["status"] == "failed"
-    assert "Chrome ne s'ouvre pas" in job["reason"]
+    assert not (tmp_path / "argv.json").exists()
+    assert job["status"] == job_status
+    assert reason in job["reason"]
+    # Le navigateur est ouvert même quand la page échoue : il ne doit pas rester.
+    assert (tmp_path / "browser-calls.txt").read_text().splitlines()[-1] == "close"
 
 
 def test_worker_timeout_hands_dossier_back(instance, tmp_path: Path) -> None:  # noqa: F811

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Poste d'envoi jobwatch (Mac) : réclame un dossier validé sur le serveur, laisse
-// Claude Code remplir le formulaire dans un Chrome headless au profil dédié, puis
-// rend le verdict. Lancé toutes les 2 minutes par launchd ; ne fait rien si
-// aucun dossier n'attend. Ton Chrome habituel n'est jamais touché.
+// Claude Code remplir le formulaire dans une fenêtre Chrome visible au profil
+// dédié (pour suivre l'agent en direct), puis rend le verdict. Lancé toutes les
+// 2 minutes par launchd ; ne fait rien si aucun dossier n'attend. Ton Chrome
+// habituel n'est jamais touché.
 //
 //   node jobwatch-worker.mjs         un passage (launchd)
 //   node jobwatch-worker.mjs login   ouvre le profil dédié en fenêtre visible
@@ -33,6 +34,9 @@ const LOGIN_PAGES = [
   "https://accounts.google.com/",
 ];
 
+// Codes HTTP d'une offre retirée : rien à remplir, le dossier revient à l'humain.
+const GONE_STATUSES = new Set([404, 410]);
+
 const log = (message) => console.log(`${new Date().toISOString()} ${message}`);
 
 function remote(command, input) {
@@ -48,12 +52,35 @@ function browser(cwd, ...args) {
   });
 }
 
-function openBrowser(cwd, url, ...flags) {
+class OfferGone extends Error {
+  constructor(status) {
+    super(`offre expirée (HTTP ${status})`);
+    this.status = status;
+  }
+}
+
+async function httpStatus(url) {
+  try {
+    return (await fetch(url, { signal: AbortSignal.timeout(20_000) })).status;
+  } catch {
+    return null;
+  }
+}
+
+// Une offre retirée s'affiche (code lu dans la sortie de `open`) ou fait échouer
+// Chrome sans code (net::ERR_HTTP_RESPONSE_CODE_FAILURE, en headless surtout) :
+// on le demande alors directement au site.
+async function openBrowser(cwd, url, ...flags) {
   mkdirSync(PROFILE, { recursive: true, mode: 0o700 });
   const opened = browser(cwd, "open", url, "--browser=chrome", `--profile=${PROFILE}`, ...flags);
-  if (opened.status !== 0) {
-    throw new Error(`Chrome ne s'ouvre pas : ${(opened.stderr || opened.stdout || "").trim().slice(0, 200)}`);
+  if (opened.status === 0) {
+    const status = Number(/^- HTTP status: (\d+)/m.exec(opened.stdout || "")?.[1]);
+    if (GONE_STATUSES.has(status)) throw new OfferGone(status);
+    return;
   }
+  const status = await httpStatus(url);
+  if (GONE_STATUSES.has(status)) throw new OfferGone(status);
+  throw new Error(`Chrome ne s'ouvre pas : ${(opened.stderr || opened.stdout || "").trim().slice(0, 200)}`);
 }
 
 // `jw mail-code` pour l'agent : seule l'option --minutes passe, et seulement des chiffres.
@@ -74,15 +101,15 @@ exec ${run}
   chmodSync(join(binDir, "jw"), 0o700);
 }
 
-function login() {
+async function login() {
   mkdirSync(WORK_ROOT, { recursive: true, mode: 0o700 });
-  openBrowser(WORK_ROOT, LOGIN_PAGES[0], "--headed");
+  await openBrowser(WORK_ROOT, LOGIN_PAGES[0], "--headed");
   for (const page of LOGIN_PAGES.slice(1)) browser(WORK_ROOT, "tab-new", page);
   console.log("Connecte-toi dans la fenêtre Chrome qui vient de s'ouvrir (un onglet par site),");
   console.log("puis ferme cette fenêtre. Les sessions restent dans le profil dédié.");
 }
 
-function main() {
+async function main() {
   mkdirSync(WORK_ROOT, { recursive: true, mode: 0o700 });
   const claim = JSON.parse(remote(`${JW} submission-claim`) || "{}");
   if (!claim.job_id) return;
@@ -90,10 +117,10 @@ function main() {
     log(`job ${claim.job_id} refusé par le serveur : ${claim.error}`);
     return;
   }
-  runJob(claim);
+  await runJob(claim);
 }
 
-function runJob(claim) {
+async function runJob(claim) {
   const workDir = join(WORK_ROOT, String(claim.job_id));
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   let report;
@@ -103,8 +130,8 @@ function runJob(claim) {
     }
     const binDir = join(workDir, ".bin");
     writeMailShim(binDir);
-    openBrowser(workDir, claim.url);
     try {
+      await openBrowser(workDir, claim.url, "--headed");
       log(`job ${claim.job_id} : agent lancé sur ${claim.url}`);
       const agent = spawnSync(CLAUDE, claim.args, {
         cwd: workDir,
@@ -128,17 +155,18 @@ function runJob(claim) {
         };
       }
     } finally {
+      // Même si la page n'a pas chargé, le navigateur est ouvert : on le ferme.
       browser(workDir, "close");
     }
   } catch (error) {
-    report = { error: String(error.message || error) };
+    report = error instanceof OfferGone ? { expired: error.status } : { error: String(error.message || error) };
   }
   log(`job ${claim.job_id} : ${remote(`${JW} submission-finish ${claim.job_id}`, JSON.stringify(report)).trim()}`);
 }
 
 try {
-  if (process.argv[2] === "login") login();
-  else main();
+  if (process.argv[2] === "login") await login();
+  else await main();
 } catch (error) {
   log(`échec : ${error.message || error}`);
   process.exitCode = 1;

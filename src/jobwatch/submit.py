@@ -119,6 +119,10 @@ class SubmitError(Exception):
     """Échec attendu ; le message est stocké dans submission_job.reason."""
 
 
+class OfferExpired(SubmitError):
+    """L'offre a été retirée (404, 410) : rien à envoyer, le dossier revient à l'humain."""
+
+
 def accounts_path(db_path: Path) -> Path:
     return db_path.parent / "ats_accounts.json"
 
@@ -433,6 +437,8 @@ def fail_submission(conn: sqlite3.Connection, job_id: int, exc: BaseException) -
     if isinstance(exc, subprocess.TimeoutExpired):
         _finish(conn, job_id, status="needs_human",
                 reason="l'agent a dépassé le temps imparti, vérifiez le site")
+    elif isinstance(exc, OfferExpired):
+        _finish(conn, job_id, status="needs_human", reason=str(exc))
     elif isinstance(exc, (SubmitError, DraftError)):
         _finish(conn, job_id, status="failed", reason=str(exc))
     else:
