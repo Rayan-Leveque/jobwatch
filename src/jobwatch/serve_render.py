@@ -29,6 +29,8 @@ from jobwatch.serve_queries import (
     _offer_content_failures,
     _offer_contents,
     _priority_matches,
+    _review_matches,
+    _submission_rows,
     _summary_bullets,
     _swipe_deck,
 )
@@ -585,6 +587,56 @@ def _body_editor(match_id: int) -> str:
     )
 
 
+def _submission_button(match_id: int, label: str) -> str:
+    return (
+        f'<button class="card-action submit-send" type="button" data-match-id="{match_id}">'
+        f"{html.escape(label)}</button>"
+    )
+
+
+def _submission_status_html(match_id: int, job: sqlite3.Row | None) -> str:
+    """Fragment d'état de l'envoi assisté : réutilisé au rendu et par /submit/status."""
+    if job is None:
+        return ""
+    status = str(job["status"])
+    reason = html.escape(str(job["reason"] or ""))
+    if status in ("queued", "running"):
+        return (
+            '<span class="draft-spinner" aria-hidden="true"></span>'
+            "<span>Envoi en cours, l'agent remplit le formulaire (quelques minutes)…</span>"
+        )
+    if status == "prepared":
+        return (
+            '<p class="submit-note">Dossier prêt : CV du profil et lettre (onglet Lettre). '
+            "Relisez, puis envoyez.</p>"
+            f"{_submission_button(match_id, 'Envoyer la candidature')}"
+        )
+    proof = (
+        f' · <a href="/match/{match_id}/proof.png?v={int(job["id"])}">capture</a>'
+        if job["proof_path"]
+        else ""
+    )
+    if status == "submitted":
+        return f'<p class="submit-note submit-ok">Candidature envoyée. {reason}{proof}</p>'
+    if status == "needs_human":
+        return (
+            f'<p class="submit-note submit-human">À finir vous-même : {reason}{proof}</p>'
+            f"{_submission_button(match_id, 'Relancer l’envoi')}"
+        )
+    return (
+        f'<p class="draft-error">Envoi en échec : {reason}{proof}</p>'
+        f"{_submission_button(match_id, 'Réessayer')}"
+    )
+
+
+def _submission_block(match_id: int, job: sqlite3.Row) -> str:
+    return (
+        f'<div class="submit-area" id="submit-area-{match_id}" data-match-id="{match_id}" '
+        f'data-status="{html.escape(str(job["status"]), quote=True)}">'
+        f"{_submission_status_html(match_id, job)}</div>"
+    )
+
+
 def _letter_reader(
     match_id: int,
     job: sqlite3.Row | None,
@@ -646,6 +698,7 @@ def _match_card(
     draft_enabled: bool,
     cover_letters_enabled: bool,
     actions: bool = False,
+    submission: sqlite3.Row | None = None,
 ) -> str:
     cls = _row_class(row["state"])
     company = html.escape(str(row["company"] or "Société inconnue"))
@@ -666,6 +719,8 @@ def _match_card(
         [summary_panel, content_panel, letter_panel],
     )
     actions_html = _card_actions(row, library, cover_letters_enabled) if actions else ""
+    if submission is not None:
+        actions_html = _submission_block(int(row["id"]), submission) + actions_html
     return (
         f'<article class="row row-{cls}" '
         f'data-search="{html.escape(_search_haystack(row), quote=True)}"><div class="body">'
@@ -743,7 +798,7 @@ def _search_haystack(row: sqlite3.Row) -> str:
     return "".join(c for c in folded if not unicodedata.combining(c))
 
 
-ACTIONABLE_SECTIONS = {"priority", "new", "seen", "later"}
+ACTIONABLE_SECTIONS = {"review", "priority", "new", "seen", "later"}
 
 
 def _card(
@@ -756,6 +811,7 @@ def _card(
     track: str,
     draft_enabled: bool,
     cover_letters_enabled: bool,
+    submissions: dict[int, sqlite3.Row] | None = None,
 ) -> str:
     summary = summaries.get(int(row["offer_id"])) or Summary()
     content = contents.get(int(row["offer_id"]))
@@ -782,6 +838,7 @@ def _card(
         draft_enabled,
         cover_letters_enabled,
         actions=key in ACTIONABLE_SECTIONS,
+        submission=(submissions or {}).get(int(row["id"])),
     )
 
 
@@ -799,6 +856,7 @@ def _section(
     track: str,
     draft_enabled: bool,
     cover_letters_enabled: bool,
+    submissions: dict[int, sqlite3.Row] | None = None,
 ) -> str:
     if rows:
         cards = "\n".join(
@@ -812,6 +870,7 @@ def _section(
                 track,
                 draft_enabled,
                 cover_letters_enabled,
+                submissions,
             )
             for row in rows
         )
@@ -842,6 +901,7 @@ def render_page(
     cover_letters_enabled: bool = True,
 ) -> str:
     """Rend la page HTML complète d'un onglet depuis l'état actuel de la base."""
+    review = _review_matches(conn, track)
     priority = _priority_matches(conn, track, account_id)
     new = _matches(conn, "new", track, account_id)
     seen = _matches(conn, "seen", track, account_id)
@@ -849,19 +909,32 @@ def render_page(
     discarded = _discarded_matches(conn, track)
     applied = _applications(conn, track)
     offer_ids = sorted(
-        {int(row["offer_id"]) for row in (*priority, *new, *seen, *later, *discarded, *applied)}
+        {
+            int(row["offer_id"])
+            for row in (*review, *priority, *new, *seen, *later, *discarded, *applied)
+        }
     )
     summaries = _summary_bullets(conn, offer_ids)
     contents = _offer_contents(conn, offer_ids)
     library = {"cv": list_library(conn, "cv"), "cover_letter": list_library(conn, "cover_letter")}
     match_ids = sorted(
-        {int(row["id"]) for row in (*priority, *new, *seen, *later)}
+        {int(row["id"]) for row in (*review, *priority, *new, *seen, *later)}
         | {int(row["match_id"]) for row in applied if row["match_id"] is not None}
     )
     drafts = _draft_rows(conn, match_ids) if draft_enabled else {}
+    submissions = _submission_rows(conn, [int(row["id"]) for row in review])
     extra = (drafts, track, draft_enabled, cover_letters_enabled)
+    review_section = (
+        _section(
+            "review", "À valider", "Candidatures préparées, à relire puis envoyer", review,
+            "", True, summaries, contents, library, *extra, submissions=submissions,
+        )
+        if review
+        else ""
+    )
     body = "\n".join(
         (
+            review_section,
             _section(
                 "priority", "Priorité haute", "À regarder en premier", priority,
                 "Aucune offre prioritaire pour l'instant.", True, summaries, contents, library, *extra,
@@ -892,7 +965,10 @@ def render_page(
     priority_seen = len(priority) - priority_new
     deck_count = priority_new + len(new)
     swipe_fab, swipe_popup = _swipe_invites(track, deck_count)
-    total = len(priority) + len(new) + len(seen) + len(later) + len(discarded) + len(applied)
+    total = (
+        len(review) + len(priority) + len(new) + len(seen) + len(later)
+        + len(discarded) + len(applied)
+    )
     stamp = datetime.now(UTC).astimezone().strftime("%d/%m/%Y %H:%M")
     details = profile_details(conn, account_id) if account_id is not None else None
     profile_prompt = (

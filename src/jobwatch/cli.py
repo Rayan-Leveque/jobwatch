@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import imaplib
 import logging
 import sqlite3
 from pathlib import Path
 
 import click
+import httpx
 import yaml
 
 from jobwatch import __version__, importing
@@ -20,12 +22,16 @@ from jobwatch.db import connect, init_db
 from jobwatch.digest import send_digest
 from jobwatch.enrich import EnrichError, enrich
 from jobwatch.library import LibraryError, migrate_draft_examples, migrate_external_documents
+from jobwatch.mailcode import format_messages, recent_messages
 from jobwatch.matching import active_search_configs, run_matching, sync_searches
 from jobwatch.onboarding import sync_profile_searches
 from jobwatch.paths import INSTANCE_ENV, instance_paths, validate_instance_name
+from jobwatch.prepare import PrepareError, notify_prepared
+from jobwatch.prepare import prepare as prepare_applications
 from jobwatch.profile_sources import sources_for_profile
 from jobwatch.research import apply_research_fits, research_offers, unfitted_recent_offers
 from jobwatch.serve import ServeError, serve_http
+from jobwatch.submit import MAILCODE_CONFIG_ENV, SubmitError, queue_submission, run_submission
 
 logger = logging.getLogger(__name__)
 
@@ -550,6 +556,77 @@ def _require_match(conn, match_id: int):
 
 
 @cli.command()
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def prepare(config_path: Path | None) -> None:
+    """Prépare les candidatures du jour à valider dans le dashboard (bloc autoapply)."""
+    config = _require_config(config_path)
+    if config.autoapply is None:
+        _fatal("bloc 'autoapply' absent de config.yaml")
+    conn = _open_db(config)
+    try:
+        try:
+            result = prepare_applications(conn, config.db, config)
+        except PrepareError as exc:
+            _fatal(str(exc))
+    finally:
+        conn.close()
+    with httpx.Client(timeout=10.0) as client:
+        notified = notify_prepared(config, result, client)
+    for label in result.prepared:
+        click.echo(f"prête : {label}")
+    for label in result.failed:
+        click.echo(f"échec : {label}")
+    note = ", notifié via ntfy" if notified else ""
+    click.echo(f"{len(result.prepared)} candidature(s) à valider, {len(result.failed)} échec(s){note}")
+
+
+@cli.command()
+@click.argument("match_id", type=int)
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def submit(config_path: Path | None, match_id: int) -> None:
+    """Soumet chez l'employeur la candidature préparée d'un match (agent navigateur)."""
+    config = _require_config(config_path)
+    if config.autoapply is None:
+        _fatal("bloc 'autoapply' absent de config.yaml")
+    conn = _open_db(config)
+    try:
+        job_id = queue_submission(conn, match_id)
+    except SubmitError as exc:
+        _fatal(str(exc))
+    finally:
+        conn.close()
+    run_submission(config.db, config.autoapply, job_id)
+    conn = _open_db(config)
+    try:
+        job = conn.execute("SELECT * FROM submission_job WHERE id = ?", (job_id,)).fetchone()
+    finally:
+        conn.close()
+    click.echo(f"{job['status']} : {job['reason'] or ''}")
+    if job["proof_path"]:
+        click.echo(f"preuve : {job['proof_path']}")
+    if job["status"] != "submitted":
+        raise SystemExit(1)
+
+
+@cli.command(name="mail-code")
+@click.option("--minutes", type=int, default=15, show_default=True, help="fenêtre de réception")
+@click.option(
+    "--config", "config_path", type=click.Path(path_type=Path), default=None,
+    envvar=MAILCODE_CONFIG_ENV,
+)
+def mail_code(config_path: Path | None, minutes: int) -> None:
+    """Affiche les emails de vérification reçus récemment (codes et liens des ATS)."""
+    config = _require_config(config_path)
+    if config.autoapply is None or config.autoapply.imap is None:
+        _fatal("bloc 'autoapply.imap' absent de config.yaml")
+    try:
+        messages = recent_messages(config.autoapply.imap, minutes)
+    except (OSError, imaplib.IMAP4.error) as exc:
+        _fatal(f"lecture IMAP impossible : {exc}")
+    click.echo(format_messages(messages), nl=False)
+
+
+@cli.command()
 @click.argument("match_id", type=int)
 @click.option("--note", default=None, help="note conservée sur la candidature")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
@@ -771,6 +848,7 @@ def serve(
             secure_cookie=secure_cookie,
             onboarding_enabled=_current_instance() is not None,
             collect_onboarding=collect_onboarding,
+            autoapply_config=config.autoapply,
         )
     except ServeError as exc:
         _fatal(str(exc))

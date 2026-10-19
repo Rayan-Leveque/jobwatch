@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import click
 
-from jobwatch import draft
+from jobwatch import draft, submit
 from jobwatch.auth import (
     AuthError,
     Session,
@@ -59,7 +59,7 @@ from jobwatch.auth_http import (
     session_cookie,
     session_token,
 )
-from jobwatch.config import DraftConfig
+from jobwatch.config import AutoApplyConfig, DraftConfig
 from jobwatch.db import connect
 from jobwatch.library import LibraryError, list_library, save_upload
 from jobwatch.match_actions import (
@@ -94,6 +94,7 @@ from jobwatch.serve_queries import (
 from jobwatch.serve_render import (
     _draft_status_html,
     _markdown_to_html,  # noqa: F401  (ré-export : surface publique historique de jobwatch.serve)
+    _submission_status_html,
     render_page,
     render_swipe_page,
 )
@@ -106,6 +107,15 @@ _DRAFT_POST_RE = re.compile(r"^/match/(\d+)/draft$")
 
 
 _DRAFT_STATUS_RE = re.compile(r"^/match/(\d+)/draft/status$")
+
+
+_SUBMIT_POST_RE = re.compile(r"^/match/(\d+)/submit$")
+
+
+_SUBMIT_STATUS_RE = re.compile(r"^/match/(\d+)/submit/status$")
+
+
+_PROOF_RE = re.compile(r"^/match/(\d+)/proof\.png$")
 
 
 _LETTER_FILE_RE = re.compile(r"^/match/(\d+)/letter\.(pdf|tex)$")
@@ -155,6 +165,13 @@ def _spawn_draft_job(db_path: Path, config: DraftConfig, job_id: int) -> None:
     ).start()
 
 
+def _spawn_submission_job(db_path: Path, config: AutoApplyConfig, job_id: int) -> None:
+    """Lance l'agent d'envoi dans un thread ; point d'accroche des tests."""
+    threading.Thread(
+        target=submit.run_submission, args=(db_path, config, job_id), daemon=True
+    ).start()
+
+
 def _db_error_response(response_format: str = "text"):
     """Traduit un `sqlite3.Error` levé par la méthode décorée en réponse 500 standard.
 
@@ -190,6 +207,7 @@ def make_handler(
     onboarding_config: DraftConfig | None = None,
     onboarding_enabled: bool = False,
     collect_onboarding: bool = False,
+    autoapply_config: AutoApplyConfig | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Fabrique une classe de gestionnaire HTTP branchée sur render_page.
 
@@ -393,6 +411,14 @@ def make_handler(
                     "text/html; charset=utf-8",
                 )
                 return
+            submit_status = _SUBMIT_STATUS_RE.match(path)
+            if submit_status:
+                self._handle_submit_status(int(submit_status.group(1)))
+                return
+            proof = _PROOF_RE.match(path)
+            if proof:
+                self._handle_proof(int(proof.group(1)))
+                return
             status = _DRAFT_STATUS_RE.match(path)
             if status:
                 self._handle_draft_status(int(status.group(1)))
@@ -517,6 +543,49 @@ def make_handler(
             for job_id in job_ids:
                 _spawn_draft_job(db_path, draft_config, job_id)
             self._send_json(202, {"count": len(job_ids)})
+
+        def _latest_submission(self, conn: sqlite3.Connection, match_id: int) -> sqlite3.Row | None:
+            return conn.execute(
+                "SELECT * FROM submission_job WHERE match_id = ? ORDER BY id DESC LIMIT 1",
+                (match_id,),
+            ).fetchone()
+
+        @_db_error_response("json")
+        def _handle_submit_post(self, match_id: int) -> None:
+            if autoapply_config is None:
+                self._send_json(
+                    503, {"error": "envoi non configuré : renseignez le bloc 'autoapply'"}
+                )
+                return
+            with self._db() as conn:
+                try:
+                    job_id = submit.queue_submission(conn, match_id)
+                except submit.SubmitError as exc:
+                    self._send_json(409, {"error": str(exc)})
+                    return
+                job = self._latest_submission(conn, match_id)
+            _spawn_submission_job(db_path, autoapply_config, job_id)
+            self._send_json(
+                202, {"status": "queued", "html": _submission_status_html(match_id, job)}
+            )
+
+        @_db_error_response("json")
+        def _handle_submit_status(self, match_id: int) -> None:
+            with self._db() as conn:
+                job = self._latest_submission(conn, match_id)
+            if job is None:
+                self._send_json(404, {"error": "aucun dossier pour ce match"})
+                return
+            self._send_json(
+                200,
+                {"status": str(job["status"]), "html": _submission_status_html(match_id, job)},
+            )
+
+        @_db_error_response()
+        def _handle_proof(self, match_id: int) -> None:
+            with self._db() as conn:
+                job = self._latest_submission(conn, match_id)
+            self._send_draft_file(job["proof_path"] if job else None, "image/png")
 
         def _latest_draft(self, conn: sqlite3.Connection, match_id: int) -> sqlite3.Row | None:
             return conn.execute(
@@ -768,6 +837,10 @@ def make_handler(
                 return
             if path == "/draft/batch":
                 self._handle_batch_post(session)
+                return
+            submit_post = _SUBMIT_POST_RE.match(path)
+            if submit_post:
+                self._handle_submit_post(int(submit_post.group(1)))
                 return
             draft_post = _DRAFT_POST_RE.match(path)
             if draft_post:
@@ -1161,6 +1234,21 @@ def _fail_interrupted_draft_jobs(db_path: Path) -> None:
         conn.close()
 
 
+def _interrupt_submission_jobs(db_path: Path) -> None:
+    """Rend la main sur les envois coupés par un arrêt : le formulaire a pu partir à moitié."""
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE submission_job SET status = 'needs_human', "
+            "reason = 'envoi interrompu par un redémarrage du serveur, vérifiez le site "
+            "avant de relancer', finished_at = datetime('now') "
+            "WHERE status IN ('running', 'queued')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def serve_http(
     db_path: Path,
     host: str,
@@ -1171,9 +1259,11 @@ def serve_http(
     secure_cookie: bool = True,
     onboarding_enabled: bool = False,
     collect_onboarding: bool = False,
+    autoapply_config: AutoApplyConfig | None = None,
 ) -> None:
     """Crée le serveur HTTP et le sert jusqu'à Ctrl-C."""
     _fail_interrupted_draft_jobs(db_path)
+    _interrupt_submission_jobs(db_path)
     try:
         server = ThreadingHTTPServer(
             (host, port),
@@ -1185,6 +1275,7 @@ def serve_http(
                 onboarding_config=draft_config,
                 onboarding_enabled=onboarding_enabled,
                 collect_onboarding=collect_onboarding,
+                autoapply_config=autoapply_config,
             ),
         )
     except (OSError, OverflowError) as exc:
