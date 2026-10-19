@@ -29,11 +29,11 @@ from pathlib import Path
 
 import httpx
 
-from jobwatch.config import DRAFT_TRACKS, DraftConfig
+from jobwatch.config import DRAFT_TRACKS, DraftConfig, ReviewConfig
 from jobwatch.db import connect
 from jobwatch.enrich import _fetch_and_extract_result, _store_content
 from jobwatch.library import documents_dir, ensure_private_directory, protect_private_file
-from jobwatch.llm_runner import LLMRunnerError, opencode_text, run_codex, run_opencode
+from jobwatch.llm_runner import LLMRunnerError, opencode_text, run_claude, run_codex, run_opencode
 from jobwatch.profile import draft_profile_context
 from jobwatch.research import OPENROUTER_URL
 
@@ -92,6 +92,37 @@ REGENERATE_PROMPT_SUFFIX = (
     " La section LETTRE PRÉCÉDENTE contient la version à retravailler ; consigne du "
     "candidat : {instruction}"
 )
+
+REVIEW_PROMPT = (
+    "Tu relis une lettre de motivation avant son envoi à un employeur. L'entrée "
+    "standard contient les sections OFFRE, CV, PROFIL PERSONNEL et LETTRE (source "
+    "LaTeX complète, en-tête compris). Signale uniquement les vrais problèmes : "
+    "1) tout fait sur le candidat (diplôme, poste, expérience, compétence, outil, "
+    "chiffre, date) absent du CV et du profil ; 2) nom de l'entreprise ou intitulé du "
+    "poste différent de l'offre ; 3) coordonnées différentes du profil ; 4) texte à "
+    "compléter ([Nom], XXX...) ou reste de code visible dans le rendu ; 5) faute de "
+    "français ; 6) lettre générique qui ne parle pas de cette offre. Ignore les "
+    "préférences de style. Réponds avec ok=true et issues=[] si la lettre peut partir, "
+    "sinon ok=false et une phrase courte et actionnable par problème. issues ne "
+    "contient que des corrections à faire, jamais une vérification réussie."
+)
+
+REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ok": {"type": "boolean"},
+        "issues": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["ok", "issues"],
+    "additionalProperties": False,
+}
+
+REVIEW_FIX_SUFFIX = (
+    " La section LETTRE PRÉCÉDENTE contient une version refusée par le relecteur. "
+    "Corrige exactement ces problèmes, sans rien inventer : {issues}"
+)
+
+REVIEW_TIMEOUT_SECONDS = 300
 
 REPAIR_PROMPT = (
     "Le document LaTeX de la section LETTRE contient des erreurs : la compilation "
@@ -480,6 +511,27 @@ def _generate_tex(
     raise AssertionError("unreachable")
 
 
+def _review_issues(
+    review: ReviewConfig, offer_text: str, cv_text: str, profile: str | None, tex: str
+) -> list[str]:
+    """Problèmes relevés par le relecteur ; une liste vide veut dire « peut partir »."""
+    bundle = (
+        f"# OFFRE\n\n{offer_text}\n\n# CV\n\n{cv_text}\n\n"
+        f"# PROFIL PERSONNEL\n\n{profile or '(vide)'}\n\n# LETTRE\n\n{tex}"
+    )
+    try:
+        verdict = run_claude(
+            binary=review.claude_bin, model=review.model, prompt=REVIEW_PROMPT,
+            attachment=bundle, timeout=REVIEW_TIMEOUT_SECONDS, output_schema=REVIEW_SCHEMA,
+        )
+    except LLMRunnerError as exc:
+        raise DraftError(f"relecture impossible : {exc}") from exc
+    issues = [str(issue) for issue in verdict.get("issues", []) if str(issue).strip()]
+    if verdict.get("ok") is not True and not issues:
+        issues = ["lettre refusée sans motif"]
+    return [] if verdict.get("ok") is True else issues
+
+
 def _upsert_library_entry(
     conn: sqlite3.Connection, match_id: int, label: str, pdf_path: Path
 ) -> int:
@@ -605,6 +657,24 @@ def _run_job_inner(
     with tempfile.TemporaryDirectory() as tmp_dir:
         work_dir = Path(tmp_dir)
         tex, pdf_path = _generate_tex(config, prompt, bundle, work_dir)
+        if config.review is not None:
+            issues = _review_issues(config.review, offer_text, cv_text, personal_context, tex)
+            if issues:
+                listed = " ; ".join(issues)
+                fix_prompt = PROMPT.format(date=french_date(today)) + REVIEW_FIX_SUFFIX.format(
+                    issues=listed
+                )
+                fix_bundle = _build_bundle(
+                    offer_text, cv_text, examples, tex, profile_context=personal_context
+                )
+                tex, pdf_path = _generate_tex(config, fix_prompt, fix_bundle, work_dir)
+                remaining = _review_issues(
+                    config.review, offer_text, cv_text, personal_context, tex
+                )
+                if remaining:
+                    raise DraftError(f"relecture : lettre refusée deux fois - {' ; '.join(remaining)}")
+                note = f"Relecture : corrigée ({listed})."
+                warning = f"{warning} {note}" if warning else note
         ensure_private_directory(target_dir)
         stem = f"draft_{match_id}"
         final_tex = target_dir / f"{stem}.tex"

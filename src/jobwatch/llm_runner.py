@@ -202,3 +202,43 @@ def run_opencode(
             return completed.stdout
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise LLMRunnerError(f"appel OpenCode échoué : {exc}") from exc
+
+
+def run_claude(
+    *,
+    binary: str,
+    model: str,
+    prompt: str,
+    attachment: str,
+    timeout: float,
+    output_schema: dict,
+) -> dict:
+    """Run Claude Code without any tool, returning its schema-validated JSON answer.
+
+    Le document tiers passe par stdin. Aucun outil, ni hook, ni serveur MCP, ni
+    réglage utilisateur : le modèle ne peut que lire et répondre.
+    """
+    command = [
+        binary, "-p", prompt, "--model", model,
+        "--tools", "", "--setting-sources", "project", "--strict-mcp-config",
+        "--no-session-persistence", "--output-format", "json",
+        "--json-schema", json.dumps(output_schema),
+    ]
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            completed = subprocess.run(
+                command, input=attachment, capture_output=True, text=True,
+                timeout=timeout, check=False, cwd=tmp_dir,
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LLMRunnerError(f"appel claude échoué : {exc}") from exc
+    if completed.returncode != 0:
+        raise LLMRunnerError(f"claude a quitté avec le code {completed.returncode}")
+    try:
+        envelope = json.loads(completed.stdout)
+    except ValueError as exc:
+        raise LLMRunnerError("réponse claude illisible") from exc
+    result = envelope.get("structured_output") if isinstance(envelope, dict) else None
+    if not isinstance(result, dict):
+        raise LLMRunnerError("claude n'a pas rendu le JSON demandé")
+    return result

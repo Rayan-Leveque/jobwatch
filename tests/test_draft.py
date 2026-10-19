@@ -1302,3 +1302,93 @@ def test_call_opencode_denies_every_tool_by_name(monkeypatch) -> None:
     expected = {"*": "deny", **{tool: "deny" for tool in OPENCODE_TOOLS}}
     assert captured["file"]["permission"] == expected
     assert captured["env"] == expected
+
+
+# ---------------------------------------------------------------- relecture
+
+
+def _review_config(tmp_path: Path) -> DraftConfig:
+    from jobwatch.config import ReviewConfig
+
+    config = _config(tmp_path)
+    config.review = ReviewConfig(model="claude-sonnet-5-5")
+    return config
+
+
+def _scripted_review(monkeypatch, verdicts: list[dict]) -> list[str]:
+    """Relecteur simulé : rend les verdicts dans l'ordre et garde les lettres relues."""
+    seen: list[str] = []
+
+    def fake_run_claude(**kwargs):
+        assert kwargs["model"] == "claude-sonnet-5-5"
+        seen.append(kwargs["attachment"])
+        return verdicts[len(seen) - 1]
+
+    monkeypatch.setattr(draft, "run_claude", fake_run_claude)
+    return seen
+
+
+def _run_reviewed_job(db_path: Path, tmp_path: Path, monkeypatch, verdicts: list[dict]):
+    conn = _conn(db_path)
+    match_id = _seed_match(conn)
+    job_id = _seed_job(conn, match_id, _seed_cv(conn, tmp_path))
+    conn.close()
+    prompts: list[str] = []
+
+    def fake_llm(config, prompt, bundle):
+        prompts.append(prompt)
+        return MINIMAL_TEX
+
+    monkeypatch.setattr(draft, "_call_llm", fake_llm)
+    seen = _scripted_review(monkeypatch, verdicts)
+    run_job(db_path, _review_config(tmp_path), job_id)
+    conn = _conn(db_path)
+    job = conn.execute("SELECT * FROM draft_job WHERE id = ?", (job_id,)).fetchone()
+    conn.close()
+    return job, prompts, seen
+
+
+def test_reviewed_letter_accepted_first_time(db_path: Path, tmp_path: Path, monkeypatch) -> None:
+    job, prompts, seen = _run_reviewed_job(
+        db_path, tmp_path, monkeypatch, [{"ok": True, "issues": []}]
+    )
+    assert job["status"] == "ok", job["error"]
+    assert job["warning"] is None
+    assert len(prompts) == 1 and len(seen) == 1
+    assert "# LETTRE" in seen[0] and "\\documentclass" in seen[0]
+
+
+def test_rejected_letter_is_rewritten_with_reviewer_issues(
+    db_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+    job, prompts, seen = _run_reviewed_job(
+        db_path, tmp_path, monkeypatch,
+        [{"ok": False, "issues": ["Le CV ne mentionne pas Kubernetes."]}, {"ok": True, "issues": []}],
+    )
+    assert job["status"] == "ok", job["error"]
+    assert len(prompts) == 2 and len(seen) == 2
+    assert "Le CV ne mentionne pas Kubernetes." in prompts[1]
+    assert "Relecture : corrigée (Le CV ne mentionne pas Kubernetes.)" in job["warning"]
+
+
+def test_letter_rejected_twice_fails_and_never_reaches_the_library(
+    db_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+    job, _prompts, _seen = _run_reviewed_job(
+        db_path, tmp_path, monkeypatch,
+        [{"ok": False, "issues": ["Entreprise erronée."]}, {"ok": False, "issues": ["Entreprise erronée."]}],
+    )
+    assert job["status"] == "failed"
+    assert "refusée deux fois - Entreprise erronée." in job["error"]
+    assert job["library_id"] is None
+
+
+def test_config_parses_review_block(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"db: {tmp_path / 'jw.db'}\nsearches: []\nsources:\n  linkedin:\n    from_profile: true\n"
+        "draft:\n  runner: codex\n  model: gpt-6.1-sol\n  review:\n    model: claude-sonnet-5-5\n",
+        encoding="utf-8",
+    )
+    review = load_config(path).draft.review
+    assert review.model == "claude-sonnet-5-5" and review.claude_bin == "claude"
