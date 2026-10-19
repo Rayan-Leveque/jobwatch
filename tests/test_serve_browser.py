@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import threading
+from datetime import UTC, datetime, timedelta
 from http.server import ThreadingHTTPServer
 from itertools import pairwise
 from pathlib import Path
@@ -139,9 +140,19 @@ def onboarding_instance(tmp_path: Path):
     thread.join(timeout=5)
 
 
+def _recent(minutes: int) -> str:
+    """Horodatage SQLite d'hier, décalé de `minutes` pour garder l'ordre de collecte."""
+    moment = datetime.now(UTC) - timedelta(days=1) + timedelta(minutes=minutes)
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+
 @pytest.fixture()
 def preferences_instance(tmp_path: Path):
-    """Instance isolée avec offres explicites, offre ambiguë et brouillon existant."""
+    """Instance isolée avec offres explicites, offre ambiguë et brouillon existant.
+
+    Les dates restent dans la fenêtre de reclassification de séniorité (60 jours) :
+    des dates fixes ont fait échouer ce test une fois cette fenêtre dépassée.
+    """
     db_path = tmp_path / "jw.db"
     conn = connect(db_path)
     init_db(conn)
@@ -150,21 +161,21 @@ def preferences_instance(tmp_path: Path):
         company="Smile",
         title="Product Owner IA H/F - Asnières-sur-Seine",
         search="production-like",
-        collected_at="2026-08-12 10:00:00",
+        collected_at=_recent(0),
     )
     compatible_match, compatible_offer = _seed_offer(
         conn,
         company="Novaspace",
         title="AI Solutions engineer",
         search="production-like",
-        collected_at="2026-08-12 10:01:00",
+        collected_at=_recent(1),
     )
     _unknown_match, unknown_offer = _seed_offer(
         conn,
         company="Thales",
         title="AI Research Engineer",
         search="production-like",
-        collected_at="2026-08-12 10:02:00",
+        collected_at=_recent(2),
     )
     _later_match, _later_offer = _seed_offer(
         conn,
@@ -172,7 +183,7 @@ def preferences_instance(tmp_path: Path):
         title="AI Delivery Engineer",
         search="production-like",
         state="later",
-        collected_at="2026-08-12 10:03:00",
+        collected_at=_recent(3),
     )
     for offer_id, value, quote in (
         (
