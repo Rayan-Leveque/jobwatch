@@ -3,8 +3,9 @@
 Choisit les meilleurs matchs neufs (fit high, mêmes filtres que la section
 Priorité haute du dashboard), les passe « À candidater », génère leur lettre
 par le pipeline de draft.py et crée un dossier `submission_job` en attente de
-validation. Rien ne part chez un employeur ici : la soumission n'a lieu
-qu'après le tap « Envoyer » du dashboard (voir jobwatch.submit).
+validation. Sans `auto_send`, rien ne part chez un employeur avant le tap
+« Envoyer » du dashboard ; avec, le dossier est mis en file pour le poste
+d'envoi (voir jobwatch.submit).
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from jobwatch import draft
 from jobwatch.config import Config
 from jobwatch.digest import NTFY_URL
 from jobwatch.serve_queries import PROJECT_TITLE_PATTERNS, _priority_matches
+from jobwatch.submit import queue_submission
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +121,8 @@ def prepare(conn: sqlite3.Connection, db_path: Path, config: Config) -> PrepareR
             ),
         )
         conn.commit()
+        if ok and config.autoapply.auto_send:
+            queue_submission(conn, match_id)
         (result.prepared if ok else result.failed).append(_label(row))
     return result
 
@@ -127,7 +131,8 @@ def notify_prepared(config: Config, result: PrepareResult, client: httpx.Client)
     """Une notification ntfy par préparation non vide, avec lien vers le dashboard."""
     if not result.prepared or config.notify.ntfy is None:
         return False
-    title = f"jobwatch : {len(result.prepared)} candidature(s) à valider"
+    action = "en cours d'envoi" if config.autoapply and config.autoapply.auto_send else "à valider"
+    title = f"jobwatch : {len(result.prepared)} candidature(s) {action}"
     # httpx encode les en-têtes en ASCII ; ntfy décode l'encodage RFC 2047.
     headers = {"Title": f"=?UTF-8?B?{base64.b64encode(title.encode()).decode()}?="}
     if config.autoapply is not None and config.autoapply.dashboard_url:

@@ -332,3 +332,49 @@ def test_mail_code_keeps_verification_link_and_code_from_html_email() -> None:
     assert "482913" in summary.text
     assert "https://x.myworkday.com/verify?t=abc" in summary.text
     assert "Objet : Vérifiez votre adresse" in format_messages([summary])
+
+
+def test_auto_send_queues_prepared_dossiers_but_not_failed_letters(
+    instance, monkeypatch
+) -> None:
+    db_path, config_path, _cv_id = instance
+    config_path.write_text(
+        config_path.read_text() + "  runner: worker\n  auto_send: true\n", encoding="utf-8"
+    )
+    conn = connect(db_path)
+    good = _seed_match(conn, company="Bonne", url="https://example.com/g", fit="high")
+    bad = _seed_match(conn, company="Ratée", url="https://example.com/b", fit="high")
+    conn.close()
+    letter = _fake_letter(db_path)
+
+    def run_job(path: Path, config, job_id: int) -> None:
+        check = connect(path)
+        match_id = check.execute(
+            "SELECT match_id FROM draft_job WHERE id = ?", (job_id,)
+        ).fetchone()[0]
+        check.close()
+        if match_id == bad:
+            fail = connect(path)
+            fail.execute(
+                "UPDATE draft_job SET status = 'failed', error = 'quota' WHERE id = ?", (job_id,)
+            )
+            fail.commit()
+            fail.close()
+            return
+        letter(path, config, job_id)
+
+    monkeypatch.setattr(prepare.draft, "run_job", run_job)
+    result = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+
+    conn = connect(db_path)
+    statuses = dict(conn.execute("SELECT match_id, status FROM submission_job").fetchall())
+    conn.close()
+    assert statuses == {good: "queued", bad: "failed"}
+
+
+def test_auto_send_requires_a_worker(tmp_path: Path, instance) -> None:
+    _db_path, config_path, _cv_id = instance
+    config_path.write_text(config_path.read_text() + "  auto_send: true\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="runner: worker"):
+        load_config(config_path)

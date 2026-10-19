@@ -125,6 +125,8 @@ draft: {}
 #   browser_profile: ~/.local/share/jobwatch/browser-profile  # sessions LinkedIn, WTTJ, ATS
 #   runner: local                       # local (Chrome du serveur) ou worker (poste d'envoi,
 #                                       # voir ops/mac-worker/install.sh)
+#   auto_send: false                    # true : envoi sans relecture dès la préparation
+#                                       # (exige runner: worker)
 #   daily_limit: 3                      # dossiers préparés par jour au plus
 #   claude_bin: claude                  # binaire Claude Code
 #   model: claude-sonnet-5-5            # optionnel : modèle de l'agent

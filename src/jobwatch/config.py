@@ -260,12 +260,18 @@ AUTOAPPLY_RUNNERS = ("local", "worker")
 
 @dataclass
 class AutoApplyConfig:
-    """Candidature assistée : `jw prepare` choisit et prépare, l'agent soumet après validation."""
+    """Candidature assistée : `jw prepare` choisit et prépare, l'agent soumet.
+
+    L'envoi part après le bouton « Envoyer », ou dès la préparation avec
+    `auto_send` (poste d'envoi `worker` requis).
+    """
 
     browser_profile: Path
     # 'local' : l'agent tourne sur ce serveur ; 'worker' : un poste d'envoi (Mac)
     # réclame les dossiers par `jw submission-claim` et rend son verdict.
     runner: str = "local"
+    # Met en file chaque dossier préparé, sans relecture : daily_limit reste le garde-fou.
+    auto_send: bool = False
     daily_limit: int = 3
     claude_bin: str = "claude"
     model: str | None = None
@@ -848,9 +854,15 @@ def _autoapply_from_dict(
     runner = raw.get("runner", "local")
     if runner not in AUTOAPPLY_RUNNERS:
         raise ConfigError(f"autoapply.runner doit être l'un de {list(AUTOAPPLY_RUNNERS)}")
+    auto_send = raw.get("auto_send", False)
+    if not isinstance(auto_send, bool):
+        raise ConfigError("autoapply.auto_send doit être true ou false")
+    if auto_send and runner != "worker":
+        raise ConfigError("autoapply.auto_send exige runner: worker (sinon personne ne traite la file)")
     return AutoApplyConfig(
         browser_profile=profile,
         runner=runner,
+        auto_send=auto_send,
         daily_limit=_positive_int(raw, "daily_limit", 3, "autoapply.daily_limit"),
         claude_bin=_optional_string(raw, "claude_bin", "autoapply.claude_bin") or "claude",
         model=_optional_string(raw, "model", "autoapply.model"),
