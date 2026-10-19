@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import imaplib
+import json
 import logging
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import click
@@ -20,6 +23,7 @@ from jobwatch.collectors.base import store_offers
 from jobwatch.config import Config, ConfigError, example_config_text, load_config
 from jobwatch.db import connect, init_db
 from jobwatch.digest import send_digest
+from jobwatch.draft import DraftError
 from jobwatch.enrich import EnrichError, enrich
 from jobwatch.library import LibraryError, migrate_draft_examples, migrate_external_documents
 from jobwatch.mailcode import format_messages, recent_messages
@@ -31,7 +35,20 @@ from jobwatch.prepare import prepare as prepare_applications
 from jobwatch.profile_sources import sources_for_profile
 from jobwatch.research import apply_research_fits, research_offers, unfitted_recent_offers
 from jobwatch.serve import ServeError, serve_http
-from jobwatch.submit import MAILCODE_CONFIG_ENV, SubmitError, queue_submission, run_submission
+from jobwatch.submit import (
+    MAILCODE_CONFIG_ENV,
+    SubmitError,
+    agent_args,
+    apply_agent_result,
+    build_dossier,
+    claim_submission,
+    dossier_files,
+    expire_stale_submissions,
+    fail_submission,
+    load_dossier,
+    queue_submission,
+    run_submission,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -606,6 +623,84 @@ def submit(config_path: Path | None, match_id: int) -> None:
         click.echo(f"preuve : {job['proof_path']}")
     if job["status"] != "submitted":
         raise SystemExit(1)
+
+
+@cli.command(name="submission-claim")
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def submission_claim(config_path: Path | None) -> None:
+    """Réserve le plus ancien envoi en file pour un poste d'envoi (JSON sur stdout)."""
+    config = _require_config(config_path)
+    if config.autoapply is None:
+        _fatal("bloc 'autoapply' absent de config.yaml")
+    conn = _open_db(config)
+    try:
+        expire_stale_submissions(conn, config.autoapply.timeout_seconds)
+        job_id = claim_submission(conn)
+        if job_id is None:
+            click.echo("{}")
+            return
+        try:
+            dossier = build_dossier(conn, config.db, job_id)
+        except (SubmitError, DraftError) as exc:
+            fail_submission(conn, job_id, exc)
+            click.echo(json.dumps({"job_id": job_id, "error": str(exc)}))
+            return
+    finally:
+        conn.close()
+    files = {
+        name: base64.b64encode((dossier.work_dir / name).read_bytes()).decode()
+        for name in dossier_files(dossier)
+    }
+    click.echo(json.dumps({
+        "job_id": job_id,
+        "url": dossier.url,
+        "timeout_seconds": config.autoapply.timeout_seconds,
+        "args": agent_args("playwright-cli", dossier.prompt, config.autoapply.model),
+        "files": files,
+    }))
+
+
+@cli.command(name="submission-finish")
+@click.argument("job_id", type=int)
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def submission_finish(config_path: Path | None, job_id: int) -> None:
+    """Enregistre le verdict d'un poste d'envoi (JSON sur stdin)."""
+    config = _require_config(config_path)
+    if config.autoapply is None:
+        _fatal("bloc 'autoapply' absent de config.yaml")
+    try:
+        report = json.loads(click.get_text_stream("stdin").read())
+    except ValueError:
+        _fatal("rapport JSON illisible sur stdin")
+    conn = _open_db(config)
+    try:
+        running = conn.execute(
+            "SELECT 1 FROM submission_job WHERE id = ? AND status = 'running'", (job_id,)
+        ).fetchone()
+        if running is None:
+            _fatal(f"le job {job_id} n'est pas en cours")
+        try:
+            dossier = load_dossier(config.db, job_id)
+            if report.get("timeout"):
+                raise subprocess.TimeoutExpired("claude", config.autoapply.timeout_seconds)
+            if report.get("error"):
+                raise SubmitError(f"poste d'envoi : {report['error']}"[:1000])
+            if report.get("proof_b64"):
+                (dossier.work_dir / "preuve.png").write_bytes(
+                    base64.b64decode(report["proof_b64"])
+                )
+            apply_agent_result(
+                conn, config.db, config.autoapply, dossier,
+                returncode=int(report.get("returncode", 1)),
+                stdout=str(report.get("stdout", "")),
+                stderr=str(report.get("stderr", "")),
+            )
+        except (SubmitError, DraftError, ValueError, subprocess.TimeoutExpired) as exc:
+            fail_submission(conn, job_id, exc)
+        job = conn.execute("SELECT status, reason FROM submission_job WHERE id = ?", (job_id,)).fetchone()
+    finally:
+        conn.close()
+    click.echo(f"{job['status']} : {job['reason'] or ''}")
 
 
 @cli.command(name="mail-code")

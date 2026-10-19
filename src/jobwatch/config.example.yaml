@@ -123,6 +123,8 @@ draft: {}
 # Chrome headless. Rien ne part sans ce bouton. Pour activer, supprimez « autoapply: {} »
 # ci-dessous, puis décommentez et remplissez :
 #   browser_profile: ~/.local/share/jobwatch/browser-profile  # sessions LinkedIn, WTTJ, ATS
+#   runner: local                       # local (Chrome du serveur) ou worker (poste d'envoi,
+#                                       # voir ops/mac-worker/install.sh)
 #   daily_limit: 3                      # dossiers préparés par jour au plus
 #   claude_bin: claude                  # binaire Claude Code
 #   model: claude-sonnet-5-5            # optionnel : modèle de l'agent

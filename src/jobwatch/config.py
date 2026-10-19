@@ -255,11 +255,17 @@ class ImapConfig:
     port: int = 993
 
 
+AUTOAPPLY_RUNNERS = ("local", "worker")
+
+
 @dataclass
 class AutoApplyConfig:
     """Candidature assistée : `jw prepare` choisit et prépare, l'agent soumet après validation."""
 
     browser_profile: Path
+    # 'local' : l'agent tourne sur ce serveur ; 'worker' : un poste d'envoi (Mac)
+    # réclame les dossiers par `jw submission-claim` et rend son verdict.
+    runner: str = "local"
     daily_limit: int = 3
     claude_bin: str = "claude"
     model: str | None = None
@@ -839,8 +845,12 @@ def _autoapply_from_dict(
     profile = _optional_path(raw, "browser_profile", "autoapply.browser_profile")
     if profile is None:
         raise ConfigError("autoapply.browser_profile est requis quand autoapply est présent")
+    runner = raw.get("runner", "local")
+    if runner not in AUTOAPPLY_RUNNERS:
+        raise ConfigError(f"autoapply.runner doit être l'un de {list(AUTOAPPLY_RUNNERS)}")
     return AutoApplyConfig(
         browser_profile=profile,
+        runner=runner,
         daily_limit=_positive_int(raw, "daily_limit", 3, "autoapply.daily_limit"),
         claude_bin=_optional_string(raw, "claude_bin", "autoapply.claude_bin") or "claude",
         model=_optional_string(raw, "model", "autoapply.model"),

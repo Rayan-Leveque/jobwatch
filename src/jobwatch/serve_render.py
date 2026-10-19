@@ -600,7 +600,12 @@ def _submission_status_html(match_id: int, job: sqlite3.Row | None) -> str:
         return ""
     status = str(job["status"])
     reason = html.escape(str(job["reason"] or ""))
-    if status in ("queued", "running"):
+    if status == "queued":
+        return (
+            '<span class="draft-spinner" aria-hidden="true"></span>'
+            "<span>En file d'attente : l'envoi démarre dès que le poste d'envoi est disponible…</span>"
+        )
+    if status == "running":
         return (
             '<span class="draft-spinner" aria-hidden="true"></span>'
             "<span>Envoi en cours, l'agent remplit le formulaire (quelques minutes)…</span>"

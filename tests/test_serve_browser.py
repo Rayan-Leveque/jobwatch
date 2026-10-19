@@ -1218,7 +1218,7 @@ def test_send_prepared_application_from_phone_without_reload(browser, review_das
     _assert_no_horizontal_overflow(page)
 
     card.get_by_role("button", name="Envoyer la candidature").tap()
-    expect(card.locator(".submit-area")).to_contain_text("Envoi en cours")
+    expect(card.locator(".submit-area")).to_contain_text("En file d'attente")
     expect(card.locator(".submit-ok")).to_contain_text(
         "Confirmation affichée par le site.", timeout=12_000
     )

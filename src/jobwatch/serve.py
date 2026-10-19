@@ -564,7 +564,8 @@ def make_handler(
                     self._send_json(409, {"error": str(exc)})
                     return
                 job = self._latest_submission(conn, match_id)
-            _spawn_submission_job(db_path, autoapply_config, job_id)
+            if autoapply_config.runner == "local":
+                _spawn_submission_job(db_path, autoapply_config, job_id)
             self._send_json(
                 202, {"status": "queued", "html": _submission_status_html(match_id, job)}
             )
@@ -1234,8 +1235,13 @@ def _fail_interrupted_draft_jobs(db_path: Path) -> None:
         conn.close()
 
 
-def _interrupt_submission_jobs(db_path: Path) -> None:
-    """Rend la main sur les envois coupés par un arrêt : le formulaire a pu partir à moitié."""
+def _interrupt_submission_jobs(db_path: Path, config: AutoApplyConfig | None) -> None:
+    """Rend la main sur les envois coupés par un arrêt : le formulaire a pu partir à moitié.
+
+    Les envois d'un poste distant ne dépendent pas de ce processus et continuent.
+    """
+    if config is not None and config.runner != "local":
+        return
     conn = connect(db_path)
     try:
         conn.execute(
@@ -1263,7 +1269,7 @@ def serve_http(
 ) -> None:
     """Crée le serveur HTTP et le sert jusqu'à Ctrl-C."""
     _fail_interrupted_draft_jobs(db_path)
-    _interrupt_submission_jobs(db_path)
+    _interrupt_submission_jobs(db_path, autoapply_config)
     try:
         server = ThreadingHTTPServer(
             (host, port),
