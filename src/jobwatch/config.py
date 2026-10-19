@@ -227,6 +227,14 @@ DRAFT_TRACKS = ("engineer", "project", "all")
 
 
 @dataclass
+class ReviewConfig:
+    """Relecture de chaque lettre par Claude Code, sans outil, avant qu'elle soit prête."""
+
+    model: str
+    claude_bin: str = "claude"
+
+
+@dataclass
 class DraftConfig:
     model: str
     # Exécuteur LLM : 'opencode' (API, facturé à l'appel) ou 'codex' (CLI codex exec,
@@ -243,6 +251,8 @@ class DraftConfig:
     # instance personnalisée utilise la piste unifiée 'all', qui retombe sur la
     # réunion des autres pistes quand elle n'est pas renseignée.
     examples: dict[str, list[Path]] = field(default_factory=dict)
+    # Relecteur des faits et de la justesse ; une lettre refusée deux fois échoue.
+    review: ReviewConfig | None = None
 
 
 @dataclass
@@ -799,6 +809,21 @@ def _draft_from_dict(raw: object) -> DraftConfig | None:
     return DraftConfig(
         model=model, runner=runner, opencode_bin=opencode_bin, codex_bin=codex_bin,
         api_key=api_key, variant=variant, examples=examples,
+        review=_review_from_dict(raw.get("review")),
+    )
+
+
+def _review_from_dict(raw: object) -> ReviewConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'draft.review' doit être un mapping")
+    model = _optional_string(raw, "model", "draft.review.model")
+    if model is None:
+        raise ConfigError("draft.review.model est requis quand review est présent")
+    return ReviewConfig(
+        model=model,
+        claude_bin=_optional_string(raw, "claude_bin", "draft.review.claude_bin") or "claude",
     )
 
 

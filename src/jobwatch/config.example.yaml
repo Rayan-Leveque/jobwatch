@@ -110,6 +110,8 @@ enrich: {}
 #   model: opencode-go/gpt-5.6-luna     # modèle de rédaction (lettre destinée à un employeur)
 #   api_key: sk-or-v1-...               # clé OpenRouter (requise avec runner openrouter)
 #   variant: max                        # optionnel : effort de raisonnement
+#   review:                             # optionnel : relecture par Claude Code avant validation
+#     model: claude-sonnet-5-5
 #   examples:                           # lettres .tex existantes servant d'exemples de format et de ton
 #     engineer:
 #       - ~/lettres/exemple_ingenieur.tex
