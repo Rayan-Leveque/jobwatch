@@ -29,7 +29,7 @@ SUBMITTED = {
 }
 
 
-def _worker_env(tmp_path: Path, config_path: Path, attach_ok: bool = True) -> dict[str, str]:
+def _worker_env(tmp_path: Path, config_path: Path, open_ok: bool = True) -> dict[str, str]:
     bins = tmp_path / "mac-bin"
     bins.mkdir(exist_ok=True)
     calls = tmp_path / "browser-calls.txt"
@@ -37,7 +37,7 @@ def _worker_env(tmp_path: Path, config_path: Path, attach_ok: bool = True) -> di
         bins, "fake-playwright-cli",
         "import sys\n"
         f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
-        f"sys.exit(0 if {attach_ok!r} or sys.argv[1] != 'attach' else 1)\n",
+        f"sys.exit(0 if {open_ok!r} or sys.argv[1] != 'open' else 1)\n",
     )
     claude = _fake_bin(
         bins, "fake-claude",
@@ -58,6 +58,7 @@ def _worker_env(tmp_path: Path, config_path: Path, attach_ok: bool = True) -> di
         "CLAUDE_BIN": str(claude),
         "PLAYWRIGHT_CLI": str(browser),
         "JOBWATCH_WORK_ROOT": str(tmp_path / "mac-work"),
+        "JOBWATCH_PROFILE": str(tmp_path / "mac-profile"),
         "HOME": str(tmp_path),
     }
 
@@ -109,15 +110,27 @@ def test_worker_claims_dossier_runs_agent_and_records_application(
     assert not any(name.startswith(".mot_de_passe") for name in received)
     # Le faux `jw` du Mac refuse toute autre commande que mail-code.
     assert (mac_dir / "shim_rc.txt").read_text() != "0"
+    # Chrome headless sur le profil dédié, fermé après l'agent : le Chrome habituel n'est pas touché.
     calls = (tmp_path / "browser-calls.txt").read_text().splitlines()
-    assert calls[0] == "attach --extension=chrome"
-    assert calls[1] == "tab-new https://example.com/offer"
-    assert calls[-1] == "detach"
+    assert calls == [
+        f"open https://example.com/offer --browser=chrome --profile={tmp_path / 'mac-profile'}",
+        "close",
+    ]
     argv = json.loads((tmp_path / "argv.json").read_text())
     assert "Bash(playwright-cli cookie*)" in argv
 
 
-def test_worker_leaves_queue_untouched_when_chrome_is_unreachable(
+def test_worker_without_queued_dossier_launches_no_browser(
+    instance, tmp_path: Path  # noqa: F811
+) -> None:
+    _db_path, config_path, _cv_id = instance
+    _worker_config(config_path)
+    done = _run_worker(_worker_env(tmp_path, config_path))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert not (tmp_path / "browser-calls.txt").exists()
+
+
+def test_worker_reports_chrome_failure_instead_of_keeping_the_job(
     instance, tmp_path: Path  # noqa: F811
 ) -> None:
     db_path, config_path, cv_id = instance
@@ -127,15 +140,15 @@ def test_worker_leaves_queue_untouched_when_chrome_is_unreachable(
     queue_submission(conn, match_id)
     conn.close()
 
-    done = _run_worker(_worker_env(tmp_path, config_path, attach_ok=False))
-    assert done.returncode == 0
-    assert "Chrome injoignable" in done.stdout
+    done = _run_worker(_worker_env(tmp_path, config_path, open_ok=False))
+    assert done.returncode == 0, done.stdout + done.stderr
     conn = connect(db_path)
-    status = conn.execute(
-        "SELECT status FROM submission_job WHERE match_id = ?", (match_id,)
-    ).fetchone()[0]
+    job = conn.execute(
+        "SELECT status, reason FROM submission_job WHERE match_id = ?", (match_id,)
+    ).fetchone()
     conn.close()
-    assert status == "queued"
+    assert job["status"] == "failed"
+    assert "Chrome ne s'ouvre pas" in job["reason"]
 
 
 def test_worker_timeout_hands_dossier_back(instance, tmp_path: Path) -> None:  # noqa: F811
