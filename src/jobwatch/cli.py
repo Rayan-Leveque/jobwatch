@@ -646,9 +646,13 @@ def submission_claim(config_path: Path | None) -> None:
     try:
         if expire_stale_submissions(conn, config.autoapply.timeout_seconds):
             _alert_worker(config, "un envoi est resté bloqué sur le poste d'envoi, rendu à la main")
+        # Compteur affiché dans la barre des menus du Mac.
+        sent = conn.execute(
+            "SELECT COUNT(*) FROM submission_job WHERE status = 'submitted'"
+        ).fetchone()[0]
         job_id = claim_submission(conn)
         if job_id is None:
-            click.echo("{}")
+            click.echo(json.dumps({"sent": sent}))
             return
         try:
             dossier = build_dossier(conn, config.db, job_id)
@@ -664,6 +668,8 @@ def submission_claim(config_path: Path | None) -> None:
     }
     click.echo(json.dumps({
         "job_id": job_id,
+        "sent": sent,
+        "label": f"{dossier.company} - {dossier.title}",
         "url": dossier.url,
         "timeout_seconds": config.autoapply.timeout_seconds,
         "args": agent_args("playwright-cli", dossier.prompt, config.autoapply.model),

@@ -286,6 +286,7 @@ class Dossier:
     letter_name: str
     prompt: str
     title: str = ""
+    company: str = ""
 
 
 _PENDING_PASSWORD = ".mot_de_passe_nouveau_compte"
@@ -371,6 +372,7 @@ def build_dossier(conn: sqlite3.Connection, db_path: Path, job_id: int) -> Dossi
     dossier = Dossier(
         job_id=job_id, match_id=int(match["id"]), url=str(match["url"]), work_dir=work_dir,
         cv_name=cv_name, letter_name=letter_name, prompt=prompt, title=str(match["title"] or ""),
+        company=company,
     )
     meta = {k: v for k, v in dossier.__dict__.items() if k != "work_dir"}
     (work_dir / _DOSSIER_META).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")

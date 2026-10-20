@@ -28,6 +28,9 @@ const SUPPORT = join(homedir(), "Library", "Application Support", "jobwatch-work
 const PROFILE = env.JOBWATCH_PROFILE ?? join(SUPPORT, "chrome-profile");
 const WORK_ROOT = env.JOBWATCH_WORK_ROOT ?? join(homedir(), "Library", "Caches", "jobwatch-worker");
 const SESSION = "jobwatch-mac";
+// Lu par l'icône de barre des menus (jobwatch-menubar.mjs).
+const STATUS = join(SUPPORT, "status.json");
+const HISTORY_SIZE = 10;
 const LOGIN_PAGES = [
   "https://www.linkedin.com/login",
   "https://www.welcometothejungle.com/fr/signin",
@@ -60,6 +63,20 @@ function browser(cwd, ...args) {
   return spawnSync(BROWSER, args, {
     cwd, encoding: "utf8", timeout: 120_000, env: { ...env, PLAYWRIGHT_CLI_SESSION: SESSION },
   });
+}
+
+function readStatus() {
+  try {
+    return JSON.parse(readFileSync(STATUS, "utf8"));
+  } catch {
+    return { history: [] };
+  }
+}
+
+function saveStatus(changes) {
+  const status = { ...readStatus(), ...changes, updated: new Date().toISOString() };
+  mkdirSync(SUPPORT, { recursive: true, mode: 0o700 });
+  writeFileSync(STATUS, JSON.stringify(status), { mode: 0o600 });
 }
 
 class OfferGone extends Error {
@@ -122,6 +139,7 @@ async function login() {
 async function main() {
   mkdirSync(WORK_ROOT, { recursive: true, mode: 0o700 });
   const claim = JSON.parse(remote(`${JW} submission-claim`) || "{}");
+  saveStatus({ sent: claim.sent, error: null, current: null });
   if (!claim.job_id) return;
   if (claim.error) {
     log(`job ${claim.job_id} refusé par le serveur : ${claim.error}`);
@@ -132,6 +150,8 @@ async function main() {
 
 async function runJob(claim) {
   const workDir = join(WORK_ROOT, String(claim.job_id));
+  const label = claim.label || `dossier ${claim.job_id}`;
+  saveStatus({ current: { label, started: new Date().toISOString(), timeout: claim.timeout_seconds } });
   let report;
   try {
     // Dans le try : un disque plein est rapporté au serveur, qui alerte par ntfy.
@@ -172,7 +192,16 @@ async function runJob(claim) {
   } catch (error) {
     report = error instanceof OfferGone ? { expired: error.status } : { error: String(error.message || error) };
   }
-  log(`job ${claim.job_id} : ${remote(`${JW} submission-finish ${claim.job_id}`, JSON.stringify(report)).trim()}`);
+  const verdict = remote(`${JW} submission-finish ${claim.job_id}`, JSON.stringify(report)).trim();
+  log(`job ${claim.job_id} : ${verdict}`);
+  const [, status = "failed", reason = verdict] = /^(\w+) : ([\s\S]*)$/.exec(verdict) || [];
+  const entry = { label, status, reason, at: new Date().toISOString() };
+  const { history = [], sent = 0 } = readStatus();
+  saveStatus({
+    current: null,
+    sent: sent + (status === "submitted" ? 1 : 0),
+    history: [entry, ...history].slice(0, HISTORY_SIZE),
+  });
 }
 
 try {
@@ -180,5 +209,6 @@ try {
   else await main();
 } catch (error) {
   log(`échec : ${error.message || error}`);
+  if (process.argv[2] !== "login") saveStatus({ current: null, error: String(error.message || error) });
   process.exitCode = 1;
 }
