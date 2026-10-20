@@ -39,6 +39,8 @@ COLUMN_MIGRATIONS = (
     ("candidate_profile", "cover_letters_enabled", "INTEGER NOT NULL DEFAULT 1"),
     ("candidate_profile", "locations_json", "TEXT NOT NULL DEFAULT '[]'"),
     ("candidate_profile", "include_remote", "INTEGER NOT NULL DEFAULT 0"),
+    # 'prepare' : lettre écrite par `jw prepare`, que le serveur ne doit pas toucher.
+    ("draft_job", "owner", "TEXT"),
 )
 
 

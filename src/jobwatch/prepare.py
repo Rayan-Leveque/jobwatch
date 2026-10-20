@@ -13,6 +13,7 @@ d'envoi (voir jobwatch.submit).
 from __future__ import annotations
 
 import base64
+import fcntl
 import logging
 import re
 import sqlite3
@@ -38,6 +39,10 @@ _PROJECT_TITLE_RES = tuple(
 
 class PrepareError(Exception):
     """Préparation impossible : profil sans CV, bloc absent..."""
+
+
+class PrepareBusy(PrepareError):
+    """Une autre préparation tourne déjà (minuterie, cron ou lancement manuel)."""
 
 
 @dataclass
@@ -117,9 +122,35 @@ def _label(row: sqlite3.Row) -> str:
 def prepare(
     conn: sqlite3.Connection, db_path: Path, config: Config, client: httpx.Client
 ) -> PrepareResult:
-    """Prépare jusqu'à `daily_limit` dossiers par jour ; idempotent sur la journée."""
+    """Prépare jusqu'à `daily_limit` dossiers par jour ; idempotent sur la journée.
+
+    Lancée souvent (minuterie) : une seule préparation à la fois, les suivantes
+    s'arrêtent aussitôt.
+    """
     if config.autoapply is None or config.draft is None:
         raise PrepareError("bloc 'autoapply' absent de config.yaml")
+    lock = db_path.with_name(db_path.name + ".prepare.lock").open("w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        raise PrepareBusy("préparation déjà en cours") from None
+    try:
+        return _prepare(conn, db_path, config, client)
+    finally:
+        lock.close()
+
+
+def _prepare(
+    conn: sqlite3.Connection, db_path: Path, config: Config, client: httpx.Client
+) -> PrepareResult:
+    # Verrou tenu : une lettre encore « en cours » vient d'une préparation tuée.
+    conn.execute(
+        "UPDATE draft_job SET status = 'failed', error = 'préparation interrompue', "
+        "finished_at = datetime('now') "
+        "WHERE owner = 'prepare' AND status IN ('running', 'queued')"
+    )
+    conn.commit()
     profile = _profile(conn)
     remaining = config.autoapply.daily_limit - _prepared_today(conn)
     result = PrepareResult()
@@ -141,8 +172,8 @@ def prepare(
         remaining -= 1
         conn.execute("UPDATE match SET state = 'later' WHERE id = ?", (match_id,))
         cur = conn.execute(
-            "INSERT INTO draft_job (match_id, track, cv_library_id, status) "
-            "VALUES (?, ?, ?, 'queued')",
+            "INSERT INTO draft_job (match_id, track, cv_library_id, status, owner) "
+            "VALUES (?, ?, ?, 'queued', 'prepare')",
             (match_id, draft_track(str(row["title"] or "")), profile["cv_library_id"]),
         )
         draft_job_id = int(cur.lastrowid)
