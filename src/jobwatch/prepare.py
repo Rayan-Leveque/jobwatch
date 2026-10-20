@@ -1,7 +1,8 @@
 """Préparation quotidienne des candidatures assistées : `jw prepare` (bloc autoapply).
 
 Choisit les meilleurs matchs neufs (fit high, mêmes filtres que la section
-Priorité haute du dashboard), écarte ceux dont l'offre a disparu (404, 410)
+Priorité haute du dashboard), puis les matchs « À candidater » gardés au swipe
+sans dossier (fit puis fraîcheur), écarte ceux dont l'offre a disparu (404, 410)
 sans entamer la limite du jour, passe les autres « À candidater », génère leur lettre
 par le pipeline de draft.py et crée un dossier `submission_job` en attente de
 validation. Sans `auto_send`, rien ne part chez un employeur avant le tap
@@ -24,7 +25,7 @@ from jobwatch import draft
 from jobwatch.config import Config
 from jobwatch.digest import NTFY_URL
 from jobwatch.enrich import TERMINAL_HTTP_STATUSES, _source_http_headers
-from jobwatch.serve_queries import PROJECT_TITLE_PATTERNS, _priority_matches
+from jobwatch.serve_queries import PROJECT_TITLE_PATTERNS, _later_matches, _priority_matches
 from jobwatch.submit import queue_submission
 
 log = logging.getLogger(__name__)
@@ -77,11 +78,14 @@ def _candidates(conn: sqlite3.Connection, account_id: int) -> list[sqlite3.Row]:
         int(row["match_id"])
         for row in conn.execute("SELECT DISTINCT match_id FROM submission_job")
     }
-    return [
+    priority = [
         row
         for row in _priority_matches(conn, "all", account_id)
         if row["state"] == "new" and int(row["id"]) not in already
     ]
+    # Déjà choisis par l'humain : leur ancienne lettre éventuelle est réécrite au
+    # format court du pipeline actuel.
+    return priority + _later_matches(conn, "all")
 
 
 def offer_status(url: str, client: httpx.Client) -> int | None:
