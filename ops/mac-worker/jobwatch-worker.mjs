@@ -79,6 +79,13 @@ function saveStatus(changes) {
   writeFileSync(STATUS, JSON.stringify(status), { mode: 0o600 });
 }
 
+// Si la session playwright-cli meurt, son Chrome reste ouvert et verrouille le
+// profil : tous les envois suivants échoueraient (« Browser is already in use »).
+// Seul le worker utilise ce profil, un passage à la fois.
+function killProfileChrome() {
+  spawnSync("pkill", ["-f", "--", `--user-data-dir=${PROFILE}`]);
+}
+
 class OfferGone extends Error {
   constructor(status) {
     super(`offre expirée (HTTP ${status})`);
@@ -161,6 +168,7 @@ async function runJob(claim) {
     }
     const binDir = join(workDir, ".bin");
     writeMailShim(binDir);
+    killProfileChrome();
     try {
       await openBrowser(workDir, claim.url, "--headed");
       log(`job ${claim.job_id} : agent lancé sur ${claim.url}`);
@@ -188,6 +196,7 @@ async function runJob(claim) {
     } finally {
       // Même si la page n'a pas chargé, le navigateur est ouvert : on le ferme.
       browser(workDir, "close");
+      killProfileChrome();
     }
   } catch (error) {
     report = error instanceof OfferGone ? { expired: error.status } : { error: String(error.message || error) };
