@@ -139,4 +139,5 @@ draft: {}
 #     host: imap.gmail.com
 #     user: vous@gmail.com
 #     password: mot-de-passe-d-application
+#     smtp_host: smtp.gmail.com         # optionnel : envoie les candidatures « par mail »
 autoapply: {}

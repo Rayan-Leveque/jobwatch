@@ -257,12 +257,15 @@ class DraftConfig:
 
 @dataclass
 class ImapConfig:
-    """Boîte lue par `jw mail-code` pour les codes de vérification des ATS."""
+    """Boîte du candidat : codes de vérification des ATS (`jw mail-code`, IMAP) et,
+    avec `smtp_host`, envoi des candidatures par mail (même compte)."""
 
     host: str
     user: str
     password: str
     port: int = 993
+    smtp_host: str | None = None
+    smtp_port: int = 465
 
 
 AUTOAPPLY_RUNNERS = ("local", "worker")
@@ -859,7 +862,12 @@ def _imap_from_dict(raw: object) -> ImapConfig | None:
         if value is None:
             raise ConfigError(f"autoapply.imap.{key} est requis quand imap est présent")
         values[key] = value
-    return ImapConfig(**values, port=_positive_int(raw, "port", 993, "autoapply.imap.port"))
+    return ImapConfig(
+        **values,
+        port=_positive_int(raw, "port", 993, "autoapply.imap.port"),
+        smtp_host=_optional_string(raw, "smtp_host", "autoapply.imap.smtp_host"),
+        smtp_port=_positive_int(raw, "smtp_port", 465, "autoapply.imap.smtp_port"),
+    )
 
 
 def _autoapply_from_dict(
