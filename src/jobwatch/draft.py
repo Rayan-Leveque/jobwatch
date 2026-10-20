@@ -89,7 +89,15 @@ PROMPT = (
     "d'appel, trois paragraphes et {max_words} mots au plus pour tout le corps - une accroche "
     "propre à cette offre, une preuve concrète tirée du CV, une clôture d'une ou deux "
     "phrases. Pas de formules creuses ni d'inventaire de compétences. Pour la longueur, "
-    "cette règle prime sur les EXEMPLE. " + _BODY_MARKERS_INSTRUCTION
+    "cette règle prime sur les EXEMPLE. Écris comme le candidat parlerait à un recruteur : "
+    "phrases courtes, mots courants, chaque phrase apporte un fait (ce que le candidat a "
+    "fait, avec quoi, pour quel résultat) ou une raison précise de postuler. Interdits : "
+    "résumer l'annonce au recruteur (« le poste de X associe / demande... ») ; les phrases "
+    "qui commentent la lettre ou relient les expériences de façon abstraite (« cette "
+    "articulation entre... », « ces expériences me donnent une base concrète », « constitue "
+    "une base solide pour ») ; « mettre mon expérience au service de », « je souhaite "
+    "contribuer à », « passionné », « au cœur de », « en phase avec », « véritable », "
+    "« enrichissant » ; les énumérations de trois termes. " + _BODY_MARKERS_INSTRUCTION
 )
 
 #: Corps de lettre (formule d'appel comprise) au-delà duquel la lettre est réécrite.
@@ -110,8 +118,12 @@ REVIEW_PROMPT = (
     "chiffre, date) absent du CV et du profil ; 2) nom de l'entreprise ou intitulé du "
     "poste différent de l'offre ; 3) coordonnées différentes du profil ; 4) texte à "
     "compléter ([Nom], XXX...) ou reste de code visible dans le rendu ; 5) faute de "
-    "français ; 6) lettre générique qui ne parle pas de cette offre. Ignore les "
-    "préférences de style. Réponds avec ok=true et issues=[] si la lettre peut partir, "
+    "français ; 6) lettre générique qui ne parle pas de cette offre ; 7) phrase qui "
+    "sonne écrite par une IA : résumé de l'annonce renvoyé au recruteur, phrase sans "
+    "fait qui commente ou relie les expériences (« ces expériences me donnent une base "
+    "concrète », « cette articulation entre... »), formule toute faite (« mettre mon "
+    "expérience au service de », « passionné », « au cœur de »). Cite la phrase. Ignore "
+    "les autres préférences de style. Réponds avec ok=true et issues=[] si la lettre peut partir, "
     "sinon ok=false et une phrase courte et actionnable par problème. issues ne "
     "contient que des corrections à faire, jamais une vérification réussie."
 )
