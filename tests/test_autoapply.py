@@ -186,6 +186,8 @@ def test_prepare_cli_respects_daily_limit_and_runs_once_per_day(
         for i in range(3)
     ]
     medium = _seed_match(conn, company="Moyen", url="https://example.com/m", fit="medium")
+    # Gardée au swipe : passe après la Priorité haute, donc hors limite ici.
+    _seed_match(conn, company="Swipée", url="https://example.com/s", state="later")
     conn.close()
     monkeypatch.setattr(prepare.draft, "run_job", _fake_letter(db_path))
 
@@ -207,22 +209,32 @@ def test_prepare_cli_respects_daily_limit_and_runs_once_per_day(
     assert states[medium] == "new"
 
 
-def test_prepared_dossier_moves_from_later_to_review_section(instance, monkeypatch) -> None:
+def test_prepare_takes_swiped_matches_after_priority_ones(instance, monkeypatch) -> None:
     db_path, config_path, _cv_id = instance
     conn = connect(db_path)
     _seed_match(conn, company="Préparée", url="https://example.com/p", fit="high")
-    _seed_match(conn, company="ManuelleCo", url="https://example.com/l", state="later")
+    swiped = _seed_match(conn, company="ManuelleCo", url="https://example.com/l", state="later")
+    # Ancienne lettre du swipe : un nouveau dossier la réécrit au format court.
+    conn.execute(
+        "INSERT INTO draft_job (match_id, track, status) VALUES (?, 'engineer', 'ok')", (swiped,)
+    )
+    conn.commit()
     conn.close()
     monkeypatch.setattr(prepare.draft, "run_job", _fake_letter(db_path))
-    CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    result = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    assert "2 candidature(s) à valider" in result.output
+    assert result.output.index("Préparée") < result.output.index("ManuelleCo")
 
     conn = connect(db_path)
     page = serve.render_page(conn, "all", draft_enabled=True)
+    letters = conn.execute(
+        "SELECT COUNT(*) FROM draft_job WHERE match_id = ?", (swiped,)
+    ).fetchone()[0]
     conn.close()
+    assert letters == 2
     review = page.split('data-section="review"')[1].split("</details>")[0]
-    later = page.split('data-section="later"')[1].split("</details>")[0]
-    assert "Préparée" in review and "Envoyer la candidature" in review
-    assert "ManuelleCo" in later and "Préparée" not in later
+    assert "Préparée" in review and "ManuelleCo" in review and "Envoyer la candidature" in review
+    assert "ManuelleCo" not in page.split('data-section="later"')[1].split("</details>")[0]
 
 
 def _fake_bin(directory: Path, name: str, body: str) -> Path:
