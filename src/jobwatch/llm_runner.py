@@ -54,6 +54,10 @@ def opencode_text(stdout: str) -> str:
     return "\n".join(chunks)
 
 
+#: Message de codex quand le quota du compte ChatGPT est épuisé.
+CODEX_USAGE_LIMIT = "hit your usage limit"
+
+
 def run_codex(
     *,
     binary: str,
@@ -63,8 +67,11 @@ def run_codex(
     timeout: float,
     variant: str | None = None,
     output_schema: dict | None = None,
+    fallback_homes: list[Path] | tuple[Path, ...] = (),
 ) -> str:
     """Run read-only codex, returning its file-based final response.
+
+    Quota du compte épuisé : relance avec le CODEX_HOME suivant de `fallback_homes`.
 
     L'attache passe par stdin (bloc <stdin> côté codex) et la réponse finale
     est écrite par codex dans un fichier (-o) : pas de limite d'argument ni
@@ -90,10 +97,14 @@ def run_codex(
             if variant:
                 command += ["-c", f"model_reasoning_effort={variant}"]
             command.append(prompt)
-            completed = subprocess.run(
-                command, input=attachment, capture_output=True, text=True,
-                timeout=timeout, check=False, cwd=tmp_dir,
-            )
+            for home in (None, *fallback_homes):
+                env = None if home is None else {**os.environ, "CODEX_HOME": str(home)}
+                completed = subprocess.run(
+                    command, input=attachment, capture_output=True, text=True,
+                    timeout=timeout, check=False, cwd=tmp_dir, env=env,
+                )
+                if CODEX_USAGE_LIMIT not in completed.stdout + completed.stderr:
+                    break
             if completed.returncode != 0:
                 raise LLMRunnerError(f"codex a quitté avec le code {completed.returncode}")
             try:

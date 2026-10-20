@@ -381,7 +381,8 @@ def _call_codex(config: DraftConfig, prompt: str, attachment: str) -> str:
     try:
         text = run_codex(binary=config.codex_bin, model=config.model,
                          prompt=CODEX_PREAMBLE + prompt, attachment=attachment,
-                         timeout=CODEX_TIMEOUT_SECONDS, variant=config.variant)
+                         timeout=CODEX_TIMEOUT_SECONDS, variant=config.variant,
+                         fallback_homes=config.codex_fallback_homes)
     except LLMRunnerError as exc:
         raise DraftError(str(exc)) from exc
     if not text.strip():

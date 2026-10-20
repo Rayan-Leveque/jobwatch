@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from jobwatch.llm_runner import LLMRunnerError, run_pi
+from jobwatch.llm_runner import LLMRunnerError, run_codex, run_pi
 
 
 def test_run_pi_is_ephemeral_toolless_and_attaches_untrusted_text(monkeypatch) -> None:
@@ -93,3 +93,28 @@ def test_run_pi_wraps_timeout(monkeypatch) -> None:
             attachment="annonce",
             timeout=3,
         )
+
+
+def test_run_codex_switches_account_when_quota_is_used_up(tmp_path: Path) -> None:
+    """Faux codex : le compte principal a épuisé son quota, celui de secours répond."""
+    spare = tmp_path / "codex-spare"
+    calls = tmp_path / "homes.txt"
+    codex = tmp_path / "codex"
+    codex.write_text(
+        "#!/bin/sh\n"
+        f'echo "${{CODEX_HOME:-principal}}" >> {calls}\n'
+        f'if [ "$CODEX_HOME" != "{spare}" ]; then\n'
+        "  echo \"ERROR: You've hit your usage limit. Upgrade to Pro\" >&2; exit 1\n"
+        "fi\n"
+        'while [ "$1" != "-o" ]; do shift; done\n'
+        'echo "lettre" > "$2"\n'
+    )
+    codex.chmod(0o755)
+
+    text = run_codex(binary=str(codex), model="m", prompt="p", attachment="a", timeout=30,
+                     fallback_homes=[spare])
+    assert text.strip() == "lettre"
+    assert calls.read_text().split() == ["principal", str(spare)]
+    # Sans compte de secours, l'échec reste visible.
+    with pytest.raises(LLMRunnerError):
+        run_codex(binary=str(codex), model="m", prompt="p", attachment="a", timeout=30)
