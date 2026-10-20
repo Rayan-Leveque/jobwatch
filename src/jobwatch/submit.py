@@ -25,6 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -149,7 +150,9 @@ def _save_account(db_path: Path, domain: str, email: str, password: str) -> None
 
 
 def _file_stem(text: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")[:40] or "Entreprise"
+    """Nom de fichier ASCII lisible : « Défense » devient « Defense », pas « D_fense »."""
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    return re.sub(r"[^A-Za-z0-9]+", "_", ascii_text).strip("_")[:60].rstrip("_") or "Entreprise"
 
 
 def _browser_env(config: AutoApplyConfig) -> dict[str, str]:
