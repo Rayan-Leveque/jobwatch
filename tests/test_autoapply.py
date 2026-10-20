@@ -153,6 +153,48 @@ def test_prepare_skips_withdrawn_offers_without_using_the_daily_limit(
     assert states[gone_now] == states[gone_known] == "discarded"
 
 
+def test_prepare_runs_alone_and_survives_server_restart(instance, monkeypatch) -> None:
+    import fcntl
+
+    db_path, config_path, _cv_id = instance
+    conn = connect(db_path)
+    match_id = _seed_match(conn, company="Seule", url="https://example.com/s", fit="high")
+    killed = conn.execute(
+        "INSERT INTO draft_job (match_id, track, status, owner) "
+        "VALUES (?, 'engineer', 'running', 'prepare')", (match_id,),
+    ).lastrowid
+    from_ui = conn.execute(
+        "INSERT INTO draft_job (match_id, track, status) VALUES (?, 'engineer', 'running')",
+        (match_id,),
+    ).lastrowid
+    conn.commit()
+    conn.close()
+    # Le dashboard redémarre (déploiement) : seule la lettre lancée par lui échoue.
+    serve._fail_interrupted_draft_jobs(db_path)
+    monkeypatch.setattr(prepare.draft, "run_job", _fake_letter(db_path))
+
+    with open(db_path.with_name(db_path.name + ".prepare.lock"), "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        busy = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    assert busy.exit_code == 0 and "préparation déjà en cours" in busy.output
+    conn = connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM submission_job").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT status FROM draft_job WHERE id = ?", (killed,)
+    ).fetchone()[0] == "running"
+    conn.close()
+
+    done = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    assert "1 candidature(s) à valider" in done.output
+    conn = connect(db_path)
+    statuses = dict(conn.execute("SELECT id, error FROM draft_job WHERE id IN (?, ?)",
+                                 (killed, from_ui)).fetchall())
+    conn.close()
+    # Une préparation tuée laisse sa lettre « en cours » : la suivante la clôt.
+    assert statuses == {killed: "préparation interrompue",
+                        from_ui: "interrompu par un redémarrage du serveur"}
+
+
 def test_offer_status_follows_redirects_to_the_final_page() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/offre":

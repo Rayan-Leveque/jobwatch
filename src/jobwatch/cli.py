@@ -30,7 +30,7 @@ from jobwatch.mailcode import format_messages, recent_messages
 from jobwatch.matching import active_search_configs, run_matching, sync_searches
 from jobwatch.onboarding import sync_profile_searches
 from jobwatch.paths import INSTANCE_ENV, instance_paths, validate_instance_name
-from jobwatch.prepare import PrepareError, notify, notify_prepared
+from jobwatch.prepare import PrepareBusy, PrepareError, notify, notify_prepared
 from jobwatch.prepare import prepare as prepare_applications
 from jobwatch.profile_sources import sources_for_profile
 from jobwatch.research import apply_research_fits, research_offers, unfitted_recent_offers
@@ -585,6 +585,9 @@ def prepare(config_path: Path | None) -> None:
         with httpx.Client(timeout=15.0) as client:
             try:
                 result = prepare_applications(conn, config.db, config, client)
+            except PrepareBusy as exc:
+                click.echo(str(exc))
+                return
             except PrepareError as exc:
                 _fatal(str(exc))
     finally:

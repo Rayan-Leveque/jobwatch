@@ -1228,7 +1228,7 @@ def _fail_interrupted_draft_jobs(db_path: Path) -> None:
             "UPDATE draft_job SET status = 'failed', "
             "error = 'interrompu par un redémarrage du serveur', "
             "finished_at = datetime('now') "
-            "WHERE status IN ('running', 'queued')"
+            "WHERE status IN ('running', 'queued') AND owner IS NOT 'prepare'"
         )
         conn.commit()
     finally:
