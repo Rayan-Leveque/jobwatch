@@ -20,6 +20,7 @@ import pytest
 from click.testing import CliRunner
 from test_draft import _seed_cv, _seed_match
 
+from jobwatch import cli as cli_module
 from jobwatch import prepare, serve
 from jobwatch.cli import cli
 from jobwatch.config import AutoApplyConfig, ConfigError, ImapConfig, load_config
@@ -193,6 +194,42 @@ def test_prepare_runs_alone_and_survives_server_restart(instance, monkeypatch) -
     # Une préparation tuée laisse sa lettre « en cours » : la suivante la clôt.
     assert statuses == {killed: "préparation interrompue",
                         from_ui: "interrompu par un redémarrage du serveur"}
+
+
+def test_prepare_stops_when_every_letter_fails(instance, monkeypatch) -> None:
+    db_path, config_path, _cv_id = instance
+    config_path.write_text(
+        config_path.read_text().replace("daily_limit: 2", "daily_limit: 50"), encoding="utf-8"
+    )
+    conn = connect(db_path)
+    for i in range(6):
+        _seed_match(conn, company=f"Co{i}", url=f"https://example.com/{i}", fit="high")
+    legacy = _seed_match(conn, company="Ancienne", url="jobwatch:ecb9b443", fit="high")
+    conn.close()
+
+    def broken(path: Path, _config, job_id: int) -> None:
+        # Panne commune : le binaire du rédacteur est introuvable (PATH du timer).
+        conn = connect(path)
+        conn.execute(
+            "UPDATE draft_job SET status = 'failed', "
+            "error = 'appel codex échoué : No such file or directory' WHERE id = ?", (job_id,),
+        )
+        conn.commit()
+        conn.close()
+
+    monkeypatch.setattr(prepare.draft, "run_job", broken)
+    alerts: list[str] = []
+    monkeypatch.setattr(cli_module, "notify", lambda _c, title, body, _cl: alerts.append(title))
+    result = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    assert result.exit_code == 1
+    assert "préparation arrêtée : 3 lettres d'affilée en échec" in result.output
+    assert alerts == ["jobwatch : préparation arrêtée"]
+    conn = connect(db_path)
+    attempted = conn.execute("SELECT COUNT(*) FROM submission_job").fetchone()[0]
+    legacy_state = conn.execute("SELECT state FROM match WHERE id = ?", (legacy,)).fetchone()[0]
+    conn.close()
+    assert attempted == 3
+    assert legacy_state == "discarded"
 
 
 def test_offer_status_follows_redirects_to_the_final_page() -> None:

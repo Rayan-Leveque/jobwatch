@@ -50,6 +50,13 @@ class PrepareResult:
     prepared: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     expired: list[str] = field(default_factory=list)
+    # Raison de l'arrêt anticipé (panne commune à toutes les lettres), sinon None.
+    aborted: str | None = None
+
+
+#: Échecs de lettre d'affilée au-delà desquels la panne est commune (outil
+#: absent, quota) : continuer marquerait toute la liste en échec.
+MAX_CONSECUTIVE_FAILURES = 3
 
 
 def draft_track(title: str) -> str:
@@ -97,7 +104,8 @@ def offer_status(url: str, client: httpx.Client) -> int | None:
     """Code HTTP de la page de l'offre ; None si le site ne répond pas."""
     try:
         return client.get(url, follow_redirects=True, headers=_source_http_headers(url)).status_code
-    except httpx.HTTPError:
+    # ValueError : redirection ou cookie vers une URL relative que httpx refuse.
+    except (httpx.HTTPError, ValueError):
         return None
 
 
@@ -111,6 +119,9 @@ def _offer_gone(conn: sqlite3.Connection, row: sqlite3.Row, client: httpx.Client
         "SELECT failure_reason FROM offer_content WHERE offer_id = ?", (row["offer_id"],)
     ).fetchone()
     if known is not None and known["failure_reason"] in ("http_404", "http_410"):
+        return True
+    # Import historique sans adresse (jobwatch:<hash>) : rien où candidater.
+    if not str(row["url"]).startswith(("http://", "https://")):
         return True
     return offer_status(str(row["url"]), client) in TERMINAL_HTTP_STATUSES
 
@@ -156,6 +167,7 @@ def _prepare(
     result = PrepareResult()
     if remaining <= 0:
         return result
+    failures = 0
     for row in _candidates(conn, int(profile["account_id"])):
         if remaining <= 0:
             break
@@ -198,6 +210,10 @@ def _prepare(
         if ok and config.autoapply.auto_send:
             queue_submission(conn, match_id)
         (result.prepared if ok else result.failed).append(_label(row))
+        failures = 0 if ok else failures + 1
+        if failures >= MAX_CONSECUTIVE_FAILURES:
+            result.aborted = f"{failures} lettres d'affilée en échec, dernière : {job['error']}"
+            break
     return result
 
 
