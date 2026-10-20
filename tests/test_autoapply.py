@@ -14,6 +14,7 @@ import sys
 from email.message import EmailMessage
 from pathlib import Path
 
+import httpx
 import pytest
 from click.testing import CliRunner
 from test_draft import _seed_cv, _seed_match
@@ -23,6 +24,7 @@ from jobwatch.cli import cli
 from jobwatch.config import AutoApplyConfig, ConfigError, ImapConfig, load_config
 from jobwatch.db import connect, init_db
 from jobwatch.mailcode import format_messages, parse_message
+from jobwatch.prepare import offer_status
 from jobwatch.submit import accounts_path, queue_submission, run_submission
 
 IMAP_SECRET = "imap-secret-never-shown"
@@ -106,6 +108,60 @@ def instance(tmp_path: Path):
     _seed_profile(conn, cv_id)
     conn.close()
     return db_path, _write_config(tmp_path, db_path), cv_id
+
+
+@pytest.fixture(autouse=True)
+def _offers_online(monkeypatch) -> dict[str, int]:
+    """Pas de réseau en test : chaque offre répond 200, sauf statut posé par le test."""
+    statuses: dict[str, int] = {}
+    monkeypatch.setattr(prepare, "offer_status", lambda url, _client: statuses.get(url, 200))
+    return statuses
+
+
+def test_prepare_skips_withdrawn_offers_without_using_the_daily_limit(
+    instance, monkeypatch, _offers_online
+) -> None:
+    db_path, config_path, _cv_id = instance
+    conn = connect(db_path)
+    live = [
+        _seed_match(conn, company=f"Vivante{i}", url=f"https://example.com/v{i}", fit="high")
+        for i in range(2)
+    ]
+    gone_now = _seed_match(conn, company="Retirée", url="https://example.com/r", fit="high")
+    gone_known = _seed_match(conn, company="Connue", url="https://example.com/k", fit="high")
+    conn.execute(
+        "UPDATE offer_content SET status = 'failed', failure_reason = 'http_404' "
+        "WHERE offer_id = (SELECT offer_id FROM match WHERE id = ?)",
+        (gone_known,),
+    )
+    conn.commit()
+    conn.close()
+    _offers_online["https://example.com/r"] = 410
+    monkeypatch.setattr(prepare.draft, "run_job", _fake_letter(db_path))
+
+    result = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    assert "2 candidature(s) à valider" in result.output
+    assert "offre retirée, écartée : Retirée" in result.output
+
+    conn = connect(db_path)
+    prepared = {row[0] for row in conn.execute("SELECT match_id FROM submission_job")}
+    states = dict(conn.execute("SELECT id, state FROM match").fetchall())
+    conn.close()
+    assert prepared == set(live)
+    assert states[gone_now] == states[gone_known] == "discarded"
+
+
+def test_offer_status_follows_redirects_to_the_final_page() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/offre":
+            return httpx.Response(301, headers={"Location": "/expiree"})
+        return httpx.Response(410)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert offer_status("https://ats.example.com/offre", client) == 410
+    with httpx.Client(transport=httpx.MockTransport(lambda _r: httpx.Response(200))) as client:
+        assert offer_status("https://ats.example.com/offre", client) == 200
 
 
 def test_config_requires_draft_block(tmp_path: Path) -> None:

@@ -30,7 +30,7 @@ from jobwatch.mailcode import format_messages, recent_messages
 from jobwatch.matching import active_search_configs, run_matching, sync_searches
 from jobwatch.onboarding import sync_profile_searches
 from jobwatch.paths import INSTANCE_ENV, instance_paths, validate_instance_name
-from jobwatch.prepare import PrepareError, notify_prepared
+from jobwatch.prepare import PrepareError, notify, notify_prepared
 from jobwatch.prepare import prepare as prepare_applications
 from jobwatch.profile_sources import sources_for_profile
 from jobwatch.research import apply_research_fits, research_offers, unfitted_recent_offers
@@ -582,10 +582,11 @@ def prepare(config_path: Path | None) -> None:
         _fatal("bloc 'autoapply' absent de config.yaml")
     conn = _open_db(config)
     try:
-        try:
-            result = prepare_applications(conn, config.db, config)
-        except PrepareError as exc:
-            _fatal(str(exc))
+        with httpx.Client(timeout=15.0) as client:
+            try:
+                result = prepare_applications(conn, config.db, config, client)
+            except PrepareError as exc:
+                _fatal(str(exc))
     finally:
         conn.close()
     with httpx.Client(timeout=10.0) as client:
@@ -594,6 +595,8 @@ def prepare(config_path: Path | None) -> None:
         click.echo(f"prête : {label}")
     for label in result.failed:
         click.echo(f"échec : {label}")
+    for label in result.expired:
+        click.echo(f"offre retirée, écartée : {label}")
     note = ", notifié via ntfy" if notified else ""
     click.echo(f"{len(result.prepared)} candidature(s) à valider, {len(result.failed)} échec(s){note}")
 
@@ -626,6 +629,12 @@ def submit(config_path: Path | None, match_id: int) -> None:
         raise SystemExit(1)
 
 
+def _alert_worker(config: Config, reason: str) -> None:
+    """Prévient par ntfy qu'un envoi a échoué côté poste d'envoi (disque, Chrome...)."""
+    with httpx.Client(timeout=10.0) as client:
+        notify(config, "jobwatch : poste d'envoi en panne", reason[:500], client)
+
+
 @cli.command(name="submission-claim")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 def submission_claim(config_path: Path | None) -> None:
@@ -635,7 +644,8 @@ def submission_claim(config_path: Path | None) -> None:
         _fatal("bloc 'autoapply' absent de config.yaml")
     conn = _open_db(config)
     try:
-        expire_stale_submissions(conn, config.autoapply.timeout_seconds)
+        if expire_stale_submissions(conn, config.autoapply.timeout_seconds):
+            _alert_worker(config, "un envoi est resté bloqué sur le poste d'envoi, rendu à la main")
         job_id = claim_submission(conn)
         if job_id is None:
             click.echo("{}")
@@ -703,6 +713,8 @@ def submission_finish(config_path: Path | None, job_id: int) -> None:
         job = conn.execute("SELECT status, reason FROM submission_job WHERE id = ?", (job_id,)).fetchone()
     finally:
         conn.close()
+    if job["status"] == "failed":
+        _alert_worker(config, str(job["reason"] or ""))
     click.echo(f"{job['status']} : {job['reason'] or ''}")
 
 

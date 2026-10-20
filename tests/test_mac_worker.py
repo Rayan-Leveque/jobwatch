@@ -200,6 +200,32 @@ def test_worker_hands_back_dossier_when_offer_page_does_not_open(
     assert (tmp_path / "browser-calls.txt").read_text().splitlines()[-1] == "close"
 
 
+def test_worker_failure_sends_an_alert(instance, monkeypatch) -> None:  # noqa: F811
+    from click.testing import CliRunner
+
+    from jobwatch import cli as cli_module
+
+    db_path, config_path, cv_id = instance
+    _worker_config(config_path)
+    match_id = _prepared(db_path, cv_id)
+    conn = connect(db_path)
+    job_id = queue_submission(conn, match_id)
+    conn.close()
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        cli_module, "notify", lambda _config, title, body, _client: alerts.append((title, body))
+    )
+    runner = CliRunner()
+    runner.invoke(cli_module.cli, ["submission-claim", "--config", str(config_path)])
+    done = runner.invoke(
+        cli_module.cli, ["submission-finish", str(job_id), "--config", str(config_path)],
+        input=json.dumps({"error": "ENOSPC: no space left on device"}),
+    )
+    assert done.output.startswith("failed")
+    assert alerts == [("jobwatch : poste d'envoi en panne",
+                       "poste d'envoi : ENOSPC: no space left on device")]
+
+
 def test_worker_timeout_hands_dossier_back(instance, tmp_path: Path) -> None:  # noqa: F811
     db_path, config_path, cv_id = instance
     _worker_config(config_path)

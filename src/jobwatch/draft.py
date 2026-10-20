@@ -85,8 +85,17 @@ PROMPT = (
     "La section PROFIL PERSONNEL, lorsqu'elle existe, contient des préférences et des faits "
     "facultatifs fournis par le candidat : utilise les éléments pertinents sans les forcer. "
     "N'invente aucun fait absent du CV et du PROFIL PERSONNEL. Si cette section est absente, "
-    "rédige sobrement à partir du seul CV. " + _BODY_MARKERS_INSTRUCTION
+    "rédige sobrement à partir du seul CV. Lettre courte et directe : après la formule "
+    "d'appel, trois paragraphes et {max_words} mots au plus pour tout le corps - une accroche "
+    "propre à cette offre, une preuve concrète tirée du CV, une clôture d'une ou deux "
+    "phrases. Pas de formules creuses ni d'inventaire de compétences. Pour la longueur, "
+    "cette règle prime sur les EXEMPLE. " + _BODY_MARKERS_INSTRUCTION
 )
+
+#: Corps de lettre (formule d'appel comprise) au-delà duquel la lettre est réécrite.
+MAX_BODY_WORDS = 200
+#: Formule d'appel + trois paragraphes.
+MAX_BODY_BLOCKS = 4
 
 REGENERATE_PROMPT_SUFFIX = (
     " La section LETTRE PRÉCÉDENTE contient la version à retravailler ; consigne du "
@@ -532,6 +541,25 @@ def _review_issues(
     return [] if verdict.get("ok") is True else issues
 
 
+def _length_issues(tex: str) -> list[str]:
+    """Contrôle déterministe du format court ; rien à dire sans marqueurs de corps."""
+    body = extract_body(tex)
+    if body is None:
+        return []
+    issues = []
+    words = len(body.split())
+    if words > MAX_BODY_WORDS:
+        issues.append(
+            f"corps trop long ({words} mots) : raccourcis à {MAX_BODY_WORDS} mots au plus"
+        )
+    blocks = [block for block in re.split(r"\n\s*\n", body) if block.strip()]
+    if len(blocks) > MAX_BODY_BLOCKS:
+        issues.append(
+            f"{len(blocks) - 1} paragraphes après la formule d'appel : réduis à trois"
+        )
+    return issues
+
+
 def _upsert_library_entry(
     conn: sqlite3.Connection, match_id: int, label: str, pdf_path: Path
 ) -> int:
@@ -644,7 +672,7 @@ def _run_job_inner(
     instruction = str(job["instruction"]).strip() if job["instruction"] else ""
     previous_tex = _previous_tex(conn, match_id) if instruction else None
     today = datetime.datetime.now(tz=datetime.UTC).astimezone().date()
-    prompt = PROMPT.format(date=french_date(today))
+    prompt = PROMPT.format(date=french_date(today), max_words=MAX_BODY_WORDS)
     if previous_tex is not None:
         prompt += REGENERATE_PROMPT_SUFFIX.format(instruction=instruction)
     elif instruction:
@@ -657,24 +685,30 @@ def _run_job_inner(
     with tempfile.TemporaryDirectory() as tmp_dir:
         work_dir = Path(tmp_dir)
         tex, pdf_path = _generate_tex(config, prompt, bundle, work_dir)
-        if config.review is not None:
-            issues = _review_issues(config.review, offer_text, cv_text, personal_context, tex)
-            if issues:
-                listed = " ; ".join(issues)
-                fix_prompt = PROMPT.format(date=french_date(today)) + REVIEW_FIX_SUFFIX.format(
-                    issues=listed
+
+        def issues_for(candidate: str) -> list[str]:
+            found = _length_issues(candidate)
+            if config.review is not None:
+                found += _review_issues(
+                    config.review, offer_text, cv_text, personal_context, candidate
                 )
-                fix_bundle = _build_bundle(
-                    offer_text, cv_text, examples, tex, profile_context=personal_context
-                )
-                tex, pdf_path = _generate_tex(config, fix_prompt, fix_bundle, work_dir)
-                remaining = _review_issues(
-                    config.review, offer_text, cv_text, personal_context, tex
-                )
-                if remaining:
-                    raise DraftError(f"relecture : lettre refusée deux fois - {' ; '.join(remaining)}")
-                note = f"Relecture : corrigée ({listed})."
-                warning = f"{warning} {note}" if warning else note
+            return found
+
+        issues = issues_for(tex)
+        if issues:
+            listed = " ; ".join(issues)
+            fix_prompt = PROMPT.format(
+                date=french_date(today), max_words=MAX_BODY_WORDS
+            ) + REVIEW_FIX_SUFFIX.format(issues=listed)
+            fix_bundle = _build_bundle(
+                offer_text, cv_text, examples, tex, profile_context=personal_context
+            )
+            tex, pdf_path = _generate_tex(config, fix_prompt, fix_bundle, work_dir)
+            remaining = issues_for(tex)
+            if remaining:
+                raise DraftError(f"relecture : lettre refusée deux fois - {' ; '.join(remaining)}")
+            note = f"Relecture : corrigée ({listed})."
+            warning = f"{warning} {note}" if warning else note
         ensure_private_directory(target_dir)
         stem = f"draft_{match_id}"
         final_tex = target_dir / f"{stem}.tex"

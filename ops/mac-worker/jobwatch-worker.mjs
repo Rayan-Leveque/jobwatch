@@ -122,9 +122,10 @@ async function main() {
 
 async function runJob(claim) {
   const workDir = join(WORK_ROOT, String(claim.job_id));
-  mkdirSync(workDir, { recursive: true, mode: 0o700 });
   let report;
   try {
+    // Dans le try : un disque plein est rapporté au serveur, qui alerte par ntfy.
+    mkdirSync(workDir, { recursive: true, mode: 0o700 });
     for (const [name, content] of Object.entries(claim.files)) {
       writeFileSync(join(workDir, name), Buffer.from(content, "base64"), { mode: 0o600 });
     }
