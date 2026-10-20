@@ -18,6 +18,11 @@ if ! command -v playwright-cli >/dev/null 2>&1; then
   npm install -g @playwright/cli@0.1.22
 fi
 
+if [ ! -d /Applications/SwiftBar.app ] && command -v brew >/dev/null 2>&1; then
+  echo "installation de SwiftBar (icône de barre des menus)…"
+  brew install --cask swiftbar
+fi
+
 DEFAULT_SSH="ssh -p 2222 rayan@100.116.111.35"
 read -rp "Accès SSH au VPS [$DEFAULT_SSH] : " SSH_CMD
 SSH_CMD="${SSH_CMD:-$DEFAULT_SSH}"
@@ -25,9 +30,9 @@ SSH_CMD="${SSH_CMD:-$DEFAULT_SSH}"
 $SSH_CMD -o BatchMode=yes -o ConnectTimeout=8 true \
   || { echo "SSH sans mot de passe impossible avec : $SSH_CMD"; exit 1; }
 
-mkdir -p "$APP" "$CONF" "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+mkdir -p "$APP/menubar" "$CONF" "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 chmod 700 "$CONF"
-cp "$HERE/jobwatch-worker.mjs" "$APP/jobwatch-worker.mjs"
+cp "$HERE/jobwatch-worker.mjs" "$HERE/jobwatch-menubar.mjs" "$APP/"
 umask 077
 cat >"$CONF/env" <<EOF
 export JOBWATCH_SSH='$SSH_CMD'
@@ -36,16 +41,19 @@ export PLAYWRIGHT_CLI='$(command -v playwright-cli)'
 export PATH='$(dirname "$(command -v node)"):$(dirname "$(command -v claude)"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 EOF
 umask 022
-# Le lanceur récupère la dernière version du worker sur le serveur : plus besoin
-# de réinstaller après une mise à jour. Sans réseau, il garde la version locale.
+# Le lanceur récupère la dernière version du worker et de l'icône sur le serveur :
+# plus besoin de réinstaller après une mise à jour. Sans réseau, il garde la
+# version locale.
 cat >"$APP/run.sh" <<EOF
 #!/bin/bash
 . "$CONF/env"
-\$JOBWATCH_SSH -o BatchMode=yes -o ConnectTimeout=8 \\
-  "cat /home/rayan/jobwatch-prod/ops/mac-worker/jobwatch-worker.mjs" >"$APP/.worker.new" 2>/dev/null \\
-  && node --check "$APP/.worker.new" 2>/dev/null \\
-  && mv "$APP/.worker.new" "$APP/jobwatch-worker.mjs"
-rm -f "$APP/.worker.new"
+for name in jobwatch-worker.mjs jobwatch-menubar.mjs; do
+  \$JOBWATCH_SSH -o BatchMode=yes -o ConnectTimeout=8 \\
+    "cat /home/rayan/jobwatch-prod/ops/mac-worker/\$name" >"$APP/.new.mjs" 2>/dev/null \\
+    && node --check "$APP/.new.mjs" 2>/dev/null \\
+    && mv "$APP/.new.mjs" "$APP/\$name"
+done
+rm -f "$APP/.new.mjs"
 exec "$(command -v node)" "$APP/jobwatch-worker.mjs" "\$@"
 EOF
 chmod 700 "$APP/run.sh"
@@ -64,6 +72,17 @@ cat >"$PLIST" <<EOF
 </dict>
 </plist>
 EOF
+# Plugin SwiftBar : SwiftBar n'a pas le PATH de launchd, d'où le chemin complet de node.
+cat >"$APP/menubar/jobwatch.30s.sh" <<EOF
+#!/bin/bash
+exec "$(command -v node)" "$APP/jobwatch-menubar.mjs"
+EOF
+chmod 700 "$APP/menubar/jobwatch.30s.sh"
+if [ -d /Applications/SwiftBar.app ]; then
+  defaults write com.ameba.SwiftBar PluginDirectory "$APP/menubar"
+  open -a SwiftBar
+fi
+
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 

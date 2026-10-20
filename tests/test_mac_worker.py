@@ -22,7 +22,9 @@ from jobwatch import serve
 from jobwatch.db import connect
 from jobwatch.submit import queue_submission
 
-WORKER = Path(__file__).parent.parent / "ops" / "mac-worker" / "jobwatch-worker.mjs"
+MAC_WORKER = Path(__file__).parent.parent / "ops" / "mac-worker"
+WORKER = MAC_WORKER / "jobwatch-worker.mjs"
+MENUBAR = MAC_WORKER / "jobwatch-menubar.mjs"
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node absent")
 
@@ -127,6 +129,54 @@ def test_worker_claims_dossier_runs_agent_and_records_application(
     ]
     argv = json.loads((tmp_path / "argv.json").read_text())
     assert "Bash(playwright-cli cookie*)" in argv
+
+    # L'icône de barre des menus montre l'envoi et le compteur.
+    status = json.loads((_support_dir(tmp_path) / "status.json").read_text())
+    assert status["current"] is None and status["sent"] == 1
+    assert status["history"][0]["status"] == "submitted"
+    assert status["history"][0]["label"].startswith("Acme - ")
+    menu = _run_menubar(tmp_path).splitlines()
+    assert menu[0] == "1 | sfimage=paperplane"
+    assert any(line.startswith("✓ Acme - ") for line in menu)
+
+
+def _support_dir(home: Path) -> Path:
+    return home / "Library" / "Application Support" / "jobwatch-worker"
+
+
+def _run_menubar(home: Path) -> str:
+    return subprocess.run(
+        [NODE, str(MENUBAR)], env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        capture_output=True, text=True, timeout=30, check=True,
+    ).stdout
+
+
+@pytest.mark.parametrize(
+    ("status", "first_line"),
+    [
+        (None, "| sfimage=exclamationmark.triangle.fill sfcolor=#d33"),
+        ({"current": None, "error": "serveur muet", "sent": 3, "minutes_ago": 1},
+         "| sfimage=exclamationmark.triangle.fill sfcolor=#d33"),
+        # Mac éteint ou launchd arrêté : plus aucun passage.
+        ({"current": None, "error": None, "sent": 3, "minutes_ago": 30},
+         "| sfimage=exclamationmark.triangle.fill sfcolor=#d33"),
+        ({"current": {"label": "Acorus - AI Product Manager", "timeout": 1800},
+          "error": None, "sent": 3, "minutes_ago": 1},
+         "Acorus | sfimage=paperplane.fill length=18"),
+    ],
+)
+def test_menubar_shows_worker_state(tmp_path: Path, status, first_line) -> None:
+    if status is not None:
+        from datetime import UTC, datetime, timedelta
+
+        moment = (datetime.now(UTC) - timedelta(minutes=status.pop("minutes_ago"))).isoformat()
+        if status["current"]:
+            status["current"]["started"] = moment
+        _support_dir(tmp_path).mkdir(parents=True)
+        (_support_dir(tmp_path) / "status.json").write_text(
+            json.dumps({**status, "updated": moment, "history": []})
+        )
+    assert _run_menubar(tmp_path).splitlines()[0] == first_line
 
 
 def test_worker_without_queued_dossier_launches_no_browser(
