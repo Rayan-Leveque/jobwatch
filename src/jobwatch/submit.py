@@ -325,12 +325,16 @@ _DOSSIER_META = ".dossier.json"
 def claim_submission(conn: sqlite3.Connection, job_id: int | None = None) -> int | None:
     """Passe un job 'queued' à 'running' (le plus ancien si `job_id` est absent)."""
     if job_id is None:
-        row = conn.execute(
-            "SELECT id FROM submission_job WHERE status = 'queued' ORDER BY id LIMIT 1"
-        ).fetchone()
-        if row is None:
-            return None
-        job_id = int(row["id"])
+        # Plusieurs voies réclament en même temps : celle qui perd la course prend
+        # le suivant au lieu de croire la file vide.
+        while True:
+            row = conn.execute(
+                "SELECT id FROM submission_job WHERE status = 'queued' ORDER BY id LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            if claim_submission(conn, int(row["id"])) is not None:
+                return int(row["id"])
     cur = conn.execute(
         "UPDATE submission_job SET status = 'running', started_at = datetime('now') "
         "WHERE id = ? AND status = 'queued'",

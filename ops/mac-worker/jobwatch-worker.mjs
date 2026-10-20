@@ -13,11 +13,13 @@
 //   JOBWATCH_SSH   commande d'accès au serveur ("" = exécution locale, tests)
 //   JOBWATCH_JW    commande jw sur le serveur
 //   CLAUDE_BIN, PLAYWRIGHT_CLI, JOBWATCH_PROFILE, JOBWATCH_WORK_ROOT
+//   JOBWATCH_LANE   voie d'envoi (1 par défaut) : chaque voie a son Chrome, son
+//                   profil et sa session, et toutes puisent dans la même file
 //   CODEX_BIN, JOBWATCH_CODEX_FALLBACK_HOMES (comptes ChatGPT de secours)
 
 import { spawnSync } from "node:child_process";
 import {
-  chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync,
+  chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -30,12 +32,15 @@ const CLAUDE = env.CLAUDE_BIN ?? "claude";
 const CODEX = env.CODEX_BIN ?? "codex";
 const BROWSER = env.PLAYWRIGHT_CLI ?? "playwright-cli";
 const SUPPORT = join(homedir(), "Library", "Application Support", "jobwatch-worker");
-const PROFILE = env.JOBWATCH_PROFILE ?? join(SUPPORT, "chrome-profile");
+const LANE = env.JOBWATCH_LANE || "1";
+const LANE_SUFFIX = LANE === "1" ? "" : `-${LANE}`;
+const LANE_ONE_PROFILE = join(SUPPORT, "chrome-profile");
+const PROFILE = env.JOBWATCH_PROFILE ?? join(SUPPORT, `chrome-profile${LANE_SUFFIX}`);
 const WORK_ROOT = env.JOBWATCH_WORK_ROOT ?? join(homedir(), "Library", "Caches", "jobwatch-worker");
-const SESSION = "jobwatch-mac";
+const SESSION = `jobwatch-mac${LANE_SUFFIX}`;
 // Codex : configuration dédiée (ni AGENTS.md, ni hooks, ni MCP de l'utilisateur)
 // et clé SSH qui ne sert qu'à `jw mail-code` (commande forcée côté serveur).
-const CODEX_HOME = join(SUPPORT, "codex-home");
+const CODEX_HOME = join(SUPPORT, `codex-home${LANE_SUFFIX}`);
 // Comptes ChatGPT essayés dans l'ordre quand le quota du précédent est épuisé
 // (JOBWATCH_CODEX_FALLBACK_HOMES : CODEX_HOME séparés par « : »).
 const CODEX_ACCOUNTS = [
@@ -50,7 +55,7 @@ const CODEX_FORBIDDEN = [
   "node", "npx", "npm", "python", "python3", "curl", "wget", "ssh", "scp", "osascript", "open",
 ];
 // Lu par l'icône de barre des menus (jobwatch-menubar.mjs).
-const STATUS = join(SUPPORT, "status.json");
+const STATUS = join(SUPPORT, `status${LANE_SUFFIX}.json`);
 const HISTORY_SIZE = 10;
 const LOGIN_PAGES = [
   "https://www.linkedin.com/login",
@@ -104,7 +109,8 @@ function saveStatus(changes) {
 // profil : tous les envois suivants échoueraient (« Browser is already in use »).
 // Seul le worker utilise ce profil, un passage à la fois.
 function killProfileChrome() {
-  spawnSync("pkill", ["-f", "--", `--user-data-dir=${PROFILE}`]);
+  // Fin de motif explicite : chrome-profile ne doit pas toucher chrome-profile-2.
+  spawnSync("pkill", ["-f", "--", `--user-data-dir=${PROFILE}( |$)`]);
 }
 
 class OfferGone extends Error {
@@ -250,6 +256,22 @@ prefix_rule(
 `);
 }
 
+// Profil d'une voie supplémentaire : copie du profil connecté de la voie 1, sans
+// ses caches ni ses verrous. Chrome de la voie 1 fermé, sinon les cookies (SQLite)
+// peuvent être copiés en pleine écriture.
+const PROFILE_SKIP = new Set(["Cache", "Code Cache", "GPUCache", "DawnCache", "ShaderCache", "GrShaderCache"]);
+function cloneProfile() {
+  if (PROFILE === LANE_ONE_PROFILE) throw new Error("clone-profile se lance pour une voie 2 ou plus (JOBWATCH_LANE)");
+  const busy = spawnSync("pgrep", ["-f", "--", `--user-data-dir=${LANE_ONE_PROFILE}( |$)`]);
+  if (busy.status === 0) throw new Error("Chrome de la voie 1 ouvert : réessaie entre deux envois");
+  rmSync(PROFILE, { recursive: true, force: true });
+  cpSync(LANE_ONE_PROFILE, PROFILE, {
+    recursive: true,
+    filter: (source) => !PROFILE_SKIP.has(source.split("/").pop()) && !source.split("/").pop().startsWith("Singleton"),
+  });
+  console.log(`profil de la voie ${LANE} copié depuis la voie 1`);
+}
+
 async function login() {
   mkdirSync(WORK_ROOT, { recursive: true, mode: 0o700 });
   await openBrowser(WORK_ROOT, LOGIN_PAGES[0], "--headed");
@@ -261,6 +283,11 @@ async function login() {
 // Vide la file d'un trait : sans boucle, chaque dossier attendait le passage
 // launchd suivant (jusqu'à 2 minutes perdues entre deux envois).
 async function main() {
+  // Voie sans profil connecté : elle candidaterait déconnectée de LinkedIn ou WTTJ.
+  if (LANE !== "1" && !existsSync(PROFILE)) {
+    log(`voie ${LANE} : pas de profil Chrome, lance « run.sh clone-profile » avec JOBWATCH_LANE=${LANE}`);
+    return;
+  }
   mkdirSync(WORK_ROOT, { recursive: true, mode: 0o700 });
   for (;;) {
     const claim = JSON.parse(remote(`${JW} submission-claim`) || "{}");
@@ -349,9 +376,10 @@ async function runJob(claim) {
 
 try {
   if (process.argv[2] === "login") await login();
+  else if (process.argv[2] === "clone-profile") cloneProfile();
   else await main();
 } catch (error) {
   log(`échec : ${error.message || error}`);
-  if (process.argv[2] !== "login") saveStatus({ current: null, error: String(error.message || error) });
+  if (!process.argv[2]) saveStatus({ current: null, error: String(error.message || error) });
   process.exitCode = 1;
 }
