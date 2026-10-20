@@ -50,7 +50,7 @@ MAX_TEXT_CHARS = 12_000
 OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
-        "status": {"enum": ["submitted", "needs_human"]},
+        "status": {"type": "string", "enum": ["submitted", "needs_human"]},
         "reason": {"type": "string"},
         "final_url": {"type": "string"},
         "account_created_on": {"type": ["string", "null"]},
@@ -62,7 +62,7 @@ OUTPUT_SCHEMA = {
 
 # Lecture des cookies, du stockage et export de session : jamais utile pour
 # candidater, et c'est le chemin d'une exfiltration par injection de prompt.
-_DENIED_BROWSER = (
+DENIED_BROWSER = (
     "cookie", "localstorage", "sessionstorage", "state-save", "state-load", "delete-data",
 )
 
@@ -180,7 +180,7 @@ def _browser(config: AutoApplyConfig, env: dict[str, str], cwd: Path, *args: str
 def agent_args(browser_bin: str, prompt: str, model: str | None) -> list[str]:
     """Arguments de `claude` (sans le binaire), communs au VPS et au poste d'envoi."""
     allowed = [f"Bash({browser_bin} *)", "Bash(jw mail-code*)", "Read(./**)"]
-    denied = [f"Bash({browser_bin} {name}*)" for name in _DENIED_BROWSER]
+    denied = [f"Bash({browser_bin} {name}*)" for name in DENIED_BROWSER]
     # Upload restreint au dossier de travail : ni chemin absolu, ni remontée.
     denied += [
         f"Bash({browser_bin} upload /*)",
@@ -204,12 +204,41 @@ def agent_args(browser_bin: str, prompt: str, model: str | None) -> list[str]:
     return args
 
 
+#: Fichiers d'échange de Codex dans le dossier de travail du poste d'envoi.
+CODEX_SCHEMA_FILE = "agent_schema.json"
+CODEX_RESULT_FILE = "agent_result.json"
+
+
+def codex_agent_args(prompt: str, model: str | None) -> list[str]:
+    """Arguments de `codex` (sans le binaire) pour le poste d'envoi.
+
+    Le bac à sable, les règles de commandes et le `playwright-cli` filtrant sont
+    posés par le poste d'envoi (CODEX_HOME dédié), car leurs chemins sont les siens.
+    """
+    args = [
+        "exec",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--color", "never",
+        "-c", 'approval_policy="never"',
+        "-c", 'model_reasoning_effort="high"',
+        "--output-schema", CODEX_SCHEMA_FILE,
+        "--output-last-message", CODEX_RESULT_FILE,
+    ]
+    if model:
+        args += ["--model", model]
+    return [*args, prompt]
+
+
 def _parse_agent_output(stdout: str) -> dict:
     try:
         envelope = json.loads(stdout)
     except ValueError as exc:
         raise SubmitError("réponse de l'agent illisible") from exc
     result = envelope.get("structured_output") if isinstance(envelope, dict) else None
+    # Codex rend directement l'objet du schéma (dernier message).
+    if result is None and isinstance(envelope, dict) and "status" in envelope:
+        result = envelope
     if result is None and isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
         try:
             result = json.loads(envelope["result"])

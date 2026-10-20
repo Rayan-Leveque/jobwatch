@@ -179,6 +179,76 @@ def test_menubar_shows_worker_state(tmp_path: Path, status, first_line) -> None:
     assert _run_menubar(tmp_path).splitlines()[0] == first_line
 
 
+def test_worker_runs_codex_in_its_sandbox(instance, tmp_path: Path) -> None:  # noqa: F811
+    db_path, config_path, cv_id = instance
+    config_path.write_text(
+        config_path.read_text() + "  runner: worker\n  agent: codex\n  model: gpt-6.1-sol\n",
+        encoding="utf-8",
+    )
+    match_id = _prepared(db_path, cv_id)
+    conn = connect(db_path)
+    job_id = queue_submission(conn, match_id)
+    conn.close()
+    env = _worker_env(tmp_path, config_path)
+    # Socket de la session, tel que playwright-cli le pose dans le dossier temporaire.
+    sockets = tmp_path / "tmp" / "pw-test" / "cli"
+    sockets.mkdir(parents=True)
+    (sockets / "abc-jobwatch-mac.sock").touch()
+    env["TMPDIR"] = str(tmp_path / "tmp")
+    env["CODEX_BIN"] = str(_fake_bin(
+        tmp_path / "mac-bin", "fake-codex",
+        "import json, os, pathlib, subprocess, sys\n"
+        f"pathlib.Path({str(tmp_path / 'argv.json')!r}).write_text(json.dumps(sys.argv[1:]))\n"
+        "run = lambda *a: subprocess.run(['playwright-cli', *a], capture_output=True).returncode\n"
+        "pathlib.Path('filtre.json').write_text(json.dumps([\n"
+        "    run('cookie-list'), run('state-save', 'x'), run('upload', '/etc/passwd'),\n"
+        "    run('upload', '../dossier.md'), run('upload', 'cv.txt')]))\n"
+        "pathlib.Path('home.txt').write_text(os.environ['CODEX_HOME'])\n"
+        f"pathlib.Path('agent_result.json').write_text({json.dumps(json.dumps(SUBMITTED))})\n"
+        "print('journal codex')\n",
+    ))
+
+    done = _run_worker(env)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert f"job {job_id} : submitted" in done.stdout
+    argv = json.loads((tmp_path / "argv.json").read_text())
+    assert argv[:2] == ["exec", "--skip-git-repo-check"] and "gpt-6.1-sol" in argv
+    mac_dir = tmp_path / "mac-work" / str(job_id)
+    # Cookies, export de session et upload hors du dossier refusés ; le CV passe.
+    assert json.loads((mac_dir / "filtre.json").read_text()) == [1, 1, 1, 1, 0]
+    assert (tmp_path / "browser-calls.txt").read_text().splitlines()[-2] == "upload cv.txt"
+    home = Path((mac_dir / "home.txt").read_text())
+    config = (home / "config.toml").read_text()
+    assert '":workspace_roots" = "write"' in config
+    assert f'"{sockets.resolve()}" = "allow"' in config
+    assert str(tmp_path / "Library" / "Application Support") + '/jobwatch-worker/mailcode"' in config
+    rules = (home / "rules" / "jobwatch.rules").read_text()
+    assert '"curl"' in rules and str(tmp_path / "mac-bin" / "fake-playwright-cli") in rules
+
+
+@pytest.mark.parametrize(
+    ("command", "ok"),
+    [
+        ("mail-code --minutes 15", True),
+        ("mail-code --minutes 15; rm -rf ~", False),
+        ("mail-code --minutes 1 2", False),
+        ("list", False),
+        (None, False),
+    ],
+)
+def test_mail_code_key_runs_nothing_else(tmp_path: Path, command, ok) -> None:
+    jw = _fake_bin(tmp_path, "jw", "import sys\nprint(' '.join(sys.argv[1:]))\n")
+    env = {"PATH": "/usr/bin:/bin"}
+    if command is not None:
+        env["SSH_ORIGINAL_COMMAND"] = command
+    done = subprocess.run(
+        [str(MAC_WORKER / "mail-code-only.sh"), str(jw), "--instance", "rayan"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert (done.returncode == 0) is ok
+    assert done.stdout == ("--instance rayan mail-code --minutes 15\n" if ok else "")
+
+
 def test_worker_without_queued_dossier_launches_no_browser(
     instance, tmp_path: Path  # noqa: F811
 ) -> None:
