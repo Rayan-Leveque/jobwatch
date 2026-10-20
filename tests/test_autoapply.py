@@ -13,6 +13,7 @@ import stat
 import sys
 from email.message import EmailMessage
 from pathlib import Path
+from typing import ClassVar
 
 import httpx
 import pytest
@@ -306,6 +307,88 @@ def test_submitted_dossier_records_application_with_proof(instance, tmp_path: Pa
     work_dir = Path(job["proof_path"]).parent
     assert Path(documents["cover_letter"]) == work_dir / "Lettre_motivation_Acme.pdf"
     assert Path(documents["cv"]).parent == work_dir
+
+
+class _FakeSMTP:
+    """Remplace smtplib.SMTP_SSL : garde la connexion et les messages envoyés."""
+
+    sent: ClassVar[list] = []
+    logins: ClassVar[list] = []
+
+    def __init__(self, host: str, port: int, timeout: float) -> None:
+        self.host = host
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        pass
+
+    def login(self, user: str, password: str) -> None:
+        _FakeSMTP.logins.append((self.host, user, password))
+
+    def send_message(self, message) -> None:
+        _FakeSMTP.sent.append(message)
+
+
+MAIL_ONLY = {
+    "status": "needs_human", "reason": "L'offre indique « Postuler par mail ».",
+    "final_url": "https://emploi.example.gouv.fr/offre", "account_created_on": None,
+    "apply_email": "recrutement@mairie.example.fr",
+}
+
+
+def _mail_only_submission(instance, tmp_path: Path, monkeypatch, smtp_host: str | None):
+    from jobwatch import mailapply
+
+    db_path, _config_path, cv_id = instance
+    match_id = _prepared(db_path, cv_id)
+    conn = connect(db_path)
+    conn.execute(
+        "UPDATE candidate_profile SET reusable_details = ?",
+        ("Nom : Rayan Leveque\nEmail : rayan@example.com\nTéléphone : 06 00 00 00 00",),
+    )
+    conn.commit()
+    job_id = queue_submission(conn, match_id)
+    conn.close()
+    config = _agent(tmp_path, MAIL_ONLY)
+    config.imap.smtp_host = smtp_host
+    _FakeSMTP.sent, _FakeSMTP.logins = [], []
+    monkeypatch.setattr(mailapply.smtplib, "SMTP_SSL", _FakeSMTP)
+    run_submission(db_path, config, job_id)
+    conn = connect(db_path)
+    job = conn.execute("SELECT * FROM submission_job WHERE id = ?", (job_id,)).fetchone()
+    applied = conn.execute("SELECT 1 FROM application WHERE match_id = ?", (match_id,)).fetchone()
+    conn.close()
+    return job, applied
+
+
+def test_mail_only_offer_is_sent_by_email_with_cv_and_letter(
+    instance, tmp_path: Path, monkeypatch
+) -> None:
+    job, applied = _mail_only_submission(instance, tmp_path, monkeypatch, "smtp.example.com")
+    assert job["status"] == "submitted", job["reason"]
+    assert applied is not None
+    assert job["final_url"] == "mailto:recrutement@mairie.example.fr"
+    assert _FakeSMTP.logins == [("smtp.example.com", "candidat@example.com", IMAP_SECRET)]
+    (message,) = _FakeSMTP.sent
+    assert message["To"] == "recrutement@mairie.example.fr"
+    assert message["From"] == "Rayan Leveque <candidat@example.com>"
+    assert message["Subject"] == "Candidature - AI Engineer"
+    names = sorted(part.get_filename() for part in message.iter_attachments())
+    assert names == ["Lettre_motivation_Acme.pdf", "cv.txt"]
+    body = message.get_body(("plain",)).get_content()
+    assert "poste de AI Engineer" in body and "Rayan Leveque\n06 00 00 00 00" in body
+
+
+def test_mail_only_offer_without_smtp_hands_back_the_address(
+    instance, tmp_path: Path, monkeypatch
+) -> None:
+    job, applied = _mail_only_submission(instance, tmp_path, monkeypatch, None)
+    assert job["status"] == "needs_human"
+    assert applied is None and _FakeSMTP.sent == []
+    assert "recrutement@mairie.example.fr" in job["reason"]
+    assert "smtp_host" in job["reason"]
 
 
 def test_agent_sees_neither_imap_password_nor_browser_storage(instance, tmp_path: Path) -> None:
