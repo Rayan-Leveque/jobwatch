@@ -15,19 +15,32 @@
 //   CLAUDE_BIN, PLAYWRIGHT_CLI, JOBWATCH_PROFILE, JOBWATCH_WORK_ROOT
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import {
+  chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 
 const env = process.env;
 const SSH = (env.JOBWATCH_SSH ?? "ssh -p 2222 rayan@100.116.111.35").split(" ").filter(Boolean);
 const JW = env.JOBWATCH_JW ?? "/home/rayan/jobwatch-prod/.venv/bin/jw --instance rayan";
 const CLAUDE = env.CLAUDE_BIN ?? "claude";
+const CODEX = env.CODEX_BIN ?? "codex";
 const BROWSER = env.PLAYWRIGHT_CLI ?? "playwright-cli";
 const SUPPORT = join(homedir(), "Library", "Application Support", "jobwatch-worker");
 const PROFILE = env.JOBWATCH_PROFILE ?? join(SUPPORT, "chrome-profile");
 const WORK_ROOT = env.JOBWATCH_WORK_ROOT ?? join(homedir(), "Library", "Caches", "jobwatch-worker");
 const SESSION = "jobwatch-mac";
+// Codex : configuration dédiée (ni AGENTS.md, ni hooks, ni MCP de l'utilisateur)
+// et clé SSH qui ne sert qu'à `jw mail-code` (commande forcée côté serveur).
+const CODEX_HOME = join(SUPPORT, "codex-home");
+const MAILCODE_KEY = join(SUPPORT, "mailcode", "id_ed25519");
+const MAILCODE_KNOWN_HOSTS = join(SUPPORT, "mailcode", "known_hosts");
+// Interdites à Codex : de quoi parler au navigateur ou au réseau sans le filtre.
+const CODEX_FORBIDDEN = [
+  "node", "npx", "npm", "python", "python3", "curl", "wget", "ssh", "scp", "osascript", "open",
+];
 // Lu par l'icône de barre des menus (jobwatch-menubar.mjs).
 const STATUS = join(SUPPORT, "status.json");
 const HISTORY_SIZE = 10;
@@ -117,11 +130,19 @@ async function openBrowser(cwd, url, ...flags) {
   throw new Error(`Chrome ne s'ouvre pas : ${(opened.stderr || opened.stdout || "").trim().slice(0, 200)}`);
 }
 
+const quote = (part) => `'${part}'`;
+
 // `jw mail-code` pour l'agent : seule l'option --minutes passe, et seulement des chiffres.
-function writeMailShim(binDir) {
+// Codex ne lit pas ~/.ssh : il passe par la clé dédiée, dont le serveur force la commande.
+function writeMailShim(binDir, codex) {
   mkdirSync(binDir, { recursive: true });
-  const ssh = [...SSH, ...SSH_KEEPALIVE].map((part) => `'${part}'`).join(" ");
-  const run = SSH.length ? `${ssh} "${JW} mail-code --minutes $MINUTES"` : `${JW} mail-code --minutes $MINUTES`;
+  const dedicated = [
+    "-F", "/dev/null", "-i", MAILCODE_KEY, "-o", "IdentitiesOnly=yes",
+    "-o", `UserKnownHostsFile=${MAILCODE_KNOWN_HOSTS}`, "-o", "BatchMode=yes",
+  ];
+  const ssh = [SSH[0], ...(codex ? dedicated : []), ...SSH.slice(1), ...SSH_KEEPALIVE].map(quote).join(" ");
+  const command = codex ? "mail-code --minutes $MINUTES" : `${JW} mail-code --minutes $MINUTES`;
+  const run = SSH.length ? `${ssh} "${command}"` : `${JW} mail-code --minutes $MINUTES`;
   const shim = `#!/bin/sh
 [ "$1" = "mail-code" ] || { echo "seul jw mail-code est disponible" >&2; exit 1; }
 MINUTES=15
@@ -133,6 +154,91 @@ exec ${run}
 `;
   writeFileSync(join(binDir, "jw"), shim);
   chmodSync(join(binDir, "jw"), 0o700);
+}
+
+// Chemin réel d'un outil : le filtre playwright-cli du dossier porte le même nom
+// et passe devant dans le PATH de l'agent.
+function whichBinary(name) {
+  if (isAbsolute(name)) return name;
+  for (const dir of (env.PATH || "").split(delimiter)) {
+    if (dir && existsSync(join(dir, name))) return join(dir, name);
+  }
+  throw new Error(`${name} introuvable dans le PATH`);
+}
+
+const realBinary = (name) => realpathSync(whichBinary(name));
+
+// Filtre de playwright-cli pour Codex, qui n'a pas de liste d'outils comme Claude :
+// ni cookies ni stockage, upload limité au dossier de travail.
+function writeBrowserShim(binDir, real, denied) {
+  const shim = `#!/bin/sh
+case "$1" in
+${denied.map((name) => `  ${name}*) echo "playwright-cli $1 : commande refusée" >&2; exit 1 ;;`).join("\n")}
+esac
+if [ "$1" = "upload" ]; then
+  for file in "$@"; do
+    case "$file" in /*|"~"*|*..*) echo "upload hors du dossier refusé : $file" >&2; exit 1 ;; esac
+  done
+fi
+exec ${quote(real)} "$@"
+`;
+  writeFileSync(join(binDir, "playwright-cli"), shim);
+  chmodSync(join(binDir, "playwright-cli"), 0o700);
+}
+
+// Dossier du socket de la session playwright-cli, à ouvrir dans le bac à sable.
+function sessionSocketDir() {
+  const tmp = realpathSync(tmpdir());
+  for (const name of readdirSync(tmp).filter((entry) => entry.startsWith("pw-"))) {
+    const dir = join(tmp, name, "cli");
+    if (existsSync(dir) && readdirSync(dir).some((file) => file.endsWith(`-${SESSION}.sock`))) return dir;
+  }
+  throw new Error("socket de la session playwright-cli introuvable");
+}
+
+// Bac à sable de Codex : écriture dans le seul dossier de travail, lecture des
+// outils (node, playwright-cli, ssh) et de la session du navigateur, rien d'autre
+// du dossier personnel (~/.ssh, documents, profil Chrome).
+function writeCodexHome(real) {
+  rmSync(CODEX_HOME, { recursive: true, force: true });
+  mkdirSync(join(CODEX_HOME, "rules"), { recursive: true, mode: 0o700 });
+  symlinkSync(join(homedir(), ".codex", "auth.json"), join(CODEX_HOME, "auth.json"));
+  const socketDir = sessionSocketDir();
+  const readable = [
+    "/opt/homebrew",
+    realpathSync(join(dirname(process.execPath), "..")),
+    dirname(dirname(real)),
+    join(homedir(), "Library", "Caches", "ms-playwright", "daemon"),
+    // Codex relance son propre binaire dans le bac à sable.
+    dirname(dirname(realBinary(CODEX))),
+    dirname(MAILCODE_KEY),
+    socketDir,
+  ];
+  const toml = (path) => JSON.stringify(path);
+  writeFileSync(join(CODEX_HOME, "config.toml"), `default_permissions = "jobwatch"
+
+[permissions.jobwatch.filesystem]
+":minimal" = "read"
+":workspace_roots" = "write"
+${[...new Set(readable)].map((path) => `${toml(path)} = "read"`).join("\n")}
+
+[permissions.jobwatch.network]
+enabled = true
+
+[permissions.jobwatch.network.unix_sockets]
+${toml(socketDir)} = "allow"
+`);
+  writeFileSync(join(CODEX_HOME, "rules", "jobwatch.rules"), `prefix_rule(
+    pattern = [${JSON.stringify(CODEX_FORBIDDEN)}],
+    decision = "forbidden",
+    justification = "seuls playwright-cli et jw mail-code servent à candidater",
+)
+prefix_rule(
+    pattern = [${JSON.stringify([...new Set([whichBinary(BROWSER), real])])}],
+    decision = "forbidden",
+    justification = "passer par playwright-cli, le filtre du dossier",
+)
+`);
 }
 
 async function login() {
@@ -167,17 +273,28 @@ async function runJob(claim) {
       writeFileSync(join(workDir, name), Buffer.from(content, "base64"), { mode: 0o600 });
     }
     const binDir = join(workDir, ".bin");
-    writeMailShim(binDir);
+    const codex = claim.agent === "codex";
+    writeMailShim(binDir, codex);
     killProfileChrome();
     try {
       await openBrowser(workDir, claim.url, "--headed");
-      log(`job ${claim.job_id} : agent lancé sur ${claim.url}`);
-      const agent = spawnSync(CLAUDE, claim.args, {
+      const agentEnv = { ...env, PATH: `${binDir}:${env.PATH}`, PLAYWRIGHT_CLI_SESSION: SESSION };
+      if (codex) {
+        const real = realBinary(BROWSER);
+        writeBrowserShim(binDir, real, claim.denied_browser);
+        writeCodexHome(real);
+        agentEnv.CODEX_HOME = CODEX_HOME;
+      }
+      log(`job ${claim.job_id} : agent ${codex ? "codex" : "claude"} lancé sur ${claim.url}`);
+      // Codex par son vrai chemin : il s'y relance, et le bac à sable refuse le lien.
+      const agent = spawnSync(codex ? realBinary(CODEX) : CLAUDE, claim.args, {
         cwd: workDir,
         encoding: "utf8",
         timeout: claim.timeout_seconds * 1000,
         maxBuffer: 64 * 1024 * 1024,
-        env: { ...env, PATH: `${binDir}:${env.PATH}`, PLAYWRIGHT_CLI_SESSION: SESSION },
+        // Codex lit stdin quand il est ouvert : rien à lui donner.
+        stdio: ["ignore", "pipe", "pipe"],
+        env: agentEnv,
       });
       // Délai dépassé : le formulaire a pu partir à moitié, le serveur rend la main.
       if (agent.error?.code === "ETIMEDOUT") {
@@ -186,9 +303,11 @@ async function runJob(claim) {
         throw agent.error;
       } else {
         const proof = join(workDir, "preuve.png");
+        // Codex écrit sa réponse finale (l'objet du schéma) dans un fichier.
+        const result = join(workDir, "agent_result.json");
         report = {
           returncode: agent.status ?? 1,
-          stdout: agent.stdout,
+          stdout: codex && existsSync(result) ? readFileSync(result, "utf8") : agent.stdout,
           stderr: agent.stderr,
           proof_b64: existsSync(proof) ? readFileSync(proof).toString("base64") : null,
         };

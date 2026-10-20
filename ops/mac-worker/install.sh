@@ -72,6 +72,21 @@ cat >"$PLIST" <<EOF
 </dict>
 </plist>
 EOF
+# Clé réservée à `jw mail-code` pour l'agent Codex, dont le bac à sable ne lit pas
+# ~/.ssh : le serveur lui impose mail-code-only.sh, elle ne peut rien d'autre.
+MAILCODE="$APP/mailcode"
+if [ ! -f "$MAILCODE/id_ed25519" ]; then
+  mkdir -p "$MAILCODE" && chmod 700 "$MAILCODE"
+  ssh-keygen -q -t ed25519 -N "" -C jobwatch-mailcode -f "$MAILCODE/id_ed25519"
+  # shellcheck disable=SC2086
+  $SSH_CMD -o BatchMode=yes "cat >> ~/.ssh/authorized_keys" <<EOF
+command="/home/rayan/jobwatch-prod/ops/mac-worker/mail-code-only.sh /home/rayan/jobwatch-prod/.venv/bin/jw --instance rayan",restrict $(cat "$MAILCODE/id_ed25519.pub")
+EOF
+fi
+HOST_PORT=$(echo "$SSH_CMD" | sed -n 's/.*-p \([0-9]*\).*/\1/p')
+HOST=$(echo "$SSH_CMD" | awk '{print $NF}' | sed 's/.*@//')
+ssh-keyscan -p "${HOST_PORT:-22}" "$HOST" 2>/dev/null >"$MAILCODE/known_hosts"
+
 # Plugin SwiftBar : SwiftBar n'a pas le PATH de launchd, d'où le chemin complet de node.
 cat >"$APP/menubar/jobwatch.30s.sh" <<EOF
 #!/bin/bash

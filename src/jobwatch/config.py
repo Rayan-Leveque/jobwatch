@@ -269,6 +269,7 @@ class ImapConfig:
 
 
 AUTOAPPLY_RUNNERS = ("local", "worker")
+AUTOAPPLY_AGENTS = ("claude", "codex")
 
 
 @dataclass
@@ -286,6 +287,8 @@ class AutoApplyConfig:
     # Met en file chaque dossier préparé, sans relecture : daily_limit reste le garde-fou.
     auto_send: bool = False
     daily_limit: int = 3
+    # Agent navigateur du poste d'envoi ; 'codex' n'existe qu'avec runner: worker.
+    agent: str = "claude"
     claude_bin: str = "claude"
     model: str | None = None
     browser_bin: str = "playwright-cli"
@@ -892,11 +895,17 @@ def _autoapply_from_dict(
         raise ConfigError("autoapply.auto_send doit être true ou false")
     if auto_send and runner != "worker":
         raise ConfigError("autoapply.auto_send exige runner: worker (sinon personne ne traite la file)")
+    agent = raw.get("agent", "claude")
+    if agent not in AUTOAPPLY_AGENTS:
+        raise ConfigError(f"autoapply.agent doit être l'un de {list(AUTOAPPLY_AGENTS)}")
+    if agent == "codex" and runner != "worker":
+        raise ConfigError("autoapply.agent: codex exige runner: worker")
     return AutoApplyConfig(
         browser_profile=profile,
         runner=runner,
         auto_send=auto_send,
         daily_limit=_positive_int(raw, "daily_limit", 3, "autoapply.daily_limit"),
+        agent=agent,
         claude_bin=_optional_string(raw, "claude_bin", "autoapply.claude_bin") or "claude",
         model=_optional_string(raw, "model", "autoapply.model"),
         browser_bin=_optional_string(raw, "browser_bin", "autoapply.browser_bin") or "playwright-cli",
