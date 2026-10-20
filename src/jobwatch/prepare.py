@@ -1,7 +1,8 @@
 """Préparation quotidienne des candidatures assistées : `jw prepare` (bloc autoapply).
 
 Choisit les meilleurs matchs neufs (fit high, mêmes filtres que la section
-Priorité haute du dashboard), les passe « À candidater », génère leur lettre
+Priorité haute du dashboard), écarte ceux dont l'offre a disparu (404, 410)
+sans entamer la limite du jour, passe les autres « À candidater », génère leur lettre
 par le pipeline de draft.py et crée un dossier `submission_job` en attente de
 validation. Sans `auto_send`, rien ne part chez un employeur avant le tap
 « Envoyer » du dashboard ; avec, le dossier est mis en file pour le poste
@@ -22,6 +23,7 @@ import httpx
 from jobwatch import draft
 from jobwatch.config import Config
 from jobwatch.digest import NTFY_URL
+from jobwatch.enrich import TERMINAL_HTTP_STATUSES, _source_http_headers
 from jobwatch.serve_queries import PROJECT_TITLE_PATTERNS, _priority_matches
 from jobwatch.submit import queue_submission
 
@@ -41,6 +43,7 @@ class PrepareError(Exception):
 class PrepareResult:
     prepared: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    expired: list[str] = field(default_factory=list)
 
 
 def draft_track(title: str) -> str:
@@ -81,11 +84,35 @@ def _candidates(conn: sqlite3.Connection, account_id: int) -> list[sqlite3.Row]:
     ]
 
 
+def offer_status(url: str, client: httpx.Client) -> int | None:
+    """Code HTTP de la page de l'offre ; None si le site ne répond pas."""
+    try:
+        return client.get(url, follow_redirects=True, headers=_source_http_headers(url)).status_code
+    except httpx.HTTPError:
+        return None
+
+
+def _offer_gone(conn: sqlite3.Connection, row: sqlite3.Row, client: httpx.Client) -> bool:
+    """Offre retirée : déjà vue en 404/410 par enrich, ou constatée maintenant.
+
+    Un refus (403 anti-robot, WTTJ depuis le VPS) ou un site muet ne compte pas :
+    seul le poste d'envoi, dans un vrai navigateur, peut en juger.
+    """
+    known = conn.execute(
+        "SELECT failure_reason FROM offer_content WHERE offer_id = ?", (row["offer_id"],)
+    ).fetchone()
+    if known is not None and known["failure_reason"] in ("http_404", "http_410"):
+        return True
+    return offer_status(str(row["url"]), client) in TERMINAL_HTTP_STATUSES
+
+
 def _label(row: sqlite3.Row) -> str:
     return f"{row['company'] or 'Société inconnue'} - {row['title']}"
 
 
-def prepare(conn: sqlite3.Connection, db_path: Path, config: Config) -> PrepareResult:
+def prepare(
+    conn: sqlite3.Connection, db_path: Path, config: Config, client: httpx.Client
+) -> PrepareResult:
     """Prépare jusqu'à `daily_limit` dossiers par jour ; idempotent sur la journée."""
     if config.autoapply is None or config.draft is None:
         raise PrepareError("bloc 'autoapply' absent de config.yaml")
@@ -94,8 +121,20 @@ def prepare(conn: sqlite3.Connection, db_path: Path, config: Config) -> PrepareR
     result = PrepareResult()
     if remaining <= 0:
         return result
-    for row in _candidates(conn, int(profile["account_id"]))[:remaining]:
+    for row in _candidates(conn, int(profile["account_id"])):
+        if remaining <= 0:
+            break
         match_id = int(row["id"])
+        if _offer_gone(conn, row, client):
+            conn.execute(
+                "UPDATE match SET state = 'discarded', discarded_at = datetime('now') "
+                "WHERE id = ?",
+                (match_id,),
+            )
+            conn.commit()
+            result.expired.append(_label(row))
+            continue
+        remaining -= 1
         conn.execute("UPDATE match SET state = 'later' WHERE id = ?", (match_id,))
         cur = conn.execute(
             "INSERT INTO draft_job (match_id, track, cv_library_id, status) "
@@ -129,10 +168,17 @@ def prepare(conn: sqlite3.Connection, db_path: Path, config: Config) -> PrepareR
 
 def notify_prepared(config: Config, result: PrepareResult, client: httpx.Client) -> bool:
     """Une notification ntfy par préparation non vide, avec lien vers le dashboard."""
-    if not result.prepared or config.notify.ntfy is None:
+    if not result.prepared:
         return False
     action = "en cours d'envoi" if config.autoapply and config.autoapply.auto_send else "à valider"
     title = f"jobwatch : {len(result.prepared)} candidature(s) {action}"
+    return notify(config, title, "\n".join(result.prepared), client)
+
+
+def notify(config: Config, title: str, body: str, client: httpx.Client) -> bool:
+    """Notification ntfy avec lien vers le dashboard ; False si ntfy absent ou en échec."""
+    if config.notify.ntfy is None:
+        return False
     # httpx encode les en-têtes en ASCII ; ntfy décode l'encodage RFC 2047.
     headers = {"Title": f"=?UTF-8?B?{base64.b64encode(title.encode()).decode()}?="}
     if config.autoapply is not None and config.autoapply.dashboard_url:
@@ -140,7 +186,7 @@ def notify_prepared(config: Config, result: PrepareResult, client: httpx.Client)
     try:
         response = client.post(
             NTFY_URL.format(topic=config.notify.ntfy.topic),
-            content="\n".join(result.prepared),
+            content=body,
             headers=headers,
         )
         response.raise_for_status()

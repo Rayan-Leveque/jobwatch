@@ -361,7 +361,8 @@ def test_draft_bundle_uses_optional_profile_without_inventing_missing_context() 
     assert "# PROFIL PERSONNEL" in personalized
     assert "Construire des produits utiles" in personalized
     assert "# PROFIL PERSONNEL" not in without_profile
-    prompt = draft.PROMPT.format(date="12 août 2026")
+    prompt = draft.PROMPT.format(date="12 août 2026", max_words=200)
+    assert "trois paragraphes et 200 mots au plus" in prompt
     assert "N'invente aucun fait absent du CV et du PROFIL PERSONNEL" in prompt
     assert "Si cette section est absente" in prompt
 
@@ -1381,6 +1382,51 @@ def test_letter_rejected_twice_fails_and_never_reaches_the_library(
     assert job["status"] == "failed"
     assert "refusée deux fois - Entreprise erronée." in job["error"]
     assert job["library_id"] is None
+
+
+def _letter(body: str) -> str:
+    return MINIMAL_TEX_WITH_BODY.replace("Je souhaite rejoindre votre équipe.", body)
+
+
+def test_long_letter_is_shortened_even_without_reviewer(
+    db_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+    conn = _conn(db_path)
+    job_id = _seed_job(conn, _seed_match(conn), _seed_cv(conn, tmp_path))
+    conn.close()
+    long_body = "\n\n".join(["mot " * 60] * 4)  # 240 mots, 4 paragraphes
+    letters = [_letter(long_body), _letter("Accroche.\n\nPreuve.\n\nClôture.")]
+    prompts: list[str] = []
+
+    def fake_llm(config, prompt, bundle):
+        prompts.append(prompt)
+        return letters[len(prompts) - 1]
+
+    monkeypatch.setattr(draft, "_call_llm", fake_llm)
+    run_job(db_path, _config(tmp_path), job_id)
+    conn = _conn(db_path)
+    job = conn.execute("SELECT * FROM draft_job WHERE id = ?", (job_id,)).fetchone()
+    conn.close()
+    assert job["status"] == "ok", job["error"]
+    assert len(prompts) == 2
+    assert "corps trop long (242 mots)" in prompts[1]
+    assert "4 paragraphes après la formule d'appel" in prompts[1]
+
+
+def test_letter_still_too_long_after_rewrite_fails(
+    db_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+    conn = _conn(db_path)
+    job_id = _seed_job(conn, _seed_match(conn), _seed_cv(conn, tmp_path))
+    conn.close()
+    monkeypatch.setattr(draft, "_call_llm", lambda *_: _letter("mot " * 250))
+    run_job(db_path, _config(tmp_path), job_id)
+    conn = _conn(db_path)
+    job = conn.execute("SELECT status, error, library_id FROM draft_job WHERE id = ?",
+                       (job_id,)).fetchone()
+    conn.close()
+    assert job["status"] == "failed"
+    assert "corps trop long" in job["error"] and job["library_id"] is None
 
 
 def test_config_parses_review_block(tmp_path: Path) -> None:
