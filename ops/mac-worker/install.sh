@@ -58,13 +58,17 @@ exec "$(command -v node)" "$APP/jobwatch-worker.mjs" "\$@"
 EOF
 chmod 700 "$APP/run.sh"
 
-cat >"$PLIST" <<EOF
+# Une tâche launchd par voie d'envoi (JOBWATCH_LANES, 2 par défaut) : toutes
+# puisent dans la même file, chacune avec son Chrome et son profil.
+write_plist() {
+  cat >"$HOME/Library/LaunchAgents/$1.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$LABEL</string>
+  <key>Label</key><string>$1</string>
   <key>ProgramArguments</key><array><string>$APP/run.sh</string></array>
+  <key>EnvironmentVariables</key><dict><key>JOBWATCH_LANE</key><string>$2</string></dict>
   <key>StartInterval</key><integer>120</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>$HOME/Library/Logs/jobwatch-worker.log</string>
@@ -72,6 +76,10 @@ cat >"$PLIST" <<EOF
 </dict>
 </plist>
 EOF
+}
+LANES="${JOBWATCH_LANES:-2}"
+write_plist "$LABEL" 1
+for lane in $(seq 2 "$LANES"); do write_plist "$LABEL-$lane" "$lane"; done
 # Clé réservée à `jw mail-code` pour l'agent Codex, dont le bac à sable ne lit pas
 # ~/.ssh : le serveur lui impose mail-code-only.sh, elle ne peut rien d'autre.
 MAILCODE="$APP/mailcode"
@@ -98,13 +106,17 @@ if [ -d /Applications/SwiftBar.app ]; then
   open -a SwiftBar
 fi
 
-launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
+for label in "$LABEL" $(for lane in $(seq 2 "$LANES"); do echo "$LABEL-$lane"; done); do
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$label.plist"
+done
 
 echo
 echo "Ouverture du Chrome dédié : connecte-toi à LinkedIn (via Google si besoin) et WTTJ,"
 echo "puis ferme la fenêtre. À refaire seulement si une session expire :"
 echo "  \"$APP/run.sh\" login"
+echo "puis, Chrome fermé, copie le profil connecté vers chaque autre voie :"
+echo "  JOBWATCH_LANE=2 \"$APP/run.sh\" clone-profile"
 "$APP/run.sh" login
 echo
 echo "Poste d'envoi installé. Journal : tail -f ~/Library/Logs/jobwatch-worker.log"

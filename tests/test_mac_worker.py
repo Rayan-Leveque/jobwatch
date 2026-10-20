@@ -166,7 +166,7 @@ def _run_menubar(home: Path) -> str:
          "| sfimage=exclamationmark.triangle.fill sfcolor=#d33"),
         ({"current": {"label": "Acorus - AI Product Manager", "timeout": 1800},
           "error": None, "sent": 3, "minutes_ago": 1},
-         "Acorus | sfimage=paperplane.fill length=18"),
+         "Acorus | sfimage=paperplane.fill length=22"),
     ],
 )
 def test_menubar_shows_worker_state(tmp_path: Path, status, first_line) -> None:
@@ -260,6 +260,39 @@ def test_mail_code_key_runs_nothing_else(tmp_path: Path, command, ok) -> None:
     )
     assert (done.returncode == 0) is ok
     assert done.stdout == ("--instance rayan mail-code --minutes 15\n" if ok else "")
+
+
+def test_two_lanes_share_the_queue_without_double_sending(
+    instance, tmp_path: Path  # noqa: F811
+) -> None:
+    db_path, config_path, cv_id = instance
+    _worker_config(config_path)
+    jobs = []
+    for i in range(4):
+        match_id = _prepared(db_path, cv_id, url=f"https://example.com/offer-{i}")
+        conn = connect(db_path)
+        jobs.append(queue_submission(conn, match_id))
+        conn.close()
+    env = _worker_env(tmp_path, config_path)
+    # Profil déjà cloné pour la voie 2 (sinon elle attend sans réclamer).
+    (tmp_path / "mac-profile").mkdir()
+    lanes = [
+        subprocess.Popen(
+            [NODE, str(WORKER)], env={**env, "JOBWATCH_LANE": lane},
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        for lane in ("1", "2")
+    ]
+    outputs = [lane.communicate(timeout=120)[0] for lane in lanes]
+    assert all(lane.returncode == 0 for lane in lanes), outputs
+
+    sent = [job for job in jobs for out in outputs if f"job {job} : submitted" in out]
+    assert sorted(sent) == sorted(jobs)  # chaque dossier une fois, et une seule
+    support = _support_dir(tmp_path)
+    assert (support / "status.json").exists() and (support / "status-2.json").exists()
+    menu = _run_menubar(tmp_path).splitlines()
+    assert menu[0] == "4 | sfimage=paperplane"
+    assert sum(line.startswith("✓ ") for line in menu) == 4
 
 
 def test_worker_without_queued_dossier_launches_no_browser(
