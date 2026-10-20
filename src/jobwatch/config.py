@@ -253,6 +253,9 @@ class DraftConfig:
     examples: dict[str, list[Path]] = field(default_factory=dict)
     # Relecteur des faits et de la justesse ; une lettre refusée deux fois échoue.
     review: ReviewConfig | None = None
+    # CODEX_HOME d'autres comptes ChatGPT, essayés dans l'ordre quand le quota
+    # du compte courant est épuisé.
+    codex_fallback_homes: list[Path] = field(default_factory=list)
 
 
 @dataclass
@@ -816,6 +819,10 @@ def _draft_from_dict(raw: object) -> DraftConfig | None:
         model=model, runner=runner, opencode_bin=opencode_bin, codex_bin=codex_bin,
         api_key=api_key, variant=variant, examples=examples,
         review=_review_from_dict(raw.get("review")),
+        codex_fallback_homes=[
+            Path(os.path.expanduser(p))
+            for p in _string_list(raw.get("codex_fallback_homes", []), "draft.codex_fallback_homes")
+        ],
     )
 
 

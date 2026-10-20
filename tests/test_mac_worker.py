@@ -195,9 +195,15 @@ def test_worker_runs_codex_in_its_sandbox(instance, tmp_path: Path) -> None:  # 
     sockets.mkdir(parents=True)
     (sockets / "abc-jobwatch-mac.sock").touch()
     env["TMPDIR"] = str(tmp_path / "tmp")
+    # Le compte principal a épuisé son quota : le compte de secours prend le relais.
+    env["JOBWATCH_CODEX_FALLBACK_HOMES"] = str(tmp_path / "codex-spare")
     env["CODEX_BIN"] = str(_fake_bin(
         tmp_path / "mac-bin", "fake-codex",
         "import json, os, pathlib, subprocess, sys\n"
+        "auth = os.readlink(os.path.join(os.environ['CODEX_HOME'], 'auth.json'))\n"
+        f"open({str(tmp_path / 'accounts.txt')!r}, 'a').write(auth + '\\n')\n"
+        "if 'codex-spare' not in auth:\n"
+        "    print(\"ERROR: You've hit your usage limit.\", file=sys.stderr); sys.exit(1)\n"
         f"pathlib.Path({str(tmp_path / 'argv.json')!r}).write_text(json.dumps(sys.argv[1:]))\n"
         "run = lambda *a: subprocess.run(['playwright-cli', *a], capture_output=True).returncode\n"
         "pathlib.Path('filtre.json').write_text(json.dumps([\n"
@@ -211,6 +217,9 @@ def test_worker_runs_codex_in_its_sandbox(instance, tmp_path: Path) -> None:  # 
     done = _run_worker(env)
     assert done.returncode == 0, done.stdout + done.stderr
     assert f"job {job_id} : submitted" in done.stdout
+    assert (tmp_path / "accounts.txt").read_text().split() == [
+        str(tmp_path / ".codex" / "auth.json"), str(tmp_path / "codex-spare" / "auth.json"),
+    ]
     argv = json.loads((tmp_path / "argv.json").read_text())
     assert argv[:2] == ["exec", "--skip-git-repo-check"] and "gpt-6.1-sol" in argv
     mac_dir = tmp_path / "mac-work" / str(job_id)

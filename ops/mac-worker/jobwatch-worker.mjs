@@ -13,6 +13,7 @@
 //   JOBWATCH_SSH   commande d'accès au serveur ("" = exécution locale, tests)
 //   JOBWATCH_JW    commande jw sur le serveur
 //   CLAUDE_BIN, PLAYWRIGHT_CLI, JOBWATCH_PROFILE, JOBWATCH_WORK_ROOT
+//   CODEX_BIN, JOBWATCH_CODEX_FALLBACK_HOMES (comptes ChatGPT de secours)
 
 import { spawnSync } from "node:child_process";
 import {
@@ -35,6 +36,13 @@ const SESSION = "jobwatch-mac";
 // Codex : configuration dédiée (ni AGENTS.md, ni hooks, ni MCP de l'utilisateur)
 // et clé SSH qui ne sert qu'à `jw mail-code` (commande forcée côté serveur).
 const CODEX_HOME = join(SUPPORT, "codex-home");
+// Comptes ChatGPT essayés dans l'ordre quand le quota du précédent est épuisé
+// (JOBWATCH_CODEX_FALLBACK_HOMES : CODEX_HOME séparés par « : »).
+const CODEX_ACCOUNTS = [
+  join(homedir(), ".codex"),
+  ...(env.JOBWATCH_CODEX_FALLBACK_HOMES || "").split(":").filter(Boolean),
+];
+const CODEX_USAGE_LIMIT = "hit your usage limit";
 const MAILCODE_KEY = join(SUPPORT, "mailcode", "id_ed25519");
 const MAILCODE_KNOWN_HOSTS = join(SUPPORT, "mailcode", "known_hosts");
 // Interdites à Codex : de quoi parler au navigateur ou au réseau sans le filtre.
@@ -200,10 +208,10 @@ function sessionSocketDir() {
 // Bac à sable de Codex : écriture dans le seul dossier de travail, lecture des
 // outils (node, playwright-cli, ssh) et de la session du navigateur, rien d'autre
 // du dossier personnel (~/.ssh, documents, profil Chrome).
-function writeCodexHome(real) {
+function writeCodexHome(real, account) {
   rmSync(CODEX_HOME, { recursive: true, force: true });
   mkdirSync(join(CODEX_HOME, "rules"), { recursive: true, mode: 0o700 });
-  symlinkSync(join(homedir(), ".codex", "auth.json"), join(CODEX_HOME, "auth.json"));
+  symlinkSync(join(account, "auth.json"), join(CODEX_HOME, "auth.json"));
   const socketDir = sessionSocketDir();
   const readable = [
     "/opt/homebrew",
@@ -280,23 +288,28 @@ async function runJob(claim) {
     try {
       await openBrowser(workDir, claim.url, "--headed");
       const agentEnv = { ...env, PATH: `${binDir}:${env.PATH}`, PLAYWRIGHT_CLI_SESSION: SESSION };
+      const real = codex ? realBinary(BROWSER) : null;
       if (codex) {
-        const real = realBinary(BROWSER);
         writeBrowserShim(binDir, real, claim.denied_browser);
-        writeCodexHome(real);
         agentEnv.CODEX_HOME = CODEX_HOME;
       }
-      log(`job ${claim.job_id} : agent ${codex ? "codex" : "claude"} lancé sur ${claim.url}`);
-      // Codex par son vrai chemin : il s'y relance, et le bac à sable refuse le lien.
-      const agent = spawnSync(codex ? realBinary(CODEX) : CLAUDE, claim.args, {
-        cwd: workDir,
-        encoding: "utf8",
-        timeout: claim.timeout_seconds * 1000,
-        maxBuffer: 64 * 1024 * 1024,
-        // Codex lit stdin quand il est ouvert : rien à lui donner.
-        stdio: ["ignore", "pipe", "pipe"],
-        env: agentEnv,
-      });
+      let agent;
+      for (const account of codex ? CODEX_ACCOUNTS : [null]) {
+        if (codex) writeCodexHome(real, account);
+        log(`job ${claim.job_id} : agent ${codex ? `codex (${account})` : "claude"} lancé sur ${claim.url}`);
+        // Codex par son vrai chemin : il s'y relance, et le bac à sable refuse le lien.
+        agent = spawnSync(codex ? realBinary(CODEX) : CLAUDE, claim.args, {
+          cwd: workDir,
+          encoding: "utf8",
+          timeout: claim.timeout_seconds * 1000,
+          maxBuffer: 64 * 1024 * 1024,
+          // Codex lit stdin quand il est ouvert : rien à lui donner.
+          stdio: ["ignore", "pipe", "pipe"],
+          env: agentEnv,
+        });
+        // Quota épuisé : codex s'arrête avant toute action, le compte suivant reprend.
+        if (!`${agent.stdout}${agent.stderr}`.includes(CODEX_USAGE_LIMIT)) break;
+      }
       // Délai dépassé : le formulaire a pu partir à moitié, le serveur rend la main.
       if (agent.error?.code === "ETIMEDOUT") {
         report = { timeout: true };
