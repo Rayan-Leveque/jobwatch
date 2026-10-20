@@ -56,6 +56,9 @@ const CODEX_FORBIDDEN = [
 ];
 // Lu par l'icône de barre des menus (jobwatch-menubar.mjs).
 const STATUS = join(SUPPORT, `status${LANE_SUFFIX}.json`);
+// Présent : toutes les voies finissent leur dossier puis s'arrêtent (menu
+// « Mettre en pause » de la barre des menus, ou avant clone-profile).
+const PAUSE = join(SUPPORT, "pause");
 const HISTORY_SIZE = 10;
 const LOGIN_PAGES = [
   "https://www.linkedin.com/login",
@@ -290,8 +293,12 @@ async function main() {
   }
   mkdirSync(WORK_ROOT, { recursive: true, mode: 0o700 });
   for (;;) {
+    if (existsSync(PAUSE)) {
+      saveStatus({ current: null, error: null, paused: true });
+      return;
+    }
     const claim = JSON.parse(remote(`${JW} submission-claim`) || "{}");
-    saveStatus({ sent: claim.sent, error: null, current: null });
+    saveStatus({ sent: claim.sent, error: null, current: null, paused: false });
     if (!claim.job_id) return;
     if (claim.error) log(`job ${claim.job_id} refusé par le serveur : ${claim.error}`);
     else await runJob(claim);

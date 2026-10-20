@@ -295,6 +295,29 @@ def test_two_lanes_share_the_queue_without_double_sending(
     assert sum(line.startswith("✓ ") for line in menu) == 4
 
 
+def test_paused_worker_leaves_the_queue_alone(instance, tmp_path: Path) -> None:  # noqa: F811
+    db_path, config_path, cv_id = instance
+    _worker_config(config_path)
+    match_id = _prepared(db_path, cv_id)
+    conn = connect(db_path)
+    queue_submission(conn, match_id)
+    conn.close()
+    _support_dir(tmp_path).mkdir(parents=True)
+    (_support_dir(tmp_path) / "pause").touch()
+
+    done = _run_worker(_worker_env(tmp_path, config_path))
+    assert done.returncode == 0, done.stdout + done.stderr
+    conn = connect(db_path)
+    status = conn.execute(
+        "SELECT status FROM submission_job WHERE match_id = ?", (match_id,)
+    ).fetchone()[0]
+    conn.close()
+    assert status == "queued" and not (tmp_path / "browser-calls.txt").exists()
+    menu = _run_menubar(tmp_path).splitlines()
+    assert menu[0].endswith("sfimage=pause.circle") and "En pause" in menu
+    assert any(line.startswith("Reprendre les envois") for line in menu)
+
+
 def test_worker_without_queued_dossier_launches_no_browser(
     instance, tmp_path: Path  # noqa: F811
 ) -> None:
