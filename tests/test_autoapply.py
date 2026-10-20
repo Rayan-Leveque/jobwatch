@@ -363,6 +363,14 @@ def _mail_only_submission(instance, tmp_path: Path, monkeypatch, smtp_host: str 
     return job, applied
 
 
+def test_letter_file_name_keeps_accented_letters() -> None:
+    from jobwatch.submit import _file_stem
+
+    assert _file_stem("Civils de la Défense - Ministère des Armées") == (
+        "Civils_de_la_Defense_Ministere_des_Armees"
+    )
+
+
 def test_mail_only_offer_is_sent_by_email_with_cv_and_letter(
     instance, tmp_path: Path, monkeypatch
 ) -> None:
