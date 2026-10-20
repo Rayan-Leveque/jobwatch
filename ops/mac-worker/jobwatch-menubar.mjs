@@ -5,7 +5,7 @@
 //   en cours    avion plein + entreprise
 //   en panne    triangle rouge : dernier passage en échec ou trop ancien
 
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -33,6 +33,8 @@ try {
   // Dossier absent : aucun passage encore.
 }
 
+const PAUSE = join(SUPPORT, "pause");
+const paused = existsSync(PAUSE);
 const lines = [];
 const problems = [];
 if (!lanes.length) problems.push("aucun passage enregistré");
@@ -42,7 +44,7 @@ for (const lane of lanes) {
   if (current && minutesSince(current.started) > (current.timeout ?? 1800) / 60 + STALE_MINUTES) {
     problems.push(`bloqué sur ${current.label}`);
   } else if (lane.error) problems.push(lane.error);
-  else if (!current && age > STALE_MINUTES) problems.push(`aucun passage depuis ${age} min`);
+  else if (!current && !paused && age > STALE_MINUTES) problems.push(`aucun passage depuis ${age} min`);
 }
 const running = lanes.map((lane) => lane.current).filter(Boolean);
 const sent = Math.max(0, ...lanes.map((lane) => lane.sent ?? 0));
@@ -52,14 +54,15 @@ if (problems.length) lines.push("| sfimage=exclamationmark.triangle.fill sfcolor
 else if (running.length) {
   const more = running.length > 1 ? ` +${running.length - 1}` : "";
   lines.push(`${clean(running[0].label.split(" - ")[0])}${more} | sfimage=paperplane.fill length=22`);
-} else lines.push(`${sent} | sfimage=paperplane`);
+} else lines.push(`${sent} | sfimage=${paused ? "pause.circle" : "paperplane"}`);
 lines.push("---");
 
 for (const problem of problems) lines.push(`En panne : ${clean(problem)} | length=70 color=#d33`);
 for (const current of running) {
   lines.push(`En cours : ${clean(current.label)} (${minutesSince(current.started)} min) | length=70`);
 }
-if (!running.length && !problems.length) lines.push("En veille, aucun dossier en attente");
+if (paused) lines.push(running.length ? "En pause après les envois en cours" : "En pause");
+else if (!running.length && !problems.length) lines.push("En veille, aucun dossier en attente");
 if (lanes.length) {
   lines.push(`Dernier passage : il y a ${age} min`);
   lines.push(`${sent} candidatures envoyées`);
@@ -76,5 +79,8 @@ for (const entry of history) {
 }
 
 lines.push("---");
+lines.push(paused
+  ? `Reprendre les envois | bash=/bin/rm param1="${PAUSE}" terminal=false refresh=true`
+  : `Mettre en pause | bash=/usr/bin/touch param1="${PAUSE}" terminal=false refresh=true`);
 lines.push(`Ouvrir le journal | bash=/usr/bin/open param1=-a param2=Console param3="${LOG}" terminal=false`);
 console.log(lines.join("\n"));
