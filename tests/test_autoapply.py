@@ -346,9 +346,9 @@ def _agent(tmp_path: Path, result: dict) -> AutoApplyConfig:
     )
 
 
-def _prepared(db_path: Path, cv_id: int) -> int:
+def _prepared(db_path: Path, cv_id: int, url: str = "https://example.com/offer") -> int:
     conn = connect(db_path)
-    match_id = _seed_match(conn, state="later", fit="high")
+    match_id = _seed_match(conn, state="later", fit="high", url=url)
     pdf = db_path.parent / "lettre.pdf"
     pdf.write_bytes(b"%PDF-1.4 lettre")
     draft_id = conn.execute(

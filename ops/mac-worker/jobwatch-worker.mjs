@@ -258,16 +258,17 @@ async function login() {
   console.log("puis ferme cette fenêtre. Les sessions restent dans le profil dédié.");
 }
 
+// Vide la file d'un trait : sans boucle, chaque dossier attendait le passage
+// launchd suivant (jusqu'à 2 minutes perdues entre deux envois).
 async function main() {
   mkdirSync(WORK_ROOT, { recursive: true, mode: 0o700 });
-  const claim = JSON.parse(remote(`${JW} submission-claim`) || "{}");
-  saveStatus({ sent: claim.sent, error: null, current: null });
-  if (!claim.job_id) return;
-  if (claim.error) {
-    log(`job ${claim.job_id} refusé par le serveur : ${claim.error}`);
-    return;
+  for (;;) {
+    const claim = JSON.parse(remote(`${JW} submission-claim`) || "{}");
+    saveStatus({ sent: claim.sent, error: null, current: null });
+    if (!claim.job_id) return;
+    if (claim.error) log(`job ${claim.job_id} refusé par le serveur : ${claim.error}`);
+    else await runJob(claim);
   }
-  await runJob(claim);
 }
 
 async function runJob(claim) {

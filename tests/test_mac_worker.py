@@ -98,11 +98,15 @@ def test_worker_claims_dossier_runs_agent_and_records_application(
     match_id = _prepared(db_path, cv_id)
     conn = connect(db_path)
     job_id = queue_submission(conn, match_id)
+    # Un second dossier en file part dans le même passage, sans attendre launchd.
+    second_match = _prepared(db_path, cv_id, url="https://example.com/offer-2")
+    second_job = queue_submission(conn, second_match)
     conn.close()
 
     done = _run_worker(_worker_env(tmp_path, config_path))
     assert done.returncode == 0, done.stdout + done.stderr
     assert f"job {job_id} : submitted" in done.stdout
+    assert f"job {second_job} : submitted" in done.stdout
 
     conn = connect(db_path)
     job = conn.execute("SELECT * FROM submission_job WHERE id = ?", (job_id,)).fetchone()
@@ -120,7 +124,7 @@ def test_worker_claims_dossier_runs_agent_and_records_application(
     assert (mac_dir / "shim_rc.txt").read_text() != "0"
     # Fenêtre visible sur le profil dédié, fermée après l'agent : le Chrome habituel n'est pas touché.
     calls = (tmp_path / "browser-calls.txt").read_text().splitlines()
-    assert calls == [
+    assert calls[:2] == [
         (
             f"open https://example.com/offer --browser=chrome --profile={tmp_path / 'mac-profile'}"
             " --headed"
@@ -132,11 +136,11 @@ def test_worker_claims_dossier_runs_agent_and_records_application(
 
     # L'icône de barre des menus montre l'envoi et le compteur.
     status = json.loads((_support_dir(tmp_path) / "status.json").read_text())
-    assert status["current"] is None and status["sent"] == 1
+    assert status["current"] is None and status["sent"] == 2
     assert status["history"][0]["status"] == "submitted"
     assert status["history"][0]["label"].startswith("Acme - ")
     menu = _run_menubar(tmp_path).splitlines()
-    assert menu[0] == "1 | sfimage=paperplane"
+    assert menu[0] == "2 | sfimage=paperplane"
     assert any(line.startswith("✓ Acme - ") for line in menu)
 
 
