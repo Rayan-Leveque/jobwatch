@@ -138,7 +138,8 @@ function writeMailShim(binDir, codex) {
   mkdirSync(binDir, { recursive: true });
   const dedicated = [
     "-F", "/dev/null", "-i", MAILCODE_KEY, "-o", "IdentitiesOnly=yes",
-    "-o", `UserKnownHostsFile=${MAILCODE_KNOWN_HOSTS}`, "-o", "BatchMode=yes",
+    // Guillemets : ssh coupe la valeur aux espaces (« Application Support »).
+    "-o", `UserKnownHostsFile="${MAILCODE_KNOWN_HOSTS}"`, "-o", "BatchMode=yes",
   ];
   const ssh = [SSH[0], ...(codex ? dedicated : []), ...SSH.slice(1), ...SSH_KEEPALIVE].map(quote).join(" ");
   const command = codex ? "mail-code --minutes $MINUTES" : `${JW} mail-code --minutes $MINUTES`;
