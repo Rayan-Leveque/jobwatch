@@ -39,9 +39,19 @@ const GONE_STATUSES = new Set([404, 410]);
 
 const log = (message) => console.log(`${new Date().toISOString()} ${message}`);
 
+// Sans ces délais, une mise en veille en plein échange laisse SSH ouvert pour
+// toujours : le passage ne finit jamais et launchd n'en relance pas d'autre.
+const SSH_KEEPALIVE = ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4", "-o", "ConnectTimeout=15"];
+const REMOTE_TIMEOUT_MS = 180_000;
+
 function remote(command, input) {
-  const [bin, args] = SSH.length ? [SSH[0], [...SSH.slice(1), command]] : ["sh", ["-c", command]];
-  const done = spawnSync(bin, args, { input, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  const [bin, args] = SSH.length
+    ? [SSH[0], [...SSH.slice(1), ...SSH_KEEPALIVE, command]]
+    : ["sh", ["-c", command]];
+  const done = spawnSync(bin, args, {
+    input, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: REMOTE_TIMEOUT_MS,
+  });
+  if (done.error?.code === "ETIMEDOUT") throw new Error(`serveur muet : ${command}`);
   if (done.status !== 0) throw new Error(`serveur : ${command} (${(done.stderr || "").trim().slice(0, 300)})`);
   return done.stdout;
 }
@@ -86,7 +96,7 @@ async function openBrowser(cwd, url, ...flags) {
 // `jw mail-code` pour l'agent : seule l'option --minutes passe, et seulement des chiffres.
 function writeMailShim(binDir) {
   mkdirSync(binDir, { recursive: true });
-  const ssh = SSH.map((part) => `'${part}'`).join(" ");
+  const ssh = [...SSH, ...SSH_KEEPALIVE].map((part) => `'${part}'`).join(" ");
   const run = SSH.length ? `${ssh} "${JW} mail-code --minutes $MINUTES"` : `${JW} mail-code --minutes $MINUTES`;
   const shim = `#!/bin/sh
 [ "$1" = "mail-code" ] || { echo "seul jw mail-code est disponible" >&2; exit 1; }
