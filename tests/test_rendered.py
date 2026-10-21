@@ -82,6 +82,20 @@ def test_playwright_config_and_build_naming(tmp_path) -> None:
     ]
 
 
+def test_searches_on_one_site_are_separate_sources(tmp_path) -> None:
+    # Sinon la première recherche réussie ferait différer les suivantes.
+    _config(tmp_path, "https://emplois.example.tld/recherche?q=IA")
+    path = tmp_path / "config.yaml"
+    path.write_text(path.read_text() + (
+        "      - url: https://emplois.example.tld/recherche?q=data\n"
+        "        name: Emplois test\n"
+        '        link_pattern: "/offres/.+"\n'
+    ))
+    assert [c.name for c in build_collectors(load_config(path).sources)] == [
+        "playwright:emplois.example.tld?q=IA", "playwright:emplois.example.tld?q=data",
+    ]
+
+
 @pytest.mark.parametrize(
     "block, message",
     [
