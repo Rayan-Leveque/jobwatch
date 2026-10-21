@@ -56,6 +56,8 @@ def opencode_text(stdout: str) -> str:
 
 #: Message de codex quand le quota du compte ChatGPT est épuisé.
 CODEX_USAGE_LIMIT = "hit your usage limit"
+#: Début du message d'erreur levé quand tous les comptes ont épuisé leur quota.
+CODEX_QUOTA_ERROR = "quota codex épuisé"
 
 
 def run_codex(
@@ -105,6 +107,8 @@ def run_codex(
                 )
                 if CODEX_USAGE_LIMIT not in completed.stdout + completed.stderr:
                     break
+            else:
+                raise LLMRunnerError(f"{CODEX_QUOTA_ERROR} sur tous les comptes")
             if completed.returncode != 0:
                 raise LLMRunnerError(f"codex a quitté avec le code {completed.returncode}")
             try:

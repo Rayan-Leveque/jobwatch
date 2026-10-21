@@ -26,6 +26,7 @@ from jobwatch import draft
 from jobwatch.config import Config
 from jobwatch.digest import NTFY_URL
 from jobwatch.enrich import TERMINAL_HTTP_STATUSES, _source_http_headers
+from jobwatch.llm_runner import CODEX_QUOTA_ERROR
 from jobwatch.serve_queries import PROJECT_TITLE_PATTERNS, _later_matches, _priority_matches
 from jobwatch.submit import queue_submission
 
@@ -52,6 +53,8 @@ class PrepareResult:
     expired: list[str] = field(default_factory=list)
     # Raison de l'arrêt anticipé (panne commune à toutes les lettres), sinon None.
     aborted: str | None = None
+    # Quota codex épuisé : arrêt sans échec, les offres repassent au prochain passage.
+    quota: bool = False
 
 
 #: Échecs de lettre d'affilée au-delà desquels la panne est commune (outil
@@ -197,6 +200,9 @@ def _prepare(
             "SELECT status, error FROM draft_job WHERE id = ?", (draft_job_id,)
         ).fetchone()
         ok = job["status"] == "ok"
+        if not ok and str(job["error"] or "").startswith(CODEX_QUOTA_ERROR):
+            result.quota = True
+            break
         conn.execute(
             "INSERT INTO submission_job (match_id, cv_library_id, draft_job_id, status, reason) "
             "VALUES (?, ?, ?, ?, ?)",

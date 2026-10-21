@@ -115,6 +115,6 @@ def test_run_codex_switches_account_when_quota_is_used_up(tmp_path: Path) -> Non
                      fallback_homes=[spare])
     assert text.strip() == "lettre"
     assert calls.read_text().split() == ["principal", str(spare)]
-    # Sans compte de secours, l'échec reste visible.
-    with pytest.raises(LLMRunnerError):
+    # Sans compte de secours, l'échec reste visible et désigne le quota.
+    with pytest.raises(LLMRunnerError, match="quota codex épuisé"):
         run_codex(binary=str(codex), model="m", prompt="p", attachment="a", timeout=30)

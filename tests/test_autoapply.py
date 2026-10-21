@@ -232,6 +232,43 @@ def test_prepare_stops_when_every_letter_fails(instance, monkeypatch) -> None:
     assert legacy_state == "discarded"
 
 
+def test_prepare_keeps_offers_for_later_when_codex_quota_is_used_up(
+    instance, monkeypatch
+) -> None:
+    db_path, config_path, _cv_id = instance
+    conn = connect(db_path)
+    match_id = _seed_match(conn, company="Co", url="https://example.com/1", fit="high")
+    conn.close()
+
+    def quota(path: Path, _config, job_id: int) -> None:
+        conn = connect(path)
+        conn.execute(
+            "UPDATE draft_job SET status = 'failed', "
+            "error = 'quota codex épuisé sur tous les comptes' WHERE id = ?", (job_id,),
+        )
+        conn.commit()
+        conn.close()
+
+    monkeypatch.setattr(prepare.draft, "run_job", quota)
+    alerts: list[str] = []
+    monkeypatch.setattr(cli_module, "notify", lambda _c, title, body, _cl: alerts.append(title))
+    result = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    assert "quota codex épuisé" in result.output
+    assert alerts == []
+    conn = connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM submission_job").fetchone()[0] == 0
+    # Quota revenu : l'offre est reprise.
+    monkeypatch.setattr(prepare.draft, "run_job", _fake_letter(db_path))
+    result = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    status = conn.execute(
+        "SELECT status FROM submission_job WHERE match_id = ?", (match_id,)
+    ).fetchone()
+    conn.close()
+    assert result.exit_code == 0, result.output
+    assert status is not None and status[0] != "failed"
+
+
 def test_offer_status_follows_redirects_to_the_final_page() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/offre":
