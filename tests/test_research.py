@@ -15,6 +15,7 @@ from jobwatch.research import (
     ResearchResult,
     _parse_result,
     apply_research_fits,
+    fit_unfitted_offers,
     research_offers,
     unfitted_recent_offers,
 )
@@ -285,6 +286,40 @@ def test_unfitted_recent_offers_lists_recent_matches_without_fit() -> None:
     conn.commit()
 
     assert [offer.url for offer in unfitted_recent_offers(conn)] == [offers[0].url]
+    conn.close()
+
+
+def test_fit_pass_rates_every_open_offer_without_web_search(monkeypatch) -> None:
+    conn = connect(":memory:")
+    init_db(conn)
+    sync_searches(conn, _searches())
+    offers = [RawOffer(f"AI {i}", f"https://jobs.example/{i}", f"Co{i}", "Test", "Paris")
+              for i in range(30)]
+    store_offers(conn, "test", "test", offers)
+    # Ancienne offre : hors fenêtre de la recherche large, notée quand même.
+    conn.execute("UPDATE offer SET collected_at = datetime('now', '-20 days') WHERE url = ?",
+                 (offers[0].url,))
+    run_matching(conn)
+    conn.commit()
+    requests: list[dict] = []
+
+    def post(url, *, headers, json, timeout):
+        requests.append(json)
+        batch = __import__("json").loads(json["messages"][0]["content"]
+                                         .rsplit("<candidates>", 1)[1].split("</candidates>")[0])
+        fits = [{"id": row["id"], "fit": "medium"} for row in batch["candidates"]]
+        content = __import__("json").dumps({"fits": fits})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]},
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("jobwatch.research.httpx.post", post)
+    fitted, failed = fit_unfitted_offers(
+        conn, _config(runner="openrouter", api_key="k"), _searches()
+    )
+    assert (fitted, failed) == (30, False)
+    assert len(requests) == 2
+    assert all("plugins" not in request for request in requests)
+    assert conn.execute("SELECT COUNT(*) FROM match WHERE fit IS NULL").fetchone()[0] == 0
     conn.close()
 
 
