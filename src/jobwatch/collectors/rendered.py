@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import logging
 import re
-from urllib.parse import urljoin, urlparse
+from html import unescape as html_unescape
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 
@@ -30,23 +31,26 @@ SETTLE_MS = 2_500
 def offers_from_html(html: str, base_url: str, link_pattern: str) -> list[RawOffer]:
     """Extrait les offres d'un HTML rendu, hors navigateur, pour être testable."""
     anchors = ANCHOR_RE.findall(html)
-    seen: set[str] = set()
-    offers: list[RawOffer] = []
+    # Plusieurs liens par offre (image, titre, bouton) : le premier texte non vide gagne.
+    titles: dict[str, str] = {}
     for href, text in anchors:
-        url = urljoin(base_url, href.strip())
+        url = urljoin(base_url, html_unescape(href.strip()))
         if not urlparse(url).scheme in ("http", "https"):
             continue
         if not re.search(link_pattern, url):
             continue
-        if url in seen:
-            continue
-        seen.add(url)
-        title = re.sub(r"\s+", " ", TAG_RE.sub("", text)).strip()
+        title = re.sub(r"\s+", " ", html_unescape(TAG_RE.sub("", text))).strip()
+        if not titles.get(url):
+            titles[url] = title
+    offers: list[RawOffer] = []
+    for url, title in titles.items():
+        # Le paramètre « title » de l'URL (Accenture) passe avant le texte du lien,
+        # souvent un bouton générique ; repli final sur la fin du chemin.
+        title = parse_qs(urlparse(url).query).get("title", [""])[0].strip() or title
         if not title:
             title = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1].replace("-", " ").strip()
-        if not title:
-            continue
-        offers.append(RawOffer(title=title, url=url, company="", platform=PLATFORM))
+        if title:
+            offers.append(RawOffer(title=title, url=url, company="", platform=PLATFORM))
     return offers
 
 
