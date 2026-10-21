@@ -97,7 +97,9 @@ Règles strictes :
   dans ces faits, arrête-toi : statut needs_human, en citant la question.
 - Captcha, vérification d'identité, test technique, entretien vidéo, offre
   expirée ou fermée, paiement demandé : statut needs_human avec la raison.
-- blocker = "captcha" si un captcha t'arrête, "login" si une connexion
+- blocker = "captcha" si un captcha ou une protection anti-robot t'arrête
+  (page 403 CloudFront ou Cloudflare, « vérifiez que vous êtes humain »),
+  "login" si une connexion
   t'arrête (identifiants absents de COMPTES, connexion LinkedIn, Google ou
   WTTJ demandée) ; sinon null.
 - Accepte seulement les consentements nécessaires à la candidature
