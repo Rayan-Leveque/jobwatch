@@ -297,6 +297,7 @@ class ImapConfig:
 
 AUTOAPPLY_RUNNERS = ("local", "worker")
 AUTOAPPLY_AGENTS = ("claude", "codex")
+AUTOAPPLY_FITS = ("high", "medium", "low")
 
 
 @dataclass
@@ -314,6 +315,8 @@ class AutoApplyConfig:
     # Met en file chaque dossier préparé, sans relecture : daily_limit reste le garde-fou.
     auto_send: bool = False
     daily_limit: int = 3
+    # Notes de priorité préparées d'office : « high » seul par défaut.
+    fits: tuple[str, ...] = ("high",)
     # Agent navigateur du poste d'envoi ; 'codex' n'existe qu'avec runner: worker.
     agent: str = "claude"
     claude_bin: str = "claude"
@@ -988,11 +991,15 @@ def _autoapply_from_dict(
         raise ConfigError(f"autoapply.agent doit être l'un de {list(AUTOAPPLY_AGENTS)}")
     if agent == "codex" and runner != "worker":
         raise ConfigError("autoapply.agent: codex exige runner: worker")
+    fits = raw.get("fits", ["high"])
+    if not isinstance(fits, list) or not fits or any(f not in AUTOAPPLY_FITS for f in fits):
+        raise ConfigError(f"autoapply.fits doit être une liste non vide parmi {list(AUTOAPPLY_FITS)}")
     return AutoApplyConfig(
         browser_profile=profile,
         runner=runner,
         auto_send=auto_send,
         daily_limit=_positive_int(raw, "daily_limit", 3, "autoapply.daily_limit"),
+        fits=tuple(fits),
         agent=agent,
         claude_bin=_optional_string(raw, "claude_bin", "autoapply.claude_bin") or "claude",
         model=_optional_string(raw, "model", "autoapply.model"),

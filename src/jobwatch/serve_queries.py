@@ -88,17 +88,19 @@ def _matches(
 
 
 def _priority_matches(
-    conn: sqlite3.Connection, track: str, account_id: int | None = None
+    conn: sqlite3.Connection, track: str, account_id: int | None = None,
+    fits: tuple[str, ...] = ("high",),
 ) -> list[sqlite3.Row]:
     seniority_sql, seniority_params = _seniority_filter(account_id)
     rows = conn.execute(
         f"{_MATCH_SELECT_SQL}"
-        "WHERE m.fit = 'high' AND m.state IN ('new', 'seen') AND NOT EXISTS "
+        f"WHERE m.fit IN ({', '.join('?' * len(fits))}) "
+        "AND m.state IN ('new', 'seen') AND NOT EXISTS "
         "    (SELECT 1 FROM application a WHERE a.match_id = m.id) "
         f"{seniority_sql}"
         f"{_track_filter(track)}"
-        "ORDER BY o.collected_at DESC, m.id DESC",
-        (*seniority_params, *_track_params(track)),
+        "ORDER BY m.fit = 'high' DESC, o.collected_at DESC, m.id DESC",
+        (*fits, *seniority_params, *_track_params(track)),
     ).fetchall()
     return filter_profile_locations(conn, rows, account_id)
 

@@ -85,14 +85,16 @@ def _prepared_today(conn: sqlite3.Connection) -> int:
     return int(row["n"])
 
 
-def _candidates(conn: sqlite3.Connection, account_id: int) -> list[sqlite3.Row]:
+def _candidates(
+    conn: sqlite3.Connection, account_id: int, fits: tuple[str, ...] = ("high",)
+) -> list[sqlite3.Row]:
     already = {
         int(row["match_id"])
         for row in conn.execute("SELECT DISTINCT match_id FROM submission_job")
     }
     priority = [
         row
-        for row in _priority_matches(conn, "all", account_id)
+        for row in _priority_matches(conn, "all", account_id, fits)
         if row["state"] == "new" and int(row["id"]) not in already
     ]
     # Déjà choisis par l'humain : leur ancienne lettre éventuelle est réécrite au
@@ -168,7 +170,7 @@ def _prepare(
     if remaining <= 0:
         return result
     failures = 0
-    for row in _candidates(conn, int(profile["account_id"])):
+    for row in _candidates(conn, int(profile["account_id"]), config.autoapply.fits):
         if remaining <= 0:
             break
         match_id = int(row["id"])
