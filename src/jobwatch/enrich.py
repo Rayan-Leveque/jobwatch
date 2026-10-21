@@ -70,6 +70,33 @@ CONTRACT_PATTERNS = (
     ("permanent", re.compile(r"\bCDI\b|durée indéterminée|FULL_TIME", re.IGNORECASE)),
     ("fixed_term", re.compile(r"\bCDD\b|durée déterminée|CONTRACTOR|TEMPORARY", re.IGNORECASE)),
 )
+# Ligne qui annonce le contrat (« Type de contrat : CDI », « Employment type »).
+CONTRACT_LINE_RE = re.compile(
+    r"^.*\b(contrat|type d.emploi|employment type|job type)\b.*$", re.IGNORECASE | re.MULTILINE
+)
+# Hors de cette ligne, « stage » seul ne prouve rien : « expérience en stage »,
+# « jeune diplômé, stage ou alternance » figurent dans des annonces de CDI.
+INTERNSHIP_STRONG_RE = re.compile(
+    r"\b(offre|convention) de stage\b|\bstage de (fin d.études|\d+ ?mois)\b|\bstagiaire\b"
+    r"|\binternship\b|\ben alternance\b|\bcontrat d.apprentissage\b",
+    re.IGNORECASE,
+)
+
+
+def infer_contract(markdown: str) -> str | None:
+    """Contrat lu dans l'annonce : ligne de contrat d'abord, sinon indices forts."""
+    for line in CONTRACT_LINE_RE.finditer(markdown):
+        label = next(
+            (label for label, pattern in CONTRACT_PATTERNS if pattern.search(line.group(0))),
+            None,
+        )
+        if label is not None:
+            return label
+    if INTERNSHIP_STRONG_RE.search(markdown):
+        return "internship"
+    return next(
+        (label for label, pattern in CONTRACT_PATTERNS[1:] if pattern.search(markdown)), None
+    )
 LIEU_LINE_RE = re.compile(r"^\s*Lieu\s*:\s*(\S.*?)\s*$", re.MULTILINE)
 POSTAL_TOWN_RE = re.compile(
     r"\b(\d{5})\s+([A-ZÀ-Þ][A-Za-zÀ-ÿ'’\- ]{1,30})[.,;)…]?\s*$", re.MULTILINE
@@ -361,14 +388,7 @@ def _backfill_meta(conn: sqlite3.Connection, offer_id: int, markdown: str) -> tu
         "SELECT title, contract, location FROM offer WHERE id = ?", (offer_id,)
     ).fetchone()
     contract_filled = location_filled = 0
-    contract = next(
-        (
-            label
-            for label, pattern in CONTRACT_PATTERNS
-            if pattern.search(markdown)
-        ),
-        None,
-    )
+    contract = infer_contract(markdown)
     if contract is not None and offer["contract"] is None:
         conn.execute(
             "UPDATE offer SET contract = ? WHERE id = ? AND contract IS NULL",
