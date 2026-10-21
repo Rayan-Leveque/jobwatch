@@ -404,6 +404,7 @@ def test_run_enriches_bridge_and_research_before_notifying(
         "jobwatch.cli.research_offers",
         lambda *_args: ResearchResult([offer], {offer.url: "high"}),
     )
+    monkeypatch.setattr("jobwatch.cli.fit_unfitted_offers", lambda *_args: (0, False))
 
     def summarize(**kwargs):
         summarized.append(kwargs["attachment"])

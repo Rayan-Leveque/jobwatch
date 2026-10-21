@@ -33,7 +33,12 @@ from jobwatch.paths import INSTANCE_ENV, instance_paths, validate_instance_name
 from jobwatch.prepare import PrepareBusy, PrepareError, notify, notify_prepared
 from jobwatch.prepare import prepare as prepare_applications
 from jobwatch.profile_sources import sources_for_profile
-from jobwatch.research import apply_research_fits, research_offers, unfitted_recent_offers
+from jobwatch.research import (
+    apply_research_fits,
+    fit_unfitted_offers,
+    research_offers,
+    unfitted_recent_offers,
+)
 from jobwatch.serve import ServeError, serve_http
 from jobwatch.submit import (
     ASSISTED_NOTE,
@@ -231,6 +236,11 @@ def run(config_path: Path | None) -> None:
             collected += len(new_ids)
             new_matches += run_matching(conn)
         fitted = apply_research_fits(conn, research_fits)
+        if config.research is not None:
+            # La recherche large note peu de candidats : une passe dédiée note le reste.
+            batch_fitted, fit_failed = fit_unfitted_offers(conn, config.research, searches)
+            fitted += batch_fitted
+            research_failed = research_failed or fit_failed
         enrichment = enrich(conn, config.enrich) if config.enrich is not None else None
         if enrichment is not None:
             click.echo(enrichment.summary_line())
@@ -613,6 +623,23 @@ def prepare(config_path: Path | None) -> None:
         with httpx.Client(timeout=10.0) as client:
             notify(config, "jobwatch : préparation arrêtée", result.aborted[:500], client)
         _fatal(f"préparation arrêtée : {result.aborted}")
+
+
+@cli.command()
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+def fit(config_path: Path | None) -> None:
+    """Note le fit de toutes les offres ouvertes qui n'en ont pas encore."""
+    config = _require_config(config_path)
+    if config.research is None:
+        _fatal("bloc research absent de la configuration")
+    conn = _open_db(config)
+    try:
+        fitted, failed = fit_unfitted_offers(conn, config.research, active_search_configs(conn))
+    finally:
+        conn.close()
+    click.echo(f"{fitted} fit(s) renseigné(s)")
+    if failed:
+        _fatal("notation incomplète, consultez les journaux et réessayez")
 
 
 @cli.command()
