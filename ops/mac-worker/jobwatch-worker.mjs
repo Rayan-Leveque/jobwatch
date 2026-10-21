@@ -326,6 +326,45 @@ function quotaRetry(output) {
   return at;
 }
 
+// Lance l'agent, en passant au compte Codex suivant quand le quota est épuisé.
+function runAgent(claim, workDir, agentEnv, real, args) {
+  const codex = claim.agent === "codex";
+  let agent;
+  for (const account of codex ? CODEX_ACCOUNTS : [null]) {
+    if (codex) writeCodexHome(real, account);
+    log(`job ${claim.job_id} : agent ${codex ? `codex (${account})` : "claude"} lancé sur ${claim.url}`);
+    // Codex par son vrai chemin : il s'y relance, et le bac à sable refuse le lien.
+    agent = spawnSync(codex ? realBinary(CODEX) : CLAUDE, args, {
+      cwd: workDir,
+      encoding: "utf8",
+      timeout: claim.timeout_seconds * 1000,
+      maxBuffer: 64 * 1024 * 1024,
+      // Codex lit stdin quand il est ouvert : rien à lui donner.
+      stdio: ["ignore", "pipe", "pipe"],
+      env: agentEnv,
+    });
+    // Quota épuisé : le compte suivant reprend le dossier depuis le début.
+    if (!`${agent.stdout}${agent.stderr}`.includes(CODEX_USAGE_LIMIT)) break;
+  }
+  return agent;
+}
+
+// « captcha » ou « login » quand l'agent s'est arrêté sur l'un d'eux, sinon null.
+function blockerOf(stdout) {
+  try {
+    const parsed = JSON.parse(stdout);
+    const result = parsed.structured_output ?? parsed;
+    return result.status === "needs_human" ? result.blocker ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
+// Notification macOS : la fenêtre visible attend le candidat.
+function notify(message) {
+  spawnSync("osascript", ["-e", `display notification ${JSON.stringify(message)} with title "jobwatch" sound name "Glass"`]);
+}
+
 async function runJob(claim) {
   const workDir = join(WORK_ROOT, String(claim.job_id));
   const label = claim.label || `dossier ${claim.job_id}`;
@@ -340,57 +379,55 @@ async function runJob(claim) {
     const binDir = join(workDir, ".bin");
     const codex = claim.agent === "codex";
     writeMailShim(binDir, codex);
-    killProfileChrome();
-    try {
-      await openBrowser(workDir, claim.url, "--headed");
-      const agentEnv = { ...env, PATH: `${binDir}:${env.PATH}`, PLAYWRIGHT_CLI_SESSION: SESSION };
-      const real = codex ? realBinary(BROWSER) : null;
-      if (codex) {
-        writeBrowserShim(binDir, real, claim.denied_browser);
-        agentEnv.CODEX_HOME = CODEX_HOME;
-      }
-      let agent;
-      for (const account of codex ? CODEX_ACCOUNTS : [null]) {
-        if (codex) writeCodexHome(real, account);
-        log(`job ${claim.job_id} : agent ${codex ? `codex (${account})` : "claude"} lancé sur ${claim.url}`);
-        // Codex par son vrai chemin : il s'y relance, et le bac à sable refuse le lien.
-        agent = spawnSync(codex ? realBinary(CODEX) : CLAUDE, claim.args, {
-          cwd: workDir,
-          encoding: "utf8",
-          timeout: claim.timeout_seconds * 1000,
-          maxBuffer: 64 * 1024 * 1024,
-          // Codex lit stdin quand il est ouvert : rien à lui donner.
-          stdio: ["ignore", "pipe", "pipe"],
-          env: agentEnv,
-        });
-        // Quota épuisé : le compte suivant reprend le dossier depuis le début.
-        if (!`${agent.stdout}${agent.stderr}`.includes(CODEX_USAGE_LIMIT)) break;
-      }
-      const output = `${agent.stdout}${agent.stderr}`;
-      // Délai dépassé : le formulaire a pu partir à moitié, le serveur rend la main.
-      if (agent.error?.code === "ETIMEDOUT") {
-        report = { timeout: true };
-      } else if (codex && output.includes(CODEX_USAGE_LIMIT)) {
-        // Rien n'est parti : le serveur remet le dossier en file.
-        writeFileSync(QUOTA, quotaRetry(output).toISOString());
-        report = { quota: true };
-      } else if (agent.error) {
-        throw agent.error;
-      } else {
-        const proof = join(workDir, "preuve.png");
-        // Codex écrit sa réponse finale (l'objet du schéma) dans un fichier.
-        const result = join(workDir, "agent_result.json");
-        report = {
-          returncode: agent.status ?? 1,
-          stdout: codex && existsSync(result) ? readFileSync(result, "utf8") : agent.stdout,
-          stderr: agent.stderr,
-          proof_b64: existsSync(proof) ? readFileSync(proof).toString("base64") : null,
-        };
-      }
-    } finally {
-      // Même si la page n'a pas chargé, le navigateur est ouvert : on le ferme.
-      browser(workDir, "close");
+    const agentEnv = { ...env, PATH: `${binDir}:${env.PATH}`, PLAYWRIGHT_CLI_SESSION: SESSION };
+    const real = codex ? realBinary(BROWSER) : null;
+    if (codex) {
+      writeBrowserShim(binDir, real, claim.denied_browser);
+      agentEnv.CODEX_HOME = CODEX_HOME;
+    }
+    const proof = join(workDir, "preuve.png");
+    // Codex écrit sa réponse finale (l'objet du schéma) dans un fichier.
+    const result = join(workDir, "agent_result.json");
+    let agent;
+    let stdout;
+    // Chrome en arrière-plan ; un captcha ou une connexion rouvre le dossier dans
+    // une fenêtre visible, où l'agent attend que le candidat débloque.
+    for (const assisted of [false, true]) {
+      rmSync(result, { force: true });
+      rmSync(proof, { force: true });
       killProfileChrome();
+      try {
+        await openBrowser(workDir, claim.url, ...(assisted ? ["--headed"] : []));
+        agent = runAgent(claim, workDir, agentEnv, real, assisted ? claim.assisted_args : claim.args);
+      } finally {
+        // Même si la page n'a pas chargé, le navigateur est ouvert : on le ferme.
+        browser(workDir, "close");
+        killProfileChrome();
+      }
+      stdout = codex && existsSync(result) ? readFileSync(result, "utf8") : agent.stdout;
+      const blocker = assisted || agent.error || !claim.assisted_args ? null : blockerOf(stdout);
+      if (!blocker) break;
+      log(`job ${claim.job_id} : ${blocker} demandé, reprise en fenêtre visible`);
+      notify(`${blocker === "captcha" ? "Captcha à résoudre" : "Connexion à faire"} : ${label}`);
+      saveStatus({ current: { label, started: new Date().toISOString(), timeout: claim.timeout_seconds, assisted: blocker } });
+    }
+    const output = `${agent.stdout}${agent.stderr}`;
+    // Délai dépassé : le formulaire a pu partir à moitié, le serveur rend la main.
+    if (agent.error?.code === "ETIMEDOUT") {
+      report = { timeout: true };
+    } else if (codex && output.includes(CODEX_USAGE_LIMIT)) {
+      // Rien n'est parti : le serveur remet le dossier en file.
+      writeFileSync(QUOTA, quotaRetry(output).toISOString());
+      report = { quota: true };
+    } else if (agent.error) {
+      throw agent.error;
+    } else {
+      report = {
+        returncode: agent.status ?? 1,
+        stdout,
+        stderr: agent.stderr,
+        proof_b64: existsSync(proof) ? readFileSync(proof).toString("base64") : null,
+      };
     }
   } catch (error) {
     report = error instanceof OfferGone ? { expired: error.status } : { error: String(error.message || error) };
