@@ -35,6 +35,19 @@ def test_offers_from_html_matches_resolves_and_cleans() -> None:
     assert by_title["pwd 7"].url.endswith("/offres/pwd-7")  # Repli sur le chemin.
 
 
+def test_offers_from_html_prefers_title_from_url() -> None:
+    # Accenture : le lien porte un texte générique, le titre est dans l'URL.
+    html = (
+        '<a href="/fr-fr/careers/jobdetails?id=R1&amp;title=Consultant+IA+g%C3%A9n%C3%A9rative">'
+        'Lire la description complète du poste</a>'
+    )
+    offers = offers_from_html(html, "https://www.accenture.com/fr-fr/careers/jobsearch", r"jobdetails\?id=")
+    assert [(o.title, o.url) for o in offers] == [(
+        "Consultant IA générative",
+        "https://www.accenture.com/fr-fr/careers/jobdetails?id=R1&title=Consultant+IA+g%C3%A9n%C3%A9rative",
+    )]
+
+
 def test_offers_from_html_rejects_javascript_links() -> None:
     offers = offers_from_html(
         '<a href="javascript:ouvre(1)">Offre JS</a>', "https://a.tld/", r"offre"
