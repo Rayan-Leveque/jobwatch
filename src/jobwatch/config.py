@@ -148,6 +148,28 @@ class TalentsoftSource:
 
 
 @dataclass
+class CapgeminiSource:
+    queries: list[str]
+    locations: list[str] = field(default_factory=list)
+    country: str = "fr-fr"
+    interval_days: int = 1
+
+
+@dataclass
+class SuccessFactorsSite:
+    url: str
+    name: str
+
+
+@dataclass
+class SuccessFactorsSource:
+    sites: list[SuccessFactorsSite]
+    keywords: list[str]
+    locations: list[str] = field(default_factory=list)
+    interval_days: int = 1
+
+
+@dataclass
 class SourcesConfig:
     france_travail: FranceTravailSource | None = None
     smartrecruiters: SmartRecruitersSource | None = None
@@ -156,6 +178,8 @@ class SourcesConfig:
     talentsoft: TalentsoftSource | None = None
     workday: WorkdaySource | None = None
     playwright: RenderedSource | None = None
+    capgemini: CapgeminiSource | None = None
+    successfactors: SuccessFactorsSource | None = None
 
 
 @dataclass
@@ -549,6 +573,59 @@ def _workday_from_dict(raw: object) -> WorkdaySource:
     return WorkdaySource(sites=sites, interval_days=interval_days)
 
 
+def _capgemini_from_dict(raw: object) -> CapgeminiSource:
+    if not isinstance(raw, dict):
+        raise ConfigError("sources.capgemini doit être un mapping")
+    queries = _string_list(raw.get("queries"), "sources.capgemini.queries")
+    if not queries:
+        raise ConfigError("sources.capgemini.queries doit être une liste non vide")
+    country = raw.get("country", "fr-fr")
+    if not isinstance(country, str) or not re.fullmatch(r"[a-z]{2}-[a-z]{2}", country):
+        raise ConfigError("sources.capgemini.country doit ressembler à 'fr-fr'")
+    return CapgeminiSource(
+        queries=queries,
+        locations=_string_list(raw.get("locations", []), "sources.capgemini.locations"),
+        country=country,
+        interval_days=_interval_days(
+            raw.get("interval_days", 1), "sources.capgemini.interval_days"
+        ),
+    )
+
+
+def _successfactors_from_dict(raw: object) -> SuccessFactorsSource:
+    if not isinstance(raw, dict):
+        raise ConfigError("sources.successfactors doit être un mapping")
+    sites_raw = raw.get("sites")
+    if not isinstance(sites_raw, list) or not sites_raw:
+        raise ConfigError("sources.successfactors.sites doit être une liste non vide")
+    sites: list[SuccessFactorsSite] = []
+    for index, site_raw in enumerate(sites_raw):
+        if not isinstance(site_raw, dict):
+            raise ConfigError(f"sources.successfactors.sites[{index}] doit être un mapping")
+        url = site_raw.get("url")
+        name = site_raw.get("name")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            raise ConfigError(
+                f"sources.successfactors.sites[{index}].url doit être une URL HTTP(S)"
+            )
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"sources.successfactors.sites[{index}].name est requis")
+        sites.append(SuccessFactorsSite(url=url.rstrip("/"), name=name))
+    if len({site.url.casefold() for site in sites}) != len(sites):
+        raise ConfigError("sources.successfactors.sites contient une URL en double")
+    keywords = _string_list(raw.get("keywords"), "sources.successfactors.keywords")
+    if not keywords:
+        raise ConfigError("sources.successfactors.keywords doit être une liste non vide")
+    return SuccessFactorsSource(
+        sites=sites,
+        keywords=keywords,
+        locations=_string_list(raw.get("locations", []), "sources.successfactors.locations"),
+        interval_days=_interval_days(
+            raw.get("interval_days", 1), "sources.successfactors.interval_days"
+        ),
+    )
+
+
 def _rendered_from_dict(raw: object) -> RenderedSource:
     if not isinstance(raw, dict):
         raise ConfigError("sources.playwright doit être un mapping")
@@ -600,7 +677,7 @@ def _sources_from_dict(raw: object) -> SourcesConfig:
         raise ConfigError("'sources' doit être un mapping")
     known = {
         "france_travail", "smartrecruiters", "linkedin", "wttj",
-        "talentsoft", "workday", "playwright",
+        "talentsoft", "workday", "playwright", "capgemini", "successfactors",
     }
     unknown = set(raw) - known
     if unknown:
@@ -617,6 +694,10 @@ def _sources_from_dict(raw: object) -> SourcesConfig:
         talentsoft=_talentsoft_from_dict(raw.get("talentsoft")) if "talentsoft" in raw else None,
         workday=_workday_from_dict(raw.get("workday")) if "workday" in raw else None,
         playwright=_rendered_from_dict(raw.get("playwright")) if "playwright" in raw else None,
+        capgemini=_capgemini_from_dict(raw.get("capgemini")) if "capgemini" in raw else None,
+        successfactors=_successfactors_from_dict(raw.get("successfactors"))
+        if "successfactors" in raw
+        else None,
     )
 
 
