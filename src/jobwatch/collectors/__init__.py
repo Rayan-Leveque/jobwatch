@@ -10,10 +10,12 @@ from datetime import UTC, datetime, timedelta
 import httpx
 
 from jobwatch.collectors.base import Collector, store_offers
+from jobwatch.collectors.capgemini import CapgeminiCollector
 from jobwatch.collectors.france_travail import FranceTravailCollector
 from jobwatch.collectors.linkedin import LinkedInCollector
 from jobwatch.collectors.rendered import PlaywrightCollector
 from jobwatch.collectors.smartrecruiters import SmartRecruitersCollector
+from jobwatch.collectors.successfactors import SuccessFactorsCollector
 from jobwatch.collectors.talentsoft import TalentsoftCollector, site_slug
 from jobwatch.collectors.workday import WorkdayCollector, cxs_site_name
 from jobwatch.collectors.wttj import WttjCollector
@@ -98,6 +100,23 @@ def build_collectors(sources: SourcesConfig, client: httpx.Client | None = None)
                 client=client, interval_days=site.interval_days,
             )
             collector.name = f"playwright:{site_slug(site.url)}"
+            collectors.append(collector)
+    if sources.capgemini is not None:
+        cg = sources.capgemini
+        collectors.append(
+            CapgeminiCollector(
+                queries=cg.queries, country=cg.country, locations=cg.locations,
+                client=client, interval_days=cg.interval_days,
+            )
+        )
+    if sources.successfactors is not None:
+        sf = sources.successfactors
+        for site in sf.sites:
+            collector = SuccessFactorsCollector(
+                base_url=site.url, company=site.name, keywords=sf.keywords,
+                locations=sf.locations, client=client, interval_days=sf.interval_days,
+            )
+            collector.name = f"successfactors:{site_slug(site.url)}"
             collectors.append(collector)
     return collectors
 
