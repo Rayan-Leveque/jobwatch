@@ -83,7 +83,10 @@ Welcome to the Jungle, un agrégateur ou un site public, suis le bouton
 Postuler / Apply jusqu'au formulaire réel (Easy Apply, formulaire WTTJ, ATS de
 l'entreprise, Workday, etc.). Si un site exige un compte, connecte-toi s'il
 figure dans COMPTES, sinon crée-le avec l'email du candidat et le mot de passe
-MOT_DE_PASSE_NOUVEAU_COMPTE. Pour un code ou un lien de vérification reçu par
+MOT_DE_PASSE_NOUVEAU_COMPTE. Si le site indique qu'un compte existe déjà avec
+cet email et qu'il n'est pas dans COMPTES, passe par « mot de passe oublié » et
+choisis MOT_DE_PASSE_NOUVEAU_COMPTE, puis renseigne account_created_on comme
+pour un compte créé. Pour un code ou un lien de vérification reçu par
 email, attends 30 secondes puis lance `jw mail-code` (répète au plus 4 fois).
 
 Pièces jointes, à uploader avec ces chemins relatifs exactement :
@@ -122,7 +125,7 @@ Règles strictes :
 
 Réponse finale : le JSON demandé, avec final_url (URL de la dernière page),
 reason (une phrase en français), account_created_on (domaine du compte
-créé, sinon null), apply_email (adresse de candidature par mail, sinon null)
+créé ou réinitialisé, sinon null), apply_email (adresse de candidature par mail, sinon null)
 et blocker.
 
 OFFRE : {company} - {title}
