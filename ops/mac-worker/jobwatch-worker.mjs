@@ -48,6 +48,10 @@ const CODEX_ACCOUNTS = [
   ...(env.JOBWATCH_CODEX_FALLBACK_HOMES || "").split(":").filter(Boolean),
 ];
 const CODEX_USAGE_LIMIT = "hit your usage limit";
+// Tous les comptes épuisés : les dossiers restent en file jusqu'à la reprise
+// annoncée par Codex (« try again at 2:43 AM »), à défaut 15 minutes.
+const QUOTA = join(SUPPORT, "codex-quota");
+const QUOTA_RETRY_MS = 15 * 60_000;
 const MAILCODE_KEY = join(SUPPORT, "mailcode", "id_ed25519");
 const MAILCODE_KNOWN_HOSTS = join(SUPPORT, "mailcode", "known_hosts");
 // Interdites à Codex : de quoi parler au navigateur ou au réseau sans le filtre.
@@ -297,12 +301,29 @@ async function main() {
       saveStatus({ current: null, error: null, paused: true });
       return;
     }
+    const quotaUntil = existsSync(QUOTA) ? Date.parse(readFileSync(QUOTA, "utf8")) : NaN;
+    if (quotaUntil > Date.now()) {
+      saveStatus({ current: null, error: null, paused: false, quotaUntil: new Date(quotaUntil).toISOString() });
+      return;
+    }
     const claim = JSON.parse(remote(`${JW} submission-claim`) || "{}");
-    saveStatus({ sent: claim.sent, error: null, current: null, paused: false });
+    saveStatus({ sent: claim.sent, error: null, current: null, paused: false, quotaUntil: null });
     if (!claim.job_id) return;
     if (claim.error) log(`job ${claim.job_id} refusé par le serveur : ${claim.error}`);
     else await runJob(claim);
   }
+}
+
+// Heure de reprise annoncée par Codex, sinon dans 15 minutes.
+function quotaRetry(output) {
+  const retry = new Date(Date.now() + QUOTA_RETRY_MS);
+  const [, h, m, half] = /try again at (\d{1,2}):(\d{2}) ?([AP]M)?/i.exec(output) || [];
+  if (!h) return retry;
+  const hour = half ? (Number(h) % 12) + (half.toUpperCase() === "PM" ? 12 : 0) : Number(h);
+  const at = new Date();
+  at.setHours(hour, Number(m), 0, 0);
+  if (at <= Date.now()) at.setDate(at.getDate() + 1);
+  return at;
 }
 
 async function runJob(claim) {
@@ -342,12 +363,17 @@ async function runJob(claim) {
           stdio: ["ignore", "pipe", "pipe"],
           env: agentEnv,
         });
-        // Quota épuisé : codex s'arrête avant toute action, le compte suivant reprend.
+        // Quota épuisé : le compte suivant reprend le dossier depuis le début.
         if (!`${agent.stdout}${agent.stderr}`.includes(CODEX_USAGE_LIMIT)) break;
       }
+      const output = `${agent.stdout}${agent.stderr}`;
       // Délai dépassé : le formulaire a pu partir à moitié, le serveur rend la main.
       if (agent.error?.code === "ETIMEDOUT") {
         report = { timeout: true };
+      } else if (codex && output.includes(CODEX_USAGE_LIMIT)) {
+        // Rien n'est parti : le serveur remet le dossier en file.
+        writeFileSync(QUOTA, quotaRetry(output).toISOString());
+        report = { quota: true };
       } else if (agent.error) {
         throw agent.error;
       } else {
