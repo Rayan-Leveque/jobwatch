@@ -6,6 +6,7 @@ import logging
 import math
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -99,7 +100,9 @@ def build_collectors(sources: SourcesConfig, client: httpx.Client | None = None)
                 url=site.url, company=site.name, link_pattern=site.link_pattern,
                 client=client, interval_days=site.interval_days,
             )
-            collector.name = f"playwright:{site_slug(site.url)}"
+            # Plusieurs recherches sur un même site : la requête distingue les sources.
+            query = urlsplit(site.url).query
+            collector.name = f"playwright:{site_slug(site.url)}" + (f"?{query}" if query else "")
             collectors.append(collector)
     if sources.capgemini is not None:
         cg = sources.capgemini
