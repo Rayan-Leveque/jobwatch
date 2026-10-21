@@ -11,7 +11,7 @@ import pytest
 
 from jobwatch.config import ENRICH_RUNNERS, EnrichConfig
 from jobwatch.db import connect, init_db
-from jobwatch.enrich import FIELD_UNKNOWN, EnrichError, FetchPage, enrich
+from jobwatch.enrich import FIELD_UNKNOWN, EnrichError, FetchPage, enrich, infer_contract
 
 
 @pytest.fixture()
@@ -1558,6 +1558,24 @@ def test_enrich_backfills_contract_and_location_from_announcement(
     assert result.contracts_backfilled == 1
     assert result.locations_backfilled == 1
     assert "1 contrat(s) et 1 lieu(x) complété(s)" in result.summary_line()
+
+
+@pytest.mark.parametrize(
+    ("markdown", "contract"),
+    [
+        # Annonces de CDI qui parlent de stage : avant, classées stage et écartées.
+        (("Vous êtes jeune diplômé Bac+5, avec une expérience en stage ou alternance. "
+          "Poste en CDI à Paris."), "permanent"),
+        ("Profil : 1 à 2 ans d'expérience, stages compris.\nType de contrat : CDI", "permanent"),
+        ("Type de contrat : Stage\nDurée : 6 mois, possibilité de CDI ensuite", "internship"),
+        ("Stage de fin d'études de 6 mois. Une embauche en CDI est possible.", "internship"),
+        ("Rejoignez-nous en alternance pour 2 ans.", "internship"),
+        ("Mission de 12 mois en CDD.", "fixed_term"),
+        ("Aucune mention du contrat ici.", None),
+    ],
+)
+def test_infer_contract_ignores_passing_mentions_of_internships(markdown, contract) -> None:
+    assert infer_contract(markdown) == contract
 
 
 def test_enrich_backfill_never_invents_a_location_from_title(
