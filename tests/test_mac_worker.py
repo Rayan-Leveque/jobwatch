@@ -31,6 +31,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node absent")
 SUBMITTED = {
     "status": "submitted", "reason": "Confirmation affichée.",
     "final_url": "https://ats.example.com/merci", "account_created_on": None,
+    "apply_email": None, "blocker": None,
 }
 
 
@@ -122,13 +123,11 @@ def test_worker_claims_dossier_runs_agent_and_records_application(
     assert not any(name.startswith(".mot_de_passe") for name in received)
     # Le faux `jw` du Mac refuse toute autre commande que mail-code.
     assert (mac_dir / "shim_rc.txt").read_text() != "0"
-    # Fenêtre visible sur le profil dédié, fermée après l'agent : le Chrome habituel n'est pas touché.
+    # Chrome en arrière-plan sur le profil dédié, fermé après l'agent : le Chrome habituel
+    # n'est pas touché et aucune fenêtre n'apparaît.
     calls = (tmp_path / "browser-calls.txt").read_text().splitlines()
     assert calls[:2] == [
-        (
-            f"open https://example.com/offer --browser=chrome --profile={tmp_path / 'mac-profile'}"
-            " --headed"
-        ),
+        f"open https://example.com/offer --browser=chrome --profile={tmp_path / 'mac-profile'}",
         "close",
     ]
     argv = json.loads((tmp_path / "argv.json").read_text())
@@ -181,6 +180,39 @@ def test_menubar_shows_worker_state(tmp_path: Path, status, first_line) -> None:
             json.dumps({**status, "updated": moment, "history": []})
         )
     assert _run_menubar(tmp_path).splitlines()[0] == first_line
+
+
+def test_captcha_reopens_the_dossier_in_a_visible_window(
+    instance, tmp_path: Path  # noqa: F811
+) -> None:
+    db_path, config_path, cv_id = instance
+    _worker_config(config_path)
+    match_id = _prepared(db_path, cv_id)
+    conn = connect(db_path)
+    job_id = queue_submission(conn, match_id)
+    conn.close()
+    env = _worker_env(tmp_path, config_path)
+    blocked = {**SUBMITTED, "status": "needs_human", "reason": "Captcha.", "blocker": "captcha"}
+    # Arrêt sur captcha en arrière-plan ; avec le candidat devant l'écran, l'envoi passe.
+    env["CLAUDE_BIN"] = str(_fake_bin(
+        tmp_path / "mac-bin", "fake-claude-captcha",
+        "import json, sys\n"
+        "assisted = 'Reprise assistée' in sys.argv[sys.argv.index('-p') + 1]\n"
+        f"result = json.loads({json.dumps(json.dumps(SUBMITTED))}) if assisted "
+        f"else json.loads({json.dumps(json.dumps(blocked))})\n"
+        "print(json.dumps({'structured_output': result}))\n",
+    ))
+
+    done = _run_worker(env)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "captcha demandé, reprise en fenêtre visible" in done.stdout
+    assert f"job {job_id} : submitted" in done.stdout
+    opens = [
+        call for call in (tmp_path / "browser-calls.txt").read_text().splitlines()
+        if call.startswith("open ")
+    ]
+    assert len(opens) == 2
+    assert not opens[0].endswith("--headed") and opens[1].endswith("--headed")
 
 
 def test_worker_runs_codex_in_its_sandbox(instance, tmp_path: Path) -> None:  # noqa: F811

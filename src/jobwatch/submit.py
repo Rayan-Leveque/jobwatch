@@ -55,8 +55,11 @@ OUTPUT_SCHEMA = {
         "final_url": {"type": "string"},
         "account_created_on": {"type": ["string", "null"]},
         "apply_email": {"type": ["string", "null"]},
+        "blocker": {"type": ["string", "null"], "enum": ["captcha", "login", None]},
     },
-    "required": ["status", "reason", "final_url", "account_created_on", "apply_email"],
+    "required": [
+        "status", "reason", "final_url", "account_created_on", "apply_email", "blocker",
+    ],
     "additionalProperties": False,
 }
 
@@ -94,6 +97,9 @@ Règles strictes :
   dans ces faits, arrête-toi : statut needs_human, en citant la question.
 - Captcha, vérification d'identité, test technique, entretien vidéo, offre
   expirée ou fermée, paiement demandé : statut needs_human avec la raison.
+- blocker = "captcha" si un captcha t'arrête, "login" si une connexion
+  t'arrête (identifiants absents de COMPTES, connexion LinkedIn, Google ou
+  WTTJ demandée) ; sinon null.
 - Accepte seulement les consentements nécessaires à la candidature
   (politique de confidentialité, traitement des données). Refuse newsletters
   et partage avec des tiers.
@@ -114,10 +120,22 @@ Règles strictes :
 
 Réponse finale : le JSON demandé, avec final_url (URL de la dernière page),
 reason (une phrase en français), account_created_on (domaine du compte
-créé, sinon null) et apply_email (adresse de candidature par mail, sinon null).
+créé, sinon null), apply_email (adresse de candidature par mail, sinon null)
+et blocker.
 
 OFFRE : {company} - {title}
 URL : {url}
+"""
+
+
+# Ajouté au prompt quand le poste d'envoi rouvre le dossier en fenêtre visible
+# après un captcha ou une connexion : le candidat est devant l'écran.
+ASSISTED_NOTE = """
+Reprise assistée : une première tentative s'est arrêtée sur un captcha ou une
+connexion. Le candidat est maintenant devant la fenêtre du navigateur. Avance
+jusqu'au blocage, puis attends qu'il le résolve lui-même : refais un snapshot
+toutes les 30 secondes, pendant 10 minutes au plus, puis continue. Ne saisis
+jamais d'identifiants absents de COMPTES.
 """
 
 

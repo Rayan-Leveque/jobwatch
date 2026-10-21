@@ -36,6 +36,7 @@ from jobwatch.profile_sources import sources_for_profile
 from jobwatch.research import apply_research_fits, research_offers, unfitted_recent_offers
 from jobwatch.serve import ServeError, serve_http
 from jobwatch.submit import (
+    ASSISTED_NOTE,
     CODEX_SCHEMA_FILE,
     DENIED_BROWSER,
     MAILCODE_CONFIG_ENV,
@@ -677,11 +678,14 @@ def submission_claim(config_path: Path | None) -> None:
         name: base64.b64encode((dossier.work_dir / name).read_bytes()).decode()
         for name in dossier_files(dossier)
     }
-    if config.autoapply.agent == "codex":
-        args = codex_agent_args(dossier.prompt, config.autoapply.model)
+    codex = config.autoapply.agent == "codex"
+    if codex:
         files[CODEX_SCHEMA_FILE] = base64.b64encode(json.dumps(OUTPUT_SCHEMA).encode()).decode()
-    else:
-        args = agent_args("playwright-cli", dossier.prompt, config.autoapply.model)
+
+    def build(prompt: str) -> list[str]:
+        if codex:
+            return codex_agent_args(prompt, config.autoapply.model)
+        return agent_args("playwright-cli", prompt, config.autoapply.model)
     click.echo(json.dumps({
         "job_id": job_id,
         "sent": sent,
@@ -689,7 +693,8 @@ def submission_claim(config_path: Path | None) -> None:
         "url": dossier.url,
         "timeout_seconds": config.autoapply.timeout_seconds,
         "agent": config.autoapply.agent,
-        "args": args,
+        "args": build(dossier.prompt),
+        "assisted_args": build(dossier.prompt + ASSISTED_NOTE),
         "denied_browser": list(DENIED_BROWSER),
         "files": files,
     }))
