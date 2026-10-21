@@ -607,6 +607,8 @@ def prepare(config_path: Path | None) -> None:
         click.echo(f"offre retirée, écartée : {label}")
     note = ", notifié via ntfy" if notified else ""
     click.echo(f"{len(result.prepared)} candidature(s) à valider, {len(result.failed)} échec(s){note}")
+    if result.quota:
+        click.echo("quota codex épuisé : préparation reprise au prochain passage")
     if result.aborted:
         with httpx.Client(timeout=10.0) as client:
             notify(config, "jobwatch : préparation arrêtée", result.aborted[:500], client)
