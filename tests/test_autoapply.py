@@ -316,6 +316,25 @@ def test_prepare_takes_swiped_matches_after_priority_ones(instance, monkeypatch)
     assert "ManuelleCo" not in page.split('data-section="later"')[1].split("</details>")[0]
 
 
+def test_prepare_takes_medium_fit_when_configured(instance, monkeypatch) -> None:
+    db_path, config_path, _cv_id = instance
+    conn = connect(db_path)
+    _seed_match(conn, company="MoyenneCo", url="https://example.com/m", fit="medium")
+    _seed_match(conn, company="HauteCo", url="https://example.com/h", fit="high")
+    conn.close()
+    monkeypatch.setattr(prepare.draft, "run_job", _fake_letter(db_path))
+    # Par défaut, seules les offres « haute » partent.
+    result = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    assert "HauteCo" in result.output and "MoyenneCo" not in result.output
+
+    config_path.write_text(
+        config_path.read_text().replace("autoapply:\n", "autoapply:\n  fits: [high, medium]\n"),
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    assert "MoyenneCo" in result.output, result.output
+
+
 def _fake_bin(directory: Path, name: str, body: str) -> Path:
     path = directory / name
     path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
