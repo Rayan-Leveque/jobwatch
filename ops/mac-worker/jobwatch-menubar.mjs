@@ -47,6 +47,7 @@ for (const lane of lanes) {
   else if (!current && !paused && age > STALE_MINUTES) problems.push(`aucun passage depuis ${age} min`);
 }
 const running = lanes.map((lane) => lane.current).filter(Boolean);
+const quotaUntil = lanes.map((lane) => lane.quotaUntil).find((at) => at && Date.parse(at) > Date.now());
 const sent = Math.max(0, ...lanes.map((lane) => lane.sent ?? 0));
 const age = lanes.length ? Math.min(...lanes.map((lane) => minutesSince(lane.updated))) : null;
 
@@ -54,7 +55,8 @@ if (problems.length) lines.push("| sfimage=exclamationmark.triangle.fill sfcolor
 else if (running.length) {
   const more = running.length > 1 ? ` +${running.length - 1}` : "";
   lines.push(`${clean(running[0].label.split(" - ")[0])}${more} | sfimage=paperplane.fill length=22`);
-} else lines.push(`${sent} | sfimage=${paused ? "pause.circle" : "paperplane"}`);
+} else if (quotaUntil && !paused) lines.push(`${sent} | sfimage=hourglass`);
+else lines.push(`${sent} | sfimage=${paused ? "pause.circle" : "paperplane"}`);
 lines.push("---");
 
 for (const problem of problems) lines.push(`En panne : ${clean(problem)} | length=70 color=#d33`);
@@ -62,6 +64,7 @@ for (const current of running) {
   lines.push(`En cours : ${clean(current.label)} (${minutesSince(current.started)} min) | length=70`);
 }
 if (paused) lines.push(running.length ? "En pause après les envois en cours" : "En pause");
+else if (quotaUntil) lines.push(`Quota Codex épuisé, reprise vers ${hour(quotaUntil)}`);
 else if (!running.length && !problems.length) lines.push("En veille, aucun dossier en attente");
 if (lanes.length) {
   lines.push(`Dernier passage : il y a ${age} min`);

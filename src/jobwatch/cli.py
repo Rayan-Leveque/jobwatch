@@ -714,6 +714,15 @@ def submission_finish(config_path: Path | None, job_id: int) -> None:
         ).fetchone()
         if running is None:
             _fatal(f"le job {job_id} n'est pas en cours")
+        if report.get("quota"):
+            # Quota Codex épuisé sur tous les comptes : le dossier attend la reprise.
+            conn.execute(
+                "UPDATE submission_job SET status = 'queued', started_at = NULL WHERE id = ?",
+                (job_id,),
+            )
+            conn.commit()
+            click.echo("queued : quota Codex épuisé, dossier remis en file")
+            return
         try:
             dossier = load_dossier(config.db, job_id)
             if report.get("timeout"):

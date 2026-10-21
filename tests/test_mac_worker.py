@@ -239,6 +239,52 @@ def test_worker_runs_codex_in_its_sandbox(instance, tmp_path: Path) -> None:  # 
     assert '"curl"' in rules and str(tmp_path / "mac-bin" / "fake-playwright-cli") in rules
 
 
+def test_exhausted_codex_accounts_keep_the_dossier_queued(
+    instance, tmp_path: Path  # noqa: F811
+) -> None:
+    db_path, config_path, cv_id = instance
+    config_path.write_text(
+        config_path.read_text() + "  runner: worker\n  agent: codex\n  model: gpt-6.1-sol\n",
+        encoding="utf-8",
+    )
+    match_id = _prepared(db_path, cv_id)
+    conn = connect(db_path)
+    job_id = queue_submission(conn, match_id)
+    conn.close()
+    env = _worker_env(tmp_path, config_path)
+    sockets = tmp_path / "tmp" / "pw-test" / "cli"
+    sockets.mkdir(parents=True)
+    (sockets / "abc-jobwatch-mac.sock").touch()
+    env["TMPDIR"] = str(tmp_path / "tmp")
+    env["JOBWATCH_CODEX_FALLBACK_HOMES"] = str(tmp_path / "codex-spare")
+    env["CODEX_BIN"] = str(_fake_bin(
+        tmp_path / "mac-bin", "fake-codex",
+        "import sys\n"
+        f"open({str(tmp_path / 'codex-calls.txt')!r}, 'a').write('x\\n')\n"
+        "print(\"ERROR: You've hit your usage limit. Try again at 2:43 AM.\", file=sys.stderr)\n"
+        "sys.exit(1)\n",
+    ))
+
+    done = _run_worker(env)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert f"job {job_id} : queued" in done.stdout
+    conn = connect(db_path)
+    status = conn.execute("SELECT status FROM submission_job WHERE id = ?", (job_id,)).fetchone()[0]
+    conn.close()
+    assert status == "queued"
+    assert len((tmp_path / "codex-calls.txt").read_text().split()) == 2  # un essai par compte
+
+    # Passage suivant avant la reprise : aucun Chrome, aucun appel Codex.
+    (tmp_path / "browser-calls.txt").unlink()
+    done = _run_worker(env)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert not (tmp_path / "browser-calls.txt").exists()
+    assert len((tmp_path / "codex-calls.txt").read_text().split()) == 2
+    menu = _run_menubar(tmp_path).splitlines()
+    assert menu[0].endswith("sfimage=hourglass")
+    assert "Quota Codex épuisé, reprise vers 02:43" in menu
+
+
 @pytest.mark.parametrize(
     ("command", "ok"),
     [

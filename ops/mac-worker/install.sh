@@ -47,13 +47,15 @@ umask 022
 cat >"$APP/run.sh" <<EOF
 #!/bin/bash
 . "$CONF/env"
+# Fichier temporaire propre au processus : les voies se lancent en même temps.
+NEW="$APP/.new-\$\$.mjs"
 for name in jobwatch-worker.mjs jobwatch-menubar.mjs; do
   \$JOBWATCH_SSH -o BatchMode=yes -o ConnectTimeout=8 \\
-    "cat /home/rayan/jobwatch-prod/ops/mac-worker/\$name" >"$APP/.new.mjs" 2>/dev/null \\
-    && node --check "$APP/.new.mjs" 2>/dev/null \\
-    && mv "$APP/.new.mjs" "$APP/\$name"
+    "cat /home/rayan/jobwatch-prod/ops/mac-worker/\$name" >"\$NEW" 2>/dev/null \\
+    && node --check "\$NEW" 2>/dev/null \\
+    && mv "\$NEW" "$APP/\$name"
 done
-rm -f "$APP/.new.mjs"
+rm -f "\$NEW"
 exec "$(command -v node)" "$APP/jobwatch-worker.mjs" "\$@"
 EOF
 chmod 700 "$APP/run.sh"
