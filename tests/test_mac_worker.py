@@ -32,6 +32,13 @@ SUBMITTED = {
     "status": "submitted", "reason": "Confirmation affichée.",
     "final_url": "https://ats.example.com/merci", "account_created_on": None,
     "apply_email": None, "blocker": None,
+    # Offres connexes vues sur le site : une valide, une sans URL exacte écartée.
+    "related_offers": [
+        {"title": "AI Engineer junior", "url": "https://ats.example.com/jobs/42",
+         "company": "Acme", "location": "Paris"},
+        {"title": "Data Scientist", "url": "voir la page carrières", "company": "Acme",
+         "location": None},
+    ],
 }
 
 
@@ -102,6 +109,8 @@ def test_worker_claims_dossier_runs_agent_and_records_application(
     # Un second dossier en file part dans le même passage, sans attendre launchd.
     second_match = _prepared(db_path, cv_id, url="https://example.com/offer-2")
     second_job = queue_submission(conn, second_match)
+    conn.execute("UPDATE search SET include_json = '[\"AI\"]'")
+    conn.commit()
     conn.close()
 
     done = _run_worker(_worker_env(tmp_path, config_path))
@@ -112,8 +121,14 @@ def test_worker_claims_dossier_runs_agent_and_records_application(
     conn = connect(db_path)
     job = conn.execute("SELECT * FROM submission_job WHERE id = ?", (job_id,)).fetchone()
     applied = conn.execute("SELECT 1 FROM application WHERE match_id = ?", (match_id,)).fetchone()
+    related = conn.execute(
+        "SELECT o.url, COUNT(m.id) FROM offer o LEFT JOIN match m ON m.offer_id = o.id "
+        "WHERE o.title IN ('AI Engineer junior', 'Data Scientist') GROUP BY o.id"
+    ).fetchall()
     conn.close()
     assert job["status"] == "submitted"
+    # L'offre connexe entre en base et dans le matching, prête à être notée.
+    assert [tuple(row) for row in related] == [("https://ats.example.com/jobs/42", 1)]
     assert applied is not None
     assert Path(job["proof_path"]).read_bytes() == b"png-mac"
 

@@ -28,13 +28,16 @@ import threading
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from jobwatch.applications import ApplicationError, record_application
+from jobwatch.collectors.base import RawOffer, store_offers
 from jobwatch.config import AutoApplyConfig
 from jobwatch.db import connect
 from jobwatch.draft import DraftError, _cv_text, _offer_fallback, _offer_markdown, extract_body
 from jobwatch.library import documents_dir, ensure_private_directory, protect_private_file
 from jobwatch.mailapply import EMAIL_RE, MailApplyError, compose, profile_field, send
+from jobwatch.matching import run_matching
 from jobwatch.profile import draft_profile_context
 
 log = logging.getLogger(__name__)
@@ -56,9 +59,24 @@ OUTPUT_SCHEMA = {
         "account_created_on": {"type": ["string", "null"]},
         "apply_email": {"type": ["string", "null"]},
         "blocker": {"type": ["string", "null"], "enum": ["captcha", "login", None]},
+        "related_offers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "url": {"type": "string"},
+                    "company": {"type": "string"},
+                    "location": {"type": ["string", "null"]},
+                },
+                "required": ["title", "url", "company", "location"],
+                "additionalProperties": False,
+            },
+        },
     },
     "required": [
         "status", "reason", "final_url", "account_created_on", "apply_email", "blocker",
+        "related_offers",
     ],
     "additionalProperties": False,
 }
@@ -122,11 +140,18 @@ Règles strictes :
 - submitted uniquement si la page confirme l'envoi. Au moindre doute,
   needs_human.
 - Budget : 80 commandes navigateur au plus.
+- Offres connexes : une fois la candidature terminée (envoyée ou non), si tu
+  es sur un job board ou un site carrière autre que LinkedIn et Welcome to
+  the Jungle, regarde ses autres offres (offres similaires, autres postes de
+  l'entreprise, recherche du site) en 10 commandes au plus. Relève dans
+  related_offers jusqu'à 10 offres proches du profil (IA, data, développement,
+  junior, Île-de-France), avec l'URL exacte de chaque offre. Ne candidate
+  jamais à ces offres. Sinon, related_offers = [].
 
 Réponse finale : le JSON demandé, avec final_url (URL de la dernière page),
 reason (une phrase en français), account_created_on (domaine du compte
 créé ou réinitialisé, sinon null), apply_email (adresse de candidature par mail, sinon null)
-et blocker.
+blocker et related_offers.
 
 OFFRE : {company} - {title}
 URL : {url}
@@ -477,6 +502,8 @@ def apply_agent_result(
         _save_account(db_path, domain.strip(), email, pending.read_text(encoding="utf-8"))
     pending.unlink(missing_ok=True)
 
+    _store_related_offers(conn, result.get("related_offers"))
+
     proof = dossier.work_dir / "preuve.png"
     fields = {
         "reason": str(result.get("reason") or "")[:1000],
@@ -507,6 +534,32 @@ def apply_agent_result(
         _finish(conn, dossier.job_id, status="submitted", **fields)
     else:
         _finish(conn, dossier.job_id, status="needs_human", **fields)
+
+
+#: Plafond d'offres connexes retenues par dossier, quoi que rende l'agent.
+MAX_RELATED_OFFERS = 10
+
+
+def _store_related_offers(conn: sqlite3.Connection, rows: object) -> None:
+    """Enregistre les offres connexes relevées par l'agent, matchées comme les autres."""
+    if not isinstance(rows, list):
+        return
+    offers = []
+    for row in rows[:MAX_RELATED_OFFERS]:
+        if not isinstance(row, dict):
+            continue
+        url, title = str(row.get("url") or "").strip(), str(row.get("title") or "").strip()
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc or not title:
+            continue
+        location = row.get("location")
+        offers.append(RawOffer(
+            title=title[:300], url=url[:2000], company=str(row.get("company") or "")[:200],
+            platform=parsed.netloc, location=location if isinstance(location, str) else None,
+        ))
+    if offers:
+        store_offers(conn, "related", "related", offers)
+        run_matching(conn)
 
 
 def _apply_by_mail(
