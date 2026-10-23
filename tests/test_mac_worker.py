@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Iterator
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -68,6 +69,8 @@ def _worker_env(
     return {
         "PATH": "/usr/bin:/bin",
         "JOBWATCH_SSH": "",
+        # Toute heure du test est une heure d'envoi.
+        "JOBWATCH_SEND_HOURS": "0-24",
         # Même forme qu'en production : instance nommée avant la sous-commande.
         "JOBWATCH_JW": f"{sys.executable} -m jobwatch.cli --instance mac",
         "XDG_CONFIG_HOME": str(_instance_home(tmp_path, config_path)),
@@ -409,6 +412,28 @@ def test_paused_worker_leaves_the_queue_alone(instance, tmp_path: Path) -> None:
     menu = _run_menubar(tmp_path).splitlines()
     assert menu[0].endswith("sfimage=pause.circle") and "En pause" in menu
     assert any(line.startswith("Reprendre les envois") for line in menu)
+
+
+def test_worker_waits_outside_sending_hours(instance, tmp_path: Path) -> None:  # noqa: F811
+    db_path, config_path, cv_id = instance
+    _worker_config(config_path)
+    match_id = _prepared(db_path, cv_id)
+    conn = connect(db_path)
+    queue_submission(conn, match_id)
+    conn.close()
+    start = (datetime.now().hour + 1) % 24
+    env = {**_worker_env(tmp_path, config_path), "JOBWATCH_SEND_HOURS": f"{start}-{start + 1}"}
+
+    done = _run_worker(env)
+    assert done.returncode == 0, done.stdout + done.stderr
+    conn = connect(db_path)
+    status = conn.execute(
+        "SELECT status FROM submission_job WHERE match_id = ?", (match_id,)
+    ).fetchone()[0]
+    conn.close()
+    assert status == "queued" and not (tmp_path / "browser-calls.txt").exists()
+    menu = _run_menubar(tmp_path).splitlines()
+    assert f"Hors heures d'envoi ({start}h-{start + 1}h), dossiers en attente" in menu
 
 
 def test_worker_without_queued_dossier_launches_no_browser(

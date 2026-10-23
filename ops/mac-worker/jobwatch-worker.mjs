@@ -64,6 +64,9 @@ const STATUS = join(SUPPORT, `status${LANE_SUFFIX}.json`);
 // « Mettre en pause » de la barre des menus, ou avant clone-profile).
 const PAUSE = join(SUPPORT, "pause");
 const HISTORY_SIZE = 10;
+// Heures locales d'envoi, « début-fin » : la nuit, personne ne débloque un
+// captcha et un envoi à 3 h du matin trahit l'automate.
+const [SEND_FROM, SEND_UNTIL] = (process.env.JOBWATCH_SEND_HOURS || "8-21").split("-").map(Number);
 const LOGIN_PAGES = [
   "https://www.linkedin.com/login",
   "https://www.welcometothejungle.com/fr/signin",
@@ -301,13 +304,20 @@ async function main() {
       saveStatus({ current: null, error: null, paused: true });
       return;
     }
+    const hour = new Date().getHours();
+    if (hour < SEND_FROM || hour >= SEND_UNTIL) {
+      saveStatus({ current: null, error: null, paused: false, offHours: `${SEND_FROM}h-${SEND_UNTIL}h` });
+      return;
+    }
     const quotaUntil = existsSync(QUOTA) ? Date.parse(readFileSync(QUOTA, "utf8")) : NaN;
     if (quotaUntil > Date.now()) {
       saveStatus({ current: null, error: null, paused: false, quotaUntil: new Date(quotaUntil).toISOString() });
       return;
     }
     const claim = JSON.parse(remote(`${JW} submission-claim`) || "{}");
-    saveStatus({ sent: claim.sent, error: null, current: null, paused: false, quotaUntil: null });
+    saveStatus({
+      sent: claim.sent, error: null, current: null, paused: false, quotaUntil: null, offHours: null,
+    });
     if (!claim.job_id) return;
     if (claim.error) log(`job ${claim.job_id} refusé par le serveur : ${claim.error}`);
     else await runJob(claim);
