@@ -711,6 +711,26 @@ def test_enrich_summarizes_with_openrouter(conn: sqlite3.Connection, monkeypatch
     assert tuple(field) == ("3 ans", "Ingénieur IA Paris")
 
 
+def test_openrouter_empty_message_counts_as_a_failed_summary(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    _seed_offer(conn)
+    monkeypatch.setattr(
+        "jobwatch.enrich.httpx.post",
+        lambda url, **_kw: httpx.Response(
+            200, json={"choices": [{"message": {"content": None}}]},
+            request=httpx.Request("POST", url),
+        ),
+    )
+    config = EnrichConfig(model="m", runner="openrouter", api_key="sk-or-test")
+    result = enrich(conn, config,
+                    client=_http_client(lambda _r: httpx.Response(200, text=LONG_HTML)),
+                    sleep=_no_sleep)
+    assert result.fetched_ok == 1
+    assert result.summaries_written == 0
+    assert result.summaries_failed == 1
+
+
 def test_openrouter_429_stops_the_rest_of_the_batch(
     conn: sqlite3.Connection, monkeypatch
 ) -> None:
