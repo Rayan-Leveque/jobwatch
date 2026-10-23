@@ -63,6 +63,9 @@ const STATUS = join(SUPPORT, `status${LANE_SUFFIX}.json`);
 // Présent : toutes les voies finissent leur dossier puis s'arrêtent (menu
 // « Mettre en pause » de la barre des menus, ou avant clone-profile).
 const PAUSE = join(SUPPORT, "pause");
+// Présent : la voie 1 rouvre un à un, en fenêtre visible, les dossiers arrêtés
+// sur un captcha ou une connexion, puis le supprime (menu « Débloquer »).
+const ASSIST = join(SUPPORT, "assist");
 const HISTORY_SIZE = 10;
 const LOGIN_PAGES = [
   "https://www.linkedin.com/login",
@@ -306,8 +309,17 @@ async function main() {
       saveStatus({ current: null, error: null, paused: false, quotaUntil: new Date(quotaUntil).toISOString() });
       return;
     }
-    const claim = JSON.parse(remote(`${JW} submission-claim`) || "{}");
-    saveStatus({ sent: claim.sent, error: null, current: null, paused: false, quotaUntil: null });
+    const assist = LANE === "1" && existsSync(ASSIST);
+    const claim = JSON.parse(remote(`${JW} submission-claim${assist ? " --blocked" : ""}`) || "{}");
+    saveStatus({
+      sent: claim.sent, blocked: claim.blocked, error: null, current: null, paused: false,
+      quotaUntil: null,
+    });
+    if (assist && !claim.job_id) {
+      // Session captcha terminée : retour à la file ordinaire.
+      rmSync(ASSIST, { force: true });
+      continue;
+    }
     if (!claim.job_id) return;
     if (claim.error) log(`job ${claim.job_id} refusé par le serveur : ${claim.error}`);
     else await runJob(claim);
@@ -361,10 +373,6 @@ function blockerOf(stdout) {
 }
 
 // Notification macOS : la fenêtre visible attend le candidat.
-function notify(message) {
-  spawnSync("osascript", ["-e", `display notification ${JSON.stringify(message)} with title "jobwatch" sound name "Glass"`]);
-}
-
 async function runJob(claim) {
   const workDir = join(WORK_ROOT, String(claim.job_id));
   const label = claim.label || `dossier ${claim.job_id}`;
@@ -390,25 +398,25 @@ async function runJob(claim) {
     const result = join(workDir, "agent_result.json");
     let agent;
     let stdout;
-    // Chrome en arrière-plan ; un captcha ou une connexion rouvre le dossier dans
-    // une fenêtre visible, où l'agent attend que le candidat débloque.
-    for (const assisted of [false, true]) {
+    // Chrome en arrière-plan ; un captcha ou une connexion rouvre le dossier une
+    // fois en fenêtre visible, que certains sites laissent passer. Encore bloqué,
+    // il attend la session captcha, où le candidat est devant l'écran.
+    for (const assisted of claim.assisted ? [true] : [false, true]) {
       rmSync(result, { force: true });
       rmSync(proof, { force: true });
       killProfileChrome();
       try {
         await openBrowser(workDir, claim.url, ...(assisted ? ["--headed"] : []));
-        agent = runAgent(claim, workDir, agentEnv, real, assisted ? claim.assisted_args : claim.args);
+        agent = runAgent(claim, workDir, agentEnv, real, claim.args);
       } finally {
         // Même si la page n'a pas chargé, le navigateur est ouvert : on le ferme.
         browser(workDir, "close");
         killProfileChrome();
       }
       stdout = codex && existsSync(result) ? readFileSync(result, "utf8") : agent.stdout;
-      const blocker = assisted || agent.error || !claim.assisted_args ? null : blockerOf(stdout);
+      const blocker = assisted || agent.error ? null : blockerOf(stdout);
       if (!blocker) break;
       log(`job ${claim.job_id} : ${blocker} demandé, reprise en fenêtre visible`);
-      notify(`${blocker === "captcha" ? "Captcha à résoudre" : "Connexion à faire"} : ${label}`);
       saveStatus({ current: { label, started: new Date().toISOString(), timeout: claim.timeout_seconds, assisted: blocker } });
     }
     const output = `${agent.stdout}${agent.stderr}`;

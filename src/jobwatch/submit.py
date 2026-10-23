@@ -372,22 +372,36 @@ _PENDING_PASSWORD = ".mot_de_passe_nouveau_compte"
 _DOSSIER_META = ".dossier.json"
 
 
-def claim_submission(conn: sqlite3.Connection, job_id: int | None = None) -> int | None:
-    """Passe un job 'queued' à 'running' (le plus ancien si `job_id` est absent)."""
+#: Dossiers arrêtés sur un captcha ou une connexion, en attente de la session captcha.
+_BLOCKED_SQL = "status = 'needs_human' AND blocker IS NOT NULL"
+
+
+def blocked_submissions(conn: sqlite3.Connection) -> int:
+    return conn.execute(f"SELECT COUNT(*) FROM submission_job WHERE {_BLOCKED_SQL}").fetchone()[0]
+
+
+def claim_submission(
+    conn: sqlite3.Connection, job_id: int | None = None, *, blocked: bool = False
+) -> int | None:
+    """Passe un job 'queued' à 'running' (le plus ancien si `job_id` est absent).
+
+    `blocked` : prend plutôt un dossier arrêté sur un captcha ou une connexion.
+    """
+    source = _BLOCKED_SQL if blocked else "status = 'queued'"
     if job_id is None:
         # Plusieurs voies réclament en même temps : celle qui perd la course prend
         # le suivant au lieu de croire la file vide.
         while True:
             row = conn.execute(
-                "SELECT id FROM submission_job WHERE status = 'queued' ORDER BY id LIMIT 1"
+                f"SELECT id FROM submission_job WHERE {source} ORDER BY id LIMIT 1"
             ).fetchone()
             if row is None:
                 return None
-            if claim_submission(conn, int(row["id"])) is not None:
+            if claim_submission(conn, int(row["id"]), blocked=blocked) is not None:
                 return int(row["id"])
     cur = conn.execute(
-        "UPDATE submission_job SET status = 'running', started_at = datetime('now') "
-        "WHERE id = ? AND status = 'queued'",
+        "UPDATE submission_job SET status = 'running', started_at = datetime('now'), "
+        f"blocker = NULL WHERE id = ? AND {source}",
         (job_id,),
     )
     conn.commit()
@@ -533,9 +547,10 @@ def apply_agent_result(
             )
         except ApplicationError as exc:
             fields["reason"] = f"{fields['reason']} ({exc})"
-        _finish(conn, dossier.job_id, status="submitted", **fields)
+        _finish(conn, dossier.job_id, status="submitted", blocker=None, **fields)
     else:
-        _finish(conn, dossier.job_id, status="needs_human", **fields)
+        blocker = result.get("blocker") if result.get("blocker") in ("captcha", "login") else None
+        _finish(conn, dossier.job_id, status="needs_human", blocker=blocker, **fields)
 
 
 #: Plafond d'offres connexes retenues par dossier, quoi que rende l'agent.

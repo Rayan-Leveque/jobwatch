@@ -197,7 +197,7 @@ def test_menubar_shows_worker_state(tmp_path: Path, status, first_line) -> None:
     assert _run_menubar(tmp_path).splitlines()[0] == first_line
 
 
-def test_captcha_reopens_the_dossier_in_a_visible_window(
+def test_captcha_waits_for_the_captcha_session_in_a_visible_window(
     instance, tmp_path: Path  # noqa: F811
 ) -> None:
     db_path, config_path, cv_id = instance
@@ -208,7 +208,7 @@ def test_captcha_reopens_the_dossier_in_a_visible_window(
     conn.close()
     env = _worker_env(tmp_path, config_path)
     blocked = {**SUBMITTED, "status": "needs_human", "reason": "Captcha.", "blocker": "captcha"}
-    # Arrêt sur captcha en arrière-plan ; avec le candidat devant l'écran, l'envoi passe.
+    # Le captcha bloque tant que le candidat n'est pas devant l'écran.
     env["CLAUDE_BIN"] = str(_fake_bin(
         tmp_path / "mac-bin", "fake-claude-captcha",
         "import json, sys\n"
@@ -217,17 +217,32 @@ def test_captcha_reopens_the_dossier_in_a_visible_window(
         f"else json.loads({json.dumps(json.dumps(blocked))})\n"
         "print(json.dumps({'structured_output': result}))\n",
     ))
+    calls = tmp_path / "browser-calls.txt"
 
+    def opens() -> list[str]:
+        return [c for c in calls.read_text().splitlines() if c.startswith("open ")]
+
+    # Passage ordinaire : arrière-plan, puis une fenêtre visible sans attente.
     done = _run_worker(env)
     assert done.returncode == 0, done.stdout + done.stderr
     assert "captcha demandé, reprise en fenêtre visible" in done.stdout
+    assert f"job {job_id} : needs_human" in done.stdout
+    assert len(opens()) == 2
+    assert not opens()[0].endswith("--headed") and opens()[1].endswith("--headed")
+    menu = _run_menubar(tmp_path).splitlines()
+    session = next(line for line in menu if line.startswith("Débloquer les captchas (1)"))
+
+    # Le candidat lance la session depuis la barre des menus.
+    (_support_dir(tmp_path) / "assist").touch()
+    assert "/assist" in session
+    done = _run_worker(env)
+    assert done.returncode == 0, done.stdout + done.stderr
     assert f"job {job_id} : submitted" in done.stdout
-    opens = [
-        call for call in (tmp_path / "browser-calls.txt").read_text().splitlines()
-        if call.startswith("open ")
-    ]
-    assert len(opens) == 2
-    assert not opens[0].endswith("--headed") and opens[1].endswith("--headed")
+    assert len(opens()) == 3 and opens()[2].endswith("--headed")
+    # Plus rien à débloquer : la session s'arrête d'elle-même.
+    assert not (_support_dir(tmp_path) / "assist").exists()
+    menu = _run_menubar(tmp_path).splitlines()
+    assert not any(line.startswith("Débloquer") for line in menu)
 
 
 def test_worker_runs_codex_in_its_sandbox(instance, tmp_path: Path) -> None:  # noqa: F811

@@ -34,7 +34,11 @@ try {
 }
 
 const PAUSE = join(SUPPORT, "pause");
+const ASSIST = join(SUPPORT, "assist");
 const paused = existsSync(PAUSE);
+const assisting = existsSync(ASSIST);
+// Compteur du passage le plus récent de la voie 1.
+const blocked = lanes[0]?.blocked ?? 0;
 const lines = [];
 const problems = [];
 if (!lanes.length) problems.push("aucun passage enregistré");
@@ -82,6 +86,10 @@ for (const entry of history) {
 }
 
 lines.push("---");
+if (assisting) lines.push("Session captcha en cours : reste devant le Mac");
+else if (blocked) {
+  lines.push(`Débloquer les captchas (${blocked}) | bash=/usr/bin/touch param1="${ASSIST}" terminal=false refresh=true`);
+}
 lines.push(paused
   ? `Reprendre les envois | bash=/bin/rm param1="${PAUSE}" terminal=false refresh=true`
   : `Mettre en pause | bash=/usr/bin/touch param1="${PAUSE}" terminal=false refresh=true`);
