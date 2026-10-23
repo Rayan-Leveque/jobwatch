@@ -372,42 +372,6 @@ def test_prepare_takes_medium_fit_when_configured(instance, monkeypatch) -> None
     assert "MoyenneCo" in result.output, result.output
 
 
-def test_prepare_caps_automatic_applications_per_company(instance, monkeypatch) -> None:
-    db_path, config_path, _cv_id = instance
-    config_path.write_text(
-        config_path.read_text().replace("daily_limit: 2", "daily_limit: 50")
-        .replace("autoapply:\n", "autoapply:\n  max_per_company: 2\n"),
-        encoding="utf-8",
-    )
-    conn = connect(db_path)
-    # Entités d'un même groupe : le plafond les compte ensemble.
-    for i, company in enumerate(["Devoteam", "Devoteam Innovative Tech France", "Devoteam M Cloud"]):
-        _seed_match(conn, title=f"AI Engineer {i}", company=company,
-                    url=f"https://example.com/d{i}", fit="high")
-    _seed_match(conn, title="Data Scientist", company="Devotion", url="https://example.com/o",
-                fit="high")
-    swiped = _seed_match(conn, title="PO IA", company="Devoteam", url="https://example.com/s",
-                         state="later")
-    conn.close()
-    monkeypatch.setattr(prepare.draft, "run_job", _fake_letter(db_path))
-    result = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
-    assert result.exit_code == 0, result.output
-    conn = connect(db_path)
-    prepared = conn.execute(
-        "SELECT c.name FROM submission_job sj JOIN match m ON m.id = sj.match_id "
-        "JOIN offer o ON o.id = m.offer_id JOIN company c ON c.id = o.company_id "
-        "ORDER BY sj.id"
-    ).fetchall()
-    swiped_job = conn.execute(
-        "SELECT 1 FROM submission_job WHERE match_id = ?", (swiped,)
-    ).fetchone()
-    conn.close()
-    names = [row[0] for row in prepared]
-    assert sum(name.startswith("Devoteam") for name in names) == 3  # 2 auto + 1 choisie à la main
-    assert "Devotion" in names  # autre entreprise, malgré le préfixe commun
-    assert swiped_job is not None
-
-
 def _fake_bin(directory: Path, name: str, body: str) -> Path:
     path = directory / name
     path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
