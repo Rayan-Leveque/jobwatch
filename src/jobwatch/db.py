@@ -41,6 +41,8 @@ COLUMN_MIGRATIONS = (
     ("candidate_profile", "include_remote", "INTEGER NOT NULL DEFAULT 0"),
     # 'prepare' : lettre écrite par `jw prepare`, que le serveur ne doit pas toucher.
     ("draft_job", "owner", "TEXT"),
+    # 'captcha' ou 'login' : dossier rendu à l'humain, rouvert par la session captcha du Mac.
+    ("submission_job", "blocker", "TEXT"),
 )
 
 

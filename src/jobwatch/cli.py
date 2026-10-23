@@ -50,6 +50,7 @@ from jobwatch.submit import (
     SubmitError,
     agent_args,
     apply_agent_result,
+    blocked_submissions,
     build_dossier,
     claim_submission,
     codex_agent_args,
@@ -677,8 +678,9 @@ def _alert_worker(config: Config, reason: str) -> None:
 
 
 @cli.command(name="submission-claim")
+@click.option("--blocked", is_flag=True, help="dossier arrêté sur un captcha ou une connexion")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
-def submission_claim(config_path: Path | None) -> None:
+def submission_claim(config_path: Path | None, blocked: bool) -> None:
     """Réserve le plus ancien envoi en file pour un poste d'envoi (JSON sur stdout)."""
     config = _require_config(config_path)
     if config.autoapply is None:
@@ -691,9 +693,11 @@ def submission_claim(config_path: Path | None) -> None:
         sent = conn.execute(
             "SELECT COUNT(*) FROM submission_job WHERE status = 'submitted'"
         ).fetchone()[0]
-        job_id = claim_submission(conn)
+        job_id = claim_submission(conn, blocked=blocked)
+        # Affiché dans la barre des menus : de quoi lancer une session captcha.
+        waiting = blocked_submissions(conn)
         if job_id is None:
-            click.echo(json.dumps({"sent": sent}))
+            click.echo(json.dumps({"sent": sent, "blocked": waiting}))
             return
         try:
             dossier = build_dossier(conn, config.db, job_id)
@@ -718,12 +722,14 @@ def submission_claim(config_path: Path | None) -> None:
     click.echo(json.dumps({
         "job_id": job_id,
         "sent": sent,
+        "blocked": waiting,
         "label": f"{dossier.company} - {dossier.title}",
         "url": dossier.url,
         "timeout_seconds": config.autoapply.timeout_seconds,
         "agent": config.autoapply.agent,
-        "args": build(dossier.prompt),
-        "assisted_args": build(dossier.prompt + ASSISTED_NOTE),
+        # Session captcha : le candidat est devant l'écran dès la première ouverture.
+        "args": build(dossier.prompt + ASSISTED_NOTE if blocked else dossier.prompt),
+        "assisted": blocked,
         "denied_browser": list(DENIED_BROWSER),
         "files": files,
     }))
