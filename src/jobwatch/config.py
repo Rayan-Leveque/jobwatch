@@ -156,6 +156,14 @@ class CapgeminiSource:
 
 
 @dataclass
+class HelloworkSource:
+    queries: list[str]
+    location: str = "Île-de-France"
+    pages: int = 2
+    interval_days: int = 1
+
+
+@dataclass
 class SuccessFactorsSite:
     url: str
     name: str
@@ -180,6 +188,7 @@ class SourcesConfig:
     playwright: RenderedSource | None = None
     capgemini: CapgeminiSource | None = None
     successfactors: SuccessFactorsSource | None = None
+    hellowork: HelloworkSource | None = None
 
 
 @dataclass
@@ -595,6 +604,28 @@ def _capgemini_from_dict(raw: object) -> CapgeminiSource:
     )
 
 
+def _hellowork_from_dict(raw: object) -> HelloworkSource:
+    if not isinstance(raw, dict):
+        raise ConfigError("sources.hellowork doit être un mapping")
+    queries = _string_list(raw.get("queries"), "sources.hellowork.queries")
+    if not queries:
+        raise ConfigError("sources.hellowork.queries doit être une liste non vide")
+    location = raw.get("location", "Île-de-France")
+    if not isinstance(location, str) or not location.strip():
+        raise ConfigError("sources.hellowork.location doit être une chaîne non vide")
+    pages = raw.get("pages", 2)
+    if not isinstance(pages, int) or isinstance(pages, bool) or not 1 <= pages <= 10:
+        raise ConfigError("sources.hellowork.pages doit être un entier entre 1 et 10")
+    return HelloworkSource(
+        queries=queries,
+        location=location.strip(),
+        pages=pages,
+        interval_days=_interval_days(
+            raw.get("interval_days", 1), "sources.hellowork.interval_days"
+        ),
+    )
+
+
 def _successfactors_from_dict(raw: object) -> SuccessFactorsSource:
     if not isinstance(raw, dict):
         raise ConfigError("sources.successfactors doit être un mapping")
@@ -681,6 +712,7 @@ def _sources_from_dict(raw: object) -> SourcesConfig:
     known = {
         "france_travail", "smartrecruiters", "linkedin", "wttj",
         "talentsoft", "workday", "playwright", "capgemini", "successfactors",
+        "hellowork",
     }
     unknown = set(raw) - known
     if unknown:
@@ -701,6 +733,7 @@ def _sources_from_dict(raw: object) -> SourcesConfig:
         successfactors=_successfactors_from_dict(raw.get("successfactors"))
         if "successfactors" in raw
         else None,
+        hellowork=_hellowork_from_dict(raw.get("hellowork")) if "hellowork" in raw else None,
     )
 
 

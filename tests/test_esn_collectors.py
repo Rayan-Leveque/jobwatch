@@ -149,3 +149,73 @@ def test_esn_sources_reject_invalid_config(tmp_path, block: str, message: str) -
     )
     with pytest.raises(ConfigError, match=message):
         load_config(path)
+
+
+def _hellowork_card(job_id: int, title: str, company: str, location: str, contract: str) -> str:
+    """Carte de résultat Hellowork, réduite à la structure réelle du site."""
+    return f"""
+<div data-controller="intersect" class="flex" data-cy="serpCard">
+  <header><div><a data-turbo="false" href="/fr-fr/emplois/{job_id}.html"
+     title="{title} - {company}" data-cy="offerTitle">
+    <h3 class="inline">
+      <span class="block typo-l sm:typo-xl">{title}</span>
+      <span class="inline typo-s">{company}</span>
+    </h3></a></div></header>
+  <div class="mt-6"><div class="flex gap-3">
+    <div class="readonly tag-secondary-s w-fit border-0" data-cy="localisationCard">
+      {location}
+    </div>
+    <div class="readonly tag-secondary-s w-fit border-0" data-cy="contractCard">
+{contract}
+    </div>
+  </div></div>
+</div>"""
+
+
+def test_hellowork_collects_cards_until_an_empty_page() -> None:
+    import httpx
+
+    from jobwatch.collectors.hellowork import HelloworkCollector
+
+    pages = {
+        "1": _hellowork_card(1, "Data Scientist H/F", "Cr&#xE9;dit Mutuel", "Paris 9e - 75", "CDI")
+        + _hellowork_card(2, "Stage - Data Scientist H/F", "Acme", "Paris - 75", "Stage")
+        + _hellowork_card(3, "Développeur Python H/F", "Beta", "Île-de-France", "CDD"),
+        "2": "<html><body>Aucune offre</body></html>",
+    }
+    requested: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        requested.append(params)
+        return httpx.Response(200, text=pages.get(params["p"], ""))
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    offers = HelloworkCollector(["data scientist"], pages=5, client=client).fetch()
+
+    assert [(o.title, o.company, o.location, o.contract) for o in offers] == [
+        ("Data Scientist H/F", "Crédit Mutuel", "Paris 9e - 75", "permanent"),
+        ("Développeur Python H/F", "Beta", "Île-de-France", "fixed_term"),
+    ]
+    assert offers[0].url == "https://www.hellowork.com/fr-fr/emplois/1.html"
+    # Page vide : inutile de demander les suivantes.
+    assert [r["p"] for r in requested] == ["1", "2"]
+    assert requested[0]["l"] == "Île-de-France"
+
+
+def test_hellowork_source_is_configured_and_built(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"db: {tmp_path / 'jw.db'}\nsearches: [{{name: ai, include: [AI]}}]\n"
+        "sources:\n  hellowork:\n    queries: [data scientist, développeur python]\n"
+        "    pages: 3\n"
+    )
+    config = load_config(path)
+    (collector,) = build_collectors(config.sources)
+    assert collector.name == "hellowork"
+    assert (collector.queries, collector.location, collector.pages) == (
+        ["data scientist", "développeur python"], "Île-de-France", 3,
+    )
+    path.write_text(path.read_text().replace("pages: 3", "pages: 50"))
+    with pytest.raises(ConfigError, match="pages"):
+        load_config(path)

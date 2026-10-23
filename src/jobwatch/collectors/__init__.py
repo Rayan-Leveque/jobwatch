@@ -13,6 +13,7 @@ import httpx
 from jobwatch.collectors.base import Collector, store_offers
 from jobwatch.collectors.capgemini import CapgeminiCollector
 from jobwatch.collectors.france_travail import FranceTravailCollector
+from jobwatch.collectors.hellowork import HelloworkCollector
 from jobwatch.collectors.linkedin import LinkedInCollector
 from jobwatch.collectors.rendered import PlaywrightCollector
 from jobwatch.collectors.smartrecruiters import SmartRecruitersCollector
@@ -121,6 +122,14 @@ def build_collectors(sources: SourcesConfig, client: httpx.Client | None = None)
             )
             collector.name = f"successfactors:{site_slug(site.url)}"
             collectors.append(collector)
+    if sources.hellowork is not None:
+        hw = sources.hellowork
+        collectors.append(
+            HelloworkCollector(
+                queries=hw.queries, location=hw.location, pages=hw.pages,
+                interval_days=hw.interval_days,
+            )
+        )
     return collectors
 
 
