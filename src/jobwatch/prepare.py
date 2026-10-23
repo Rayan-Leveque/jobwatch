@@ -88,32 +88,6 @@ def _prepared_today(conn: sqlite3.Connection) -> int:
     return int(row["n"])
 
 
-#: Fenêtre du plafond de candidatures par entreprise.
-COMPANY_WINDOW_DAYS = 30
-
-
-def _company_words(name: str) -> tuple[str, ...]:
-    return tuple(re.sub(r"[^\w]+", " ", name.casefold()).split())
-
-
-def _same_company(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
-    """« Devoteam » et « Devoteam Innovative Tech France » : l'un prolonge l'autre."""
-    shorter, longer = sorted((a, b), key=len)
-    return bool(shorter) and longer[:len(shorter)] == shorter
-
-
-def _recent_companies(conn: sqlite3.Connection) -> list[tuple[str, ...]]:
-    """Une entrée par candidature récente préparée, en file ou envoyée."""
-    rows = conn.execute(
-        "SELECT c.name FROM submission_job sj JOIN match m ON m.id = sj.match_id "
-        "JOIN offer o ON o.id = m.offer_id JOIN company c ON c.id = o.company_id "
-        "WHERE sj.status IN ('prepared', 'queued', 'running', 'submitted') "
-        "AND sj.created_at >= datetime('now', ?)",
-        (f"-{COMPANY_WINDOW_DAYS} days",),
-    ).fetchall()
-    return [_company_words(str(row["name"])) for row in rows]
-
-
 def _candidates(
     conn: sqlite3.Connection, account_id: int, fits: tuple[str, ...] = ("high",)
 ) -> list[sqlite3.Row]:
@@ -199,20 +173,10 @@ def _prepare(
     if remaining <= 0:
         return result
     failures = 0
-    cap = config.autoapply.max_per_company
-    companies = _recent_companies(conn) if cap else []
     for row in _candidates(conn, int(profile["account_id"]), config.autoapply.fits):
         if remaining <= 0:
             break
         match_id = int(row["id"])
-        company = _company_words(str(row["company"] or ""))
-        # Plafond des envois automatiques : un recruteur qui reçoit trente
-        # candidatures du même profil les classe en spam. Un choix humain
-        # (état « later ») passe toujours.
-        if cap and row["state"] == "new" and company and sum(
-            _same_company(company, other) for other in companies
-        ) >= cap:
-            continue
         if _offer_gone(conn, row, client):
             conn.execute(
                 "UPDATE match SET state = 'discarded', discarded_at = datetime('now') "
@@ -251,8 +215,6 @@ def _prepare(
             ),
         )
         conn.commit()
-        if ok:
-            companies.append(company)
         if ok and config.autoapply.auto_send:
             queue_submission(conn, match_id)
         (result.prepared if ok else result.failed).append(_label(row))
