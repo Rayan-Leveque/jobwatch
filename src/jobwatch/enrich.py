@@ -498,9 +498,13 @@ def _openrouter_summary(config: EnrichConfig, prompt: str, markdown: str) -> str
         if response.status_code == 429:
             raise LLMRateLimited("appel openrouter limité par HTTP 429")
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        content = response.json()["choices"][0]["message"]["content"]
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         raise LLMRunnerError(f"appel openrouter échoué : {exc}") from exc
+    # Le fournisseur renvoie parfois un message sans contenu (null).
+    if not isinstance(content, str):
+        raise LLMRunnerError("appel openrouter échoué : réponse sans contenu")
+    return content
 
 
 def _summarize(config: EnrichConfig, markdown: str) -> SummaryParts | None:
