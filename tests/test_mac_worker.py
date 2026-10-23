@@ -421,7 +421,7 @@ def test_worker_waits_outside_sending_hours(instance, tmp_path: Path) -> None:  
     conn = connect(db_path)
     queue_submission(conn, match_id)
     conn.close()
-    start = (datetime.now().hour + 1) % 24
+    start = (datetime.now().astimezone().hour + 1) % 24  # heure locale, comme le worker
     env = {**_worker_env(tmp_path, config_path), "JOBWATCH_SEND_HOURS": f"{start}-{start + 1}"}
 
     done = _run_worker(env)
