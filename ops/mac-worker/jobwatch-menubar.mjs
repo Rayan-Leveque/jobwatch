@@ -48,6 +48,7 @@ for (const lane of lanes) {
 }
 const running = lanes.map((lane) => lane.current).filter(Boolean);
 const quotaUntil = lanes.map((lane) => lane.quotaUntil).find((at) => at && Date.parse(at) > Date.now());
+const offHours = lanes.map((lane) => lane.offHours).find(Boolean);
 const sent = Math.max(0, ...lanes.map((lane) => lane.sent ?? 0));
 const age = lanes.length ? Math.min(...lanes.map((lane) => minutesSince(lane.updated))) : null;
 
@@ -65,6 +66,7 @@ for (const current of running) {
 }
 if (paused) lines.push(running.length ? "En pause après les envois en cours" : "En pause");
 else if (quotaUntil) lines.push(`Quota Codex épuisé, reprise vers ${hour(quotaUntil)}`);
+else if (offHours && !running.length) lines.push(`Hors heures d'envoi (${offHours}), dossiers en attente`);
 else if (!running.length && !problems.length) lines.push("En veille, aucun dossier en attente");
 if (lanes.length) {
   lines.push(`Dernier passage : il y a ${age} min`);
