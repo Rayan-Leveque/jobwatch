@@ -139,6 +139,13 @@ Règles strictes :
   `playwright-cli screenshot --full-page --filename=avant_envoi.png`. Après
   l'envoi, vérifie la confirmation à l'écran puis lance
   `playwright-cli screenshot --filename=preuve.png`.
+- Suivi par email : après l'envoi, attends 60 secondes puis lance
+  `jw mail-code --minutes 10` (deux fois au plus). Si un email de cette
+  entreprise ou de son ATS demande une action pour que la candidature soit
+  prise en compte (confirmer l'adresse email, activer le compte, déposer le
+  CV, répondre à un questionnaire, accepter le consentement RGPD), ouvre son
+  lien avec `goto` et termine l'étape avec les mêmes règles. Ignore les simples
+  accusés de réception et les emails Hellowork « Finalisez votre candidature ».
 - submitted uniquement si la page confirme l'envoi. Au moindre doute,
   needs_human.
 - Budget : 80 commandes navigateur au plus.
