@@ -628,6 +628,24 @@ def test_mail_code_keeps_verification_link_and_code_from_html_email() -> None:
     assert "Objet : Vérifiez votre adresse" in format_messages([summary])
 
 
+def test_mail_code_skips_style_sheets_before_the_confirmation_link() -> None:
+    message = EmailMessage()
+    message["From"] = "Groupe Crédit Agricole <groupecreditagricole@profils.org>"
+    message["Subject"] = "Confirmer votre inscription"
+    message["Date"] = "Tue, 27 Oct 2026 16:27:30 +0000"
+    style = "td.free_field_content { font-size:11px; padding:3px; text-align:left } " * 60
+    link = "https://jobs.ca-cib.com/confirmation-autodeclaration.aspx?TOKEN=V2-abc"
+    message.set_content(
+        f"<html><head><style>{style}</style></head><body>Pour confirmer votre "
+        f'inscription, cliquez sur le lien suivant : <a href="{link}">{link}</a></body></html>',
+        subtype="html",
+    )
+    summary = parse_message(message.as_bytes())
+    assert summary is not None
+    assert link in summary.text
+    assert "font-size" not in summary.text
+
+
 def test_auto_send_queues_prepared_dossiers_but_not_failed_letters(
     instance, monkeypatch
 ) -> None:
