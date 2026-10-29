@@ -23,6 +23,8 @@ MAX_MESSAGES = 5
 MAX_BODY_CHARS = 2_000
 
 _TAG_RE = re.compile(r"<[^>]+>")
+# Feuilles de style des ATS (Talentsoft) : des milliers de caractères avant le lien.
+_HIDDEN_RE = re.compile(r"<(style|script|head)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 _SPACE_RE = re.compile(r"\s+")
 
 
@@ -52,7 +54,8 @@ def _body_text(message: Message) -> str:
             plain = text
         elif part.get_content_type() == "text/html" and not rich:
             # Les liens de vérification vivent dans href : on les garde visibles.
-            rich = re.sub(r'<a\s[^>]*href="([^"]+)"[^>]*>', r" \1 ", text, flags=re.IGNORECASE)
+            rich = _HIDDEN_RE.sub(" ", text)
+            rich = re.sub(r'<a\s[^>]*href="([^"]+)"[^>]*>', r" \1 ", rich, flags=re.IGNORECASE)
             rich = html.unescape(_TAG_RE.sub(" ", rich))
     return _SPACE_RE.sub(" ", plain or rich).strip()[:MAX_BODY_CHARS]
 
