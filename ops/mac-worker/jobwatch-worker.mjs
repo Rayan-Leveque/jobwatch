@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Poste d'envoi jobwatch (Mac) : réclame un dossier validé sur le serveur, laisse
-// Claude Code remplir le formulaire dans une fenêtre Chrome visible au profil
-// dédié (pour suivre l'agent en direct), puis rend le verdict. Lancé toutes les
+// Claude Code remplir le formulaire dans un Chrome en arrière-plan au profil
+// dédié, puis rend le verdict. Lancé toutes les
 // 2 minutes par launchd ; ne fait rien si aucun dossier n'attend. Ton Chrome
 // habituel n'est jamais touché.
 //
@@ -361,17 +361,6 @@ function runAgent(claim, workDir, agentEnv, real, args) {
   return agent;
 }
 
-// « captcha » ou « login » quand l'agent s'est arrêté sur l'un d'eux, sinon null.
-function blockerOf(stdout) {
-  try {
-    const parsed = JSON.parse(stdout);
-    const result = parsed.structured_output ?? parsed;
-    return result.status === "needs_human" ? result.blocker ?? null : null;
-  } catch {
-    return null;
-  }
-}
-
 // Notification macOS : la fenêtre visible attend le candidat.
 async function runJob(claim) {
   const workDir = join(WORK_ROOT, String(claim.job_id));
@@ -398,27 +387,20 @@ async function runJob(claim) {
     const result = join(workDir, "agent_result.json");
     let agent;
     let stdout;
-    // Chrome en arrière-plan ; un captcha ou une connexion rouvre le dossier une
-    // fois en fenêtre visible, que certains sites laissent passer. Encore bloqué,
-    // il attend la session captcha, où le candidat est devant l'écran.
-    for (const assisted of claim.assisted ? [true] : [false, true]) {
-      rmSync(result, { force: true });
-      rmSync(proof, { force: true });
+    // Chrome en arrière-plan. Un captcha ou une connexion attend la session
+    // captcha (menu « Débloquer ») : aucune fenêtre ne s'ouvre sans le candidat.
+    rmSync(result, { force: true });
+    rmSync(proof, { force: true });
+    killProfileChrome();
+    try {
+      await openBrowser(workDir, claim.url, ...(claim.assisted ? ["--headed"] : []));
+      agent = runAgent(claim, workDir, agentEnv, real, claim.args);
+    } finally {
+      // Même si la page n'a pas chargé, le navigateur est ouvert : on le ferme.
+      browser(workDir, "close");
       killProfileChrome();
-      try {
-        await openBrowser(workDir, claim.url, ...(assisted ? ["--headed"] : []));
-        agent = runAgent(claim, workDir, agentEnv, real, claim.args);
-      } finally {
-        // Même si la page n'a pas chargé, le navigateur est ouvert : on le ferme.
-        browser(workDir, "close");
-        killProfileChrome();
-      }
-      stdout = codex && existsSync(result) ? readFileSync(result, "utf8") : agent.stdout;
-      const blocker = assisted || agent.error ? null : blockerOf(stdout);
-      if (!blocker) break;
-      log(`job ${claim.job_id} : ${blocker} demandé, reprise en fenêtre visible`);
-      saveStatus({ current: { label, started: new Date().toISOString(), timeout: claim.timeout_seconds, assisted: blocker } });
     }
+    stdout = codex && existsSync(result) ? readFileSync(result, "utf8") : agent.stdout;
     const output = `${agent.stdout}${agent.stderr}`;
     // Délai dépassé : le formulaire a pu partir à moitié, le serveur rend la main.
     if (agent.error?.code === "ETIMEDOUT") {
