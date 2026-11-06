@@ -222,13 +222,11 @@ def test_captcha_waits_for_the_captcha_session_in_a_visible_window(
     def opens() -> list[str]:
         return [c for c in calls.read_text().splitlines() if c.startswith("open ")]
 
-    # Passage ordinaire : arrière-plan, puis une fenêtre visible sans attente.
+    # Passage ordinaire : arrière-plan seulement, aucune fenêtre sur l'écran.
     done = _run_worker(env)
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "captcha demandé, reprise en fenêtre visible" in done.stdout
     assert f"job {job_id} : needs_human" in done.stdout
-    assert len(opens()) == 2
-    assert not opens()[0].endswith("--headed") and opens()[1].endswith("--headed")
+    assert len(opens()) == 1 and not opens()[0].endswith("--headed")
     menu = _run_menubar(tmp_path).splitlines()
     session = next(line for line in menu if line.startswith("Débloquer les captchas (1)"))
 
@@ -238,7 +236,7 @@ def test_captcha_waits_for_the_captcha_session_in_a_visible_window(
     done = _run_worker(env)
     assert done.returncode == 0, done.stdout + done.stderr
     assert f"job {job_id} : submitted" in done.stdout
-    assert len(opens()) == 3 and opens()[2].endswith("--headed")
+    assert len(opens()) == 2 and opens()[1].endswith("--headed")
     # Plus rien à débloquer : la session s'arrête d'elle-même.
     assert not (_support_dir(tmp_path) / "assist").exists()
     menu = _run_menubar(tmp_path).splitlines()
