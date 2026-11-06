@@ -372,6 +372,45 @@ def test_prepare_takes_medium_fit_when_configured(instance, monkeypatch) -> None
     assert "MoyenneCo" in result.output, result.output
 
 
+def test_prepare_skips_the_same_job_posted_on_another_board(instance, monkeypatch) -> None:
+    """Cas réel : W HUB sur Hellowork et Whub sur Collective.work, même poste, deux envois."""
+    db_path, config_path, _cv_id = instance
+    config_path.write_text(
+        config_path.read_text().replace("daily_limit: 2", "daily_limit: 5"), encoding="utf-8"
+    )
+    conn = connect(db_path)
+    _seed_match(
+        conn, title="Développeur Python Polars - Pandas H/F", company="W HUB",
+        url="https://www.hellowork.com/fr-fr/emplois/84864391.html", fit="high",
+    )
+    _seed_match(
+        conn, title="Développeur Python (H/F) Polars/Pandas", company="Whub",
+        url="https://www.collective.work/jobs/fr/developpeur-python-hf-polarspandas-ssib",
+        fit="high",
+    )
+    _seed_match(
+        conn, title="Développeur Python Django H/F", company="Whub",
+        url="https://example.com/django", fit="high",
+    )
+    conn.close()
+    monkeypatch.setattr(prepare.draft, "run_job", _fake_letter(db_path))
+    result = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    assert "2 candidature(s) à valider" in result.output, result.output
+
+    # Le doublon publié plus tard sur un troisième site ne repart pas non plus.
+    conn = connect(db_path)
+    _seed_match(
+        conn, title="Développeur Python Polars/Pandas (F/H)", company="WHUB SAS",
+        url="https://example.com/troisieme", fit="high",
+    )
+    conn.close()
+    result = CliRunner().invoke(cli, ["prepare", "--config", str(config_path)])
+    conn = connect(db_path)
+    jobs = conn.execute("SELECT COUNT(*) FROM submission_job").fetchone()[0]
+    conn.close()
+    assert jobs == 2, result.output
+
+
 def _fake_bin(directory: Path, name: str, body: str) -> Path:
     path = directory / name
     path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")

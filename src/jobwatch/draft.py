@@ -183,6 +183,13 @@ _BODY_RE = re.compile(
 
 _DEFAULT_EXAMPLE_FILE = "default_letter_example.tex"
 
+# Préambule pdflatex recopié des lettres exemples : sous lualatex, fontenc T1 bascule
+# sur des polices 8 bits sans « œ », qui disparaît du PDF sans erreur.
+_LEGACY_FONT_RE = re.compile(
+    r"^[ \t]*\\usepackage\[[^\]]*\]\{(?:inputenc|fontenc)\}[ \t]*\n?", re.MULTILINE
+)
+_MISSING_CHAR_RE = re.compile(r"Missing character: There is no (\S+)")
+
 
 class DraftError(Exception):
     """Échec attendu de la génération ; le message est stocké dans draft_job.error."""
@@ -412,7 +419,12 @@ def extract_latex(text: str) -> str:
     end = text.rfind("\\end{document}")
     if start == -1 or end == -1:
         raise DraftError("la réponse du modèle ne contient pas de document LaTeX complet")
-    return text[start : end + len("\\end{document}")].strip() + "\n"
+    return unicode_preamble(text[start : end + len("\\end{document}")].strip() + "\n")
+
+
+def unicode_preamble(tex: str) -> str:
+    """Retire inputenc et fontenc : lualatex lit l'UTF-8 et ses polices OpenType ont « œ »."""
+    return _LEGACY_FONT_RE.sub("", tex)
 
 
 def escape_latex_body(text: str) -> str:
@@ -460,12 +472,18 @@ def compile_latex(tex: str, work_dir: Path) -> Path | str:
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise DraftError(f"lualatex n'a pas pu être lancé : {exc}") from exc
     pdf_path = work_dir / "lettre.pdf"
-    if completed.returncode == 0 and pdf_path.exists():
-        return pdf_path
     log_path = work_dir / "lettre.log"
     log_text = ""
     if log_path.exists():
         log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    if completed.returncode == 0 and pdf_path.exists():
+        missing = list(dict.fromkeys(_MISSING_CHAR_RE.findall(log_text)))
+        if not missing:
+            return pdf_path
+        return (
+            f"caractères absents de la police, supprimés du PDF : {' '.join(missing)}. "
+            "N'utilise ni fontenc ni inputenc avec lualatex."
+        )
     return (log_text or completed.stdout or "échec lualatex sans log")[-LOG_TAIL_CHARS:]
 
 
@@ -525,7 +543,10 @@ def _generate_tex(
     for attempt in range(REPAIR_ATTEMPTS + 1):
         result = compile_latex(tex, work_dir)
         if isinstance(result, Path):
-            return tex, result
+            pages = _pdf_page_count(result)
+            if pages == 1:
+                return tex, result
+            result = f"la lettre fait {pages} pages : raccourcis-la pour tenir sur une page"
         if attempt == REPAIR_ATTEMPTS:
             raise DraftError(
                 f"compilation LaTeX en échec après {REPAIR_ATTEMPTS} réparation(s) : "
@@ -829,7 +850,7 @@ def apply_body_edit(conn: sqlite3.Connection, db_path: Path, match_id: int, body
     if not tex_path.exists():
         raise DraftError("fichier source .tex introuvable")
     tex = tex_path.read_text(encoding="utf-8", errors="replace")
-    new_tex = splice_body(tex, body_text)
+    new_tex = unicode_preamble(splice_body(tex, body_text))
 
     match = _load_match(conn, match_id)
 
