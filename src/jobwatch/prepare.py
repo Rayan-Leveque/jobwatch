@@ -17,6 +17,7 @@ import fcntl
 import logging
 import re
 import sqlite3
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -88,6 +89,21 @@ def _prepared_today(conn: sqlite3.Connection) -> int:
     return int(row["n"])
 
 
+_COMPANY_SUFFIXES = frozenset({"sa", "sas", "sasu", "sarl", "inc", "ltd", "gmbh", "group", "groupe"})
+_GENDER_TOKENS = frozenset({"h", "f", "x", "n", "m", "nb", "hf", "fh"})
+
+
+def _tokens(text: str | None) -> list[str]:
+    plain = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode()
+    return re.findall(r"[a-z0-9]+", plain.lower())
+
+
+def offer_key(company: str | None, title: str | None) -> tuple[str, frozenset[str]]:
+    """Société et poste normalisés : « W HUB » = « Whub », « Polars - Pandas H/F » = « (H/F) Polars/Pandas »."""
+    company_key = "".join(t for t in _tokens(company) if t not in _COMPANY_SUFFIXES)
+    return company_key, frozenset(t for t in _tokens(title) if t not in _GENDER_TOKENS)
+
+
 def _candidates(
     conn: sqlite3.Connection, account_id: int, fits: tuple[str, ...] = ("high",)
 ) -> list[sqlite3.Row]:
@@ -95,11 +111,25 @@ def _candidates(
         int(row["match_id"])
         for row in conn.execute("SELECT DISTINCT match_id FROM submission_job")
     }
-    priority = [
-        row
-        for row in _priority_matches(conn, "all", account_id, fits)
-        if row["state"] == "new" and int(row["id"]) not in already
-    ]
+    # Un même poste publié sur plusieurs sites donne plusieurs offres : un dossier
+    # en échec laisse sa chance à une autre copie, sinon une seule part.
+    taken = {
+        offer_key(row["company"], row["title"])
+        for row in conn.execute(
+            "SELECT c.name AS company, o.title AS title FROM submission_job sj "
+            "JOIN match m ON m.id = sj.match_id JOIN offer o ON o.id = m.offer_id "
+            "LEFT JOIN company c ON c.id = o.company_id WHERE sj.status != 'failed'"
+        )
+    }
+    priority = []
+    for row in _priority_matches(conn, "all", account_id, fits):
+        if row["state"] != "new" or int(row["id"]) in already:
+            continue
+        key = offer_key(row["company"], row["title"])
+        if key[0] and key in taken:
+            continue
+        taken.add(key)
+        priority.append(row)
     # Déjà choisis par l'humain : leur ancienne lettre éventuelle est réécrite au
     # format court du pipeline actuel.
     return priority + _later_matches(conn, "all")

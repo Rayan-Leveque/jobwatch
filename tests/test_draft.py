@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import subprocess
 import threading
 import urllib.error
 import urllib.request
@@ -340,6 +341,59 @@ def test_compile_latex_returns_log_on_error(tmp_path: Path) -> None:
     result = compile_latex("\\documentclass{article}\\begin{document}\\boom\\end{document}", tmp_path)
     assert isinstance(result, str)
     assert "boom" in result
+
+
+# Préambule des lettres exemples de l'utilisateur : « cœur » perdait son « œ » en silence.
+T1_LETTER_TEX = (
+    "\\documentclass[11pt]{article}\n"
+    "\\usepackage[utf8]{inputenc}\n"
+    "\\usepackage[T1]{fontenc}\n"
+    "\\usepackage[french]{babel}\n"
+    "\\begin{document}\n"
+    "Les enjeux éthiques de l'IA sont au cœur de mon travail.\n"
+    "\\end{document}\n"
+)
+
+
+def _pdf_text(pdf_path: Path) -> str:
+    return subprocess.run(
+        ["pdftotext", str(pdf_path), "-"], capture_output=True, text=True, check=True
+    ).stdout
+
+
+@pytest.mark.skipif(not HAS_TEX, reason="lualatex/pdftoppm absents")
+def test_compile_latex_refuses_characters_missing_from_the_font(tmp_path: Path) -> None:
+    result = compile_latex(T1_LETTER_TEX, tmp_path)
+    assert isinstance(result, str)
+    assert "œ" in result
+
+
+@pytest.mark.skipif(not HAS_TEX, reason="lualatex/pdftoppm absents")
+def test_generated_letter_keeps_oe_ligature_despite_t1_examples(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(draft, "_call_llm", lambda config, prompt, bundle: T1_LETTER_TEX)
+    tex, pdf_path = draft._generate_tex(None, "prompt", "bundle", tmp_path)
+    assert "fontenc" not in tex
+    assert "au cœur de" in _pdf_text(pdf_path)
+
+
+@pytest.mark.skipif(not HAS_TEX, reason="lualatex/pdftoppm absents")
+def test_generated_letter_over_one_page_goes_back_to_repair(
+    tmp_path: Path, monkeypatch
+) -> None:
+    long_tex = MINIMAL_TEX.replace("\\end{document}", "\\newpage Suite\n\\end{document}")
+    answers = iter([long_tex, MINIMAL_TEX])
+    prompts: list[str] = []
+
+    def fake_llm(config, prompt, bundle):
+        prompts.append(bundle)
+        return next(answers)
+
+    monkeypatch.setattr(draft, "_call_llm", fake_llm)
+    tex, _ = draft._generate_tex(None, "prompt", "bundle", tmp_path)
+    assert tex == MINIMAL_TEX
+    assert "2 pages" in prompts[1]
 
 
 # ---------------------------------------------------------------- run_job
