@@ -12,7 +12,7 @@ from jobwatch.cli import cli
 from jobwatch.db import connect, init_db
 from jobwatch.onboarding import complete_profile
 from jobwatch.profile import save_profile_details
-from jobwatch.seniority import reclassify_all_profiles
+from jobwatch.seniority import assess_offer, reclassify_all_profiles
 from jobwatch.serve_render import render_page
 
 
@@ -197,6 +197,18 @@ def test_later_experience_enrichment_reclassifies_previous_unknown_match(
     assert reclassify_all_profiles(conn) >= 1
 
     assert "AI Engineer" not in render_page(conn, track="all", account_id=account_id)
+
+
+@pytest.mark.parametrize("quote", ["3 à 6 ans d’expérience", "3 to 6 years of experience"])
+def test_experience_range_uses_its_lower_bound(conn: sqlite3.Connection, quote: str) -> None:
+    offer_id = _insert_offer(conn, "AI Engineer", "https://a/range")
+    _add_experience(conn, offer_id, quote, quote)
+    conn.commit()
+
+    assessment = assess_offer(conn, offer_id)
+
+    assert assessment.level == 3
+    assert assessment.reason.startswith("3 an(s)")
 
 
 def test_cli_run_filters_offers_and_resyncs_searches_without_resetting_triage(tmp_path) -> None:
