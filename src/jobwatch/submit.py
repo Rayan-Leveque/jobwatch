@@ -352,6 +352,13 @@ def queue_submission(conn: sqlite3.Connection, match_id: int) -> int:
 
 
 def _finish(conn: sqlite3.Connection, job_id: int, **fields: object) -> None:
+    # dossier.md porte les mots de passe des comptes ATS : il est réécrit à
+    # chaque lancement, inutile de le garder une fois l'envoi tranché.
+    db_file = conn.execute("PRAGMA database_list").fetchone()["file"]
+    if db_file:
+        (documents_dir(Path(db_file)) / "submissions" / str(job_id) / "dossier.md").unlink(
+            missing_ok=True
+        )
     assignments = ", ".join(f"{name} = ?" for name in fields)
     conn.execute(
         f"UPDATE submission_job SET {assignments}, finished_at = datetime('now') WHERE id = ?",

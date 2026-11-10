@@ -1669,3 +1669,39 @@ def test_enrich_backfill_never_overwrites_and_skips_unfound(conn: sqlite3.Connec
     assert result.contracts_backfilled == 0
     assert result.locations_backfilled == 0
     assert "complété(s)" not in result.summary_line()
+
+
+def test_summary_without_fields_stops_being_requested_at_the_ceiling(
+    conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """Un résumé manuel dont les champs ne sortent jamais n'est pas redemandé sans fin."""
+    from jobwatch.enrich import MAX_SUMMARY_ATTEMPTS
+
+    offer_id = _seed_offer(conn)
+    summary_id = int(conn.execute(
+        "INSERT INTO offer_summary (offer_id, source) VALUES (?, 'manual')", (offer_id,)
+    ).lastrowid)
+    conn.execute(
+        "INSERT INTO summary_bullet (summary_id, position, text) VALUES (?, 0, 'puce')",
+        (summary_id,),
+    )
+    conn.execute(
+        "INSERT INTO offer_content (offer_id, markdown, status) VALUES (?, ?, 'ok')",
+        (offer_id, "Texte de l'annonce. " * 30),
+    )
+    conn.commit()
+    calls: list[int] = []
+
+    def no_fields(config, markdown):
+        calls.append(1)
+        # Une fois sans réponse exploitable, les autres avec des puces mais aucun champ.
+        return None if len(calls) == 1 else ({}, {}, ["puce du modèle"])
+
+    monkeypatch.setattr("jobwatch.enrich._summarize", no_fields)
+
+    for _ in range(MAX_SUMMARY_ATTEMPTS + 2):
+        enrich(conn, _config(), sleep=_no_sleep)
+
+    assert len(calls) == MAX_SUMMARY_ATTEMPTS
+    bullets = [r["text"] for r in conn.execute("SELECT text FROM summary_bullet")]
+    assert bullets == ["puce"]

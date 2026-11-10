@@ -67,6 +67,8 @@ def _worker_env(
     )
     return {
         "PATH": "/usr/bin:/bin",
+        # Le serveur simulé exécute le code testé, pas une copie installée ailleurs.
+        "PYTHONPATH": str(Path(__file__).parent.parent / "src"),
         "JOBWATCH_SSH": "",
         # Même forme qu'en production : instance nommée avant la sous-commande.
         "JOBWATCH_JW": f"{sys.executable} -m jobwatch.cli --instance mac",
@@ -575,11 +577,7 @@ def test_worker_delivers_a_verdict_the_server_never_received(
     conn = connect(db_path)
     job_id = queue_submission(conn, match_id)
     conn.close()
-    # Le serveur simulé doit exécuter le code testé, pas une copie installée ailleurs.
-    env = {
-        **_worker_env(tmp_path, config_path),
-        "PYTHONPATH": str(Path(__file__).parent.parent / "src"),
-    }
+    env = _worker_env(tmp_path, config_path)
     claimed = subprocess.run(
         [*env["JOBWATCH_JW"].split(" "), "submission-claim"],
         env=env, capture_output=True, text=True, timeout=120, check=False,

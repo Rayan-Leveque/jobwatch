@@ -656,6 +656,10 @@ def submit(config_path: Path | None, match_id: int) -> None:
         _fatal(str(exc))
     finally:
         conn.close()
+    if config.autoapply.runner == "worker":
+        # Le poste d'envoi traite la file : lancer un Chrome ici doublerait l'envoi.
+        click.echo(f"queued : dossier {job_id} mis en file pour le poste d'envoi")
+        return
     run_submission(config.db, config.autoapply, job_id)
     conn = _open_db(config)
     try:

@@ -45,6 +45,20 @@ searches:
 #       - url: https://www.lacantine.co/jobboard/
 #         name: La Cantine (Nantes)
 #         link_pattern: "/job/.+"
+#   capgemini:                         # API carrières Capgemini (toutes marques du groupe)
+#     queries: ["intelligence artificielle", "data"]
+#     locations: ["Paris", "Issy"]     # sous-chaînes de la ville ; vide = tout le pays
+#     country: fr-fr
+#   hellowork:                         # pages de résultats Hellowork
+#     queries: ["ingénieur IA"]
+#     location: "Île-de-France"
+#     pages: 2                         # 30 offres par page, 1 à 10
+#   successfactors:                    # sites carrières SAP SuccessFactors (flux RSS)
+#     keywords: ["IA", "data"]
+#     locations: ["Bezons", "Paris"]
+#     sites:
+#       - url: https://jobs.atos.net
+#         name: Atos
 #   linkedin:
 #     hours: 48
 #     queries:
@@ -131,7 +145,7 @@ draft: {}
 #                                       # (exige runner: worker)
 #   daily_limit: 3                      # dossiers préparés par jour au plus
 #   claude_bin: claude                  # binaire Claude Code
-#   model: claude-sonnet-5-5            # optionnel : modèle de l'agent
+#   model: claude-opus-5-5              # optionnel : modèle de l'agent (pilotage de navigateur)
 #   browser_bin: playwright-cli         # CLI navigateur (npm @playwright/cli)
 #   dashboard_url: https://exemple.org  # lien de la notification ntfy
 #   timeout_seconds: 900                # durée maximale d'un envoi

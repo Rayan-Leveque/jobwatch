@@ -453,6 +453,8 @@ async function runJob(claim) {
   }
   const verdict = remote(`${JW} submission-finish ${claim.job_id}`, JSON.stringify(report)).trim();
   rmSync(pending, { force: true });
+  // dossier.md porte les mots de passe des comptes ATS : rien à garder après l'envoi.
+  rmSync(join(workDir, "dossier.md"), { force: true });
   log(`job ${claim.job_id} : ${verdict}`);
   const [, status = "failed", reason = verdict] = /^(\w+) : ([\s\S]*)$/.exec(verdict) || [];
   const entry = { label, status, reason, at: new Date().toISOString() };

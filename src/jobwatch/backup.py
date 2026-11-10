@@ -45,6 +45,19 @@ def _relocate(db: Path, old_root: Path, new_root: Path) -> None:
                         raise BackupError("document référencé absent ou chemin invalide")
                     conn.execute(f"UPDATE {table} SET {column} = ? WHERE id = ?",
                                  (str(new_root / relative), row_id))
+            # Preuves et journaux d'envoi : relogés quand ils sont dans l'instance,
+            # sans exiger le fichier (une preuve peut manquer sans bloquer la copie).
+            for column in ("proof_path", "log_path"):
+                rows = conn.execute(f"SELECT id, {column} FROM submission_job").fetchall()
+                for row_id, value in rows:
+                    if not value:
+                        continue
+                    try:
+                        relative = Path(value).expanduser().relative_to(old_root)
+                    except ValueError:
+                        continue
+                    conn.execute(f"UPDATE submission_job SET {column} = ? WHERE id = ?",
+                                 (str(new_root / relative), row_id))
             conn.execute("DELETE FROM web_session")
             conn.execute("DELETE FROM account_invite")
     finally:
