@@ -67,6 +67,9 @@ const PAUSE = join(SUPPORT, "pause");
 // sur un captcha ou une connexion, puis le supprime (menu « Débloquer »).
 const ASSIST = join(SUPPORT, "assist");
 const HISTORY_SIZE = 10;
+// Verdict d'un envoi terminé, gardé dans son dossier tant que le serveur ne l'a
+// pas reçu : une coupure réseau ou une mise en veille ne le perd plus.
+const VERDICT_FILE = "verdict.json";
 const LOGIN_PAGES = [
   "https://www.linkedin.com/login",
   "https://www.welcometothejungle.com/fr/signin",
@@ -290,6 +293,25 @@ async function login() {
   console.log("puis ferme cette fenêtre. Les sessions restent dans le profil dédié.");
 }
 
+// Rend au serveur les verdicts qu'un passage précédent n'a pas pu transmettre.
+// Sans cela le dossier restait « en cours » puis revenait à la main, alors que
+// la candidature était parfois bien partie.
+function deliverPendingVerdicts() {
+  if (!existsSync(WORK_ROOT)) return;
+  for (const name of readdirSync(WORK_ROOT).filter((entry) => /^\d+$/.test(entry))) {
+    const pending = join(WORK_ROOT, name, VERDICT_FILE);
+    if (!existsSync(pending)) continue;
+    try {
+      const verdict = remote(`${JW} submission-finish ${name}`, readFileSync(pending, "utf8")).trim();
+      log(`job ${name} : verdict en attente transmis (${verdict})`);
+    } catch (error) {
+      // Le serveur a déjà tranché ce dossier : rien à rendre. Sinon, on réessaiera.
+      if (!String(error.message).includes("n'est pas en cours")) throw error;
+      log(`job ${name} : verdict en attente abandonné, dossier déjà clos`);
+    }
+    rmSync(pending, { force: true });
+  }
+}
 // Vide la file d'un trait : sans boucle, chaque dossier attendait le passage
 // launchd suivant (jusqu'à 2 minutes perdues entre deux envois).
 async function main() {
@@ -299,6 +321,7 @@ async function main() {
     return;
   }
   mkdirSync(WORK_ROOT, { recursive: true, mode: 0o700 });
+  deliverPendingVerdicts();
   for (;;) {
     if (existsSync(PAUSE)) {
       saveStatus({ current: null, error: null, paused: true });
@@ -422,7 +445,14 @@ async function runJob(claim) {
   } catch (error) {
     report = error instanceof OfferGone ? { expired: error.status } : { error: String(error.message || error) };
   }
+  const pending = join(workDir, VERDICT_FILE);
+  try {
+    writeFileSync(pending, JSON.stringify(report), { mode: 0o600 });
+  } catch {
+    // Disque plein : le verdict part quand même, sans filet.
+  }
   const verdict = remote(`${JW} submission-finish ${claim.job_id}`, JSON.stringify(report)).trim();
+  rmSync(pending, { force: true });
   log(`job ${claim.job_id} : ${verdict}`);
   const [, status = "failed", reason = verdict] = /^(\w+) : ([\s\S]*)$/.exec(verdict) || [];
   const entry = { label, status, reason, at: new Date().toISOString() };

@@ -40,15 +40,11 @@ from urllib.parse import urlsplit
 import httpx
 from playwright.sync_api import sync_playwright
 
-from jobwatch import llm_runner
 from jobwatch.config import EnrichConfig
 from jobwatch.extraction import Extraction, extract
 from jobwatch.llm_runner import LLMRunnerError, opencode_text, run_codex, run_opencode, run_pi
 from jobwatch.research import OPENROUTER_URL, openrouter_model_payload
 from jobwatch.seniority import reclassify_all_profiles
-
-OPENCODE_TOOLS = llm_runner.OPENCODE_TOOLS
-opencode_sandbox = llm_runner.opencode_sandbox
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +93,8 @@ def infer_contract(markdown: str) -> str | None:
     return next(
         (label for label, pattern in CONTRACT_PATTERNS[1:] if pattern.search(markdown)), None
     )
+
+
 LIEU_LINE_RE = re.compile(r"^\s*Lieu\s*:\s*(\S.*?)\s*$", re.MULTILINE)
 POSTAL_TOWN_RE = re.compile(
     r"\b(\d{5})\s+([A-ZÀ-Þ][A-Za-zÀ-ÿ'’\- ]{1,30})[.,;)…]?\s*$", re.MULTILINE

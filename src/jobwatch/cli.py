@@ -50,6 +50,7 @@ from jobwatch.submit import (
     SubmitError,
     agent_args,
     apply_agent_result,
+    awaiting_verdict,
     blocked_submissions,
     build_dossier,
     claim_submission,
@@ -62,10 +63,7 @@ from jobwatch.submit import (
     run_submission,
 )
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_CONFIG = "config.yaml"
-FALLBACK_CONFIG = "~/.config/jobwatch/config.yaml"
 
 EVENT_TYPES = ("applied", "follow_up", "interview", "rejected", "offer")
 MATCH_STATES = ("new", "seen", "later", "applied", "discarded")
@@ -749,10 +747,7 @@ def submission_finish(config_path: Path | None, job_id: int) -> None:
         _fatal("rapport JSON illisible sur stdin")
     conn = _open_db(config)
     try:
-        running = conn.execute(
-            "SELECT 1 FROM submission_job WHERE id = ? AND status = 'running'", (job_id,)
-        ).fetchone()
-        if running is None:
+        if not awaiting_verdict(conn, job_id):
             _fatal(f"le job {job_id} n'est pas en cours")
         if report.get("quota"):
             # Quota Codex épuisé sur tous les comptes : le dossier attend la reprise.
@@ -909,7 +904,7 @@ def backup_cmd(destination: Path, config_path: Path | None) -> None:
     """Sauvegarde dans un dossier neuf. Arrêter serveur et collecte au préalable."""
     try:
         create_backup(_resolve_config_path(config_path), destination)
-    except (BackupError, ConfigError, OSError, ValueError, sqlite3.Error) as exc:
+    except (BackupError, CliError, ConfigError, OSError, ValueError, sqlite3.Error) as exc:
         _fatal(str(exc))
     click.echo(f"Sauvegarde vérifiée dans {destination}")
 

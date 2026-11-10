@@ -1492,7 +1492,8 @@ def test_summarize_opencode_denies_every_tool_by_name(monkeypatch) -> None:
     import subprocess as sp
     from pathlib import Path as P
 
-    from jobwatch.enrich import OPENCODE_TOOLS, _summarize
+    from jobwatch.enrich import _summarize
+    from jobwatch.llm_runner import OPENCODE_TOOLS
 
     captured: dict[str, object] = {}
 

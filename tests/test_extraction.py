@@ -118,3 +118,13 @@ def test_extract_salvage_stays_bounded(monkeypatch) -> None:
     assert result.salvaged_lines == extraction.MAX_SALVAGED_LINES
     salvaged = result.markdown.split(extraction.SALVAGE_HEADING)[1].splitlines()
     assert len(salvaged) == extraction.MAX_SALVAGED_LINES
+
+
+def test_jsonld_salary_keeps_a_plain_amount() -> None:
+    """Un MonetaryAmount sans fourchette porte son montant directement dans `value`."""
+    assert extraction._salary({"@type": "MonetaryAmount", "currency": "EUR", "value": 50000}) == (
+        "50000 EUR"
+    )
+    assert extraction._salary(
+        {"currency": "EUR", "value": {"minValue": 40000, "maxValue": 50000, "unitText": "YEAR"}}
+    ) == "40000 - 50000 EUR year"

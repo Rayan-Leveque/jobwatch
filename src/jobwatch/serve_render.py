@@ -394,12 +394,27 @@ def _row_class(state: object) -> str:
     return value if value in ("new", "seen", "later", "discarded") else "seen"
 
 
-def _document_options(rows: list[sqlite3.Row]) -> str:
-    options = ['<option value="">Aucun</option>']
-    options.extend(
+_NO_DOCUMENT_OPTION = '<option value="">Aucun</option>'
+
+# Chaque lettre générée entre dans la bibliothèque : recopier la liste entière
+# dans le menu de chaque carte faisait une page de 168 Mo pour 2 400 cartes et
+# 560 lettres. La liste est donc rendue une seule fois dans un <template>, que
+# le script recopie dans un menu à l'ouverture de son formulaire.
+LAZY_DOCUMENT_TYPES = ("cover_letter",)
+
+
+def _document_option_rows(rows: list[sqlite3.Row]) -> str:
+    return "".join(
         f'<option value="{int(r["id"])}">{html.escape(str(r["label"]))}</option>' for r in rows
     )
-    return "".join(options)
+
+
+def _document_options(rows: list[sqlite3.Row]) -> str:
+    return _NO_DOCUMENT_OPTION + _document_option_rows(rows)
+
+
+def _document_options_template(doc_type: str, rows: list[sqlite3.Row]) -> str:
+    return f'<template id="doc-options-{doc_type}">{_document_option_rows(rows)}</template>'
 
 
 _EYE_SVG = (
@@ -427,14 +442,16 @@ def _preview_button(label: str) -> str:
 
 def _document_field(match_id: int, doc_type: str, name: str, label: str, rows: list[sqlite3.Row]) -> str:
     select_id = f"{doc_type}-select-{match_id}"
-    options = _document_options(rows)
+    lazy = doc_type in LAZY_DOCUMENT_TYPES
+    options = _NO_DOCUMENT_OPTION if lazy else _document_options(rows)
+    lazy_attr = f' data-lazy-options="doc-options-{doc_type}"' if lazy else ""
     upload_label = html.escape(f"Uploader : {label}", quote=True)
     return (
         f'<div class="doc-field" data-doc-type="{doc_type}">'
         f'<label class="doc-label" for="{select_id}">{html.escape(label)}</label>'
         '<div class="doc-row">'
         f'<select class="apply-input doc-select" id="{select_id}" name="{name}" '
-        f'data-doc-type="{doc_type}">{options}</select>'
+        f'data-doc-type="{doc_type}"{lazy_attr}>{options}</select>'
         f"{_preview_button(label)}"
         f'<button class="doc-icon-btn doc-upload-btn" type="button" data-doc-type="{doc_type}" '
         f'aria-label="{upload_label}" title="Uploader">{_UPLOAD_SVG}</button>'
@@ -983,6 +1000,11 @@ def render_page(
         if draft_enabled and details is not None and not details.has_personalization
         else ""
     )
+    if cover_letters_enabled:
+        body += "".join(
+            _document_options_template(doc_type, library[doc_type])
+            for doc_type in LAZY_DOCUMENT_TYPES
+        )
     return _page_template(
         body=body, total=total,
         new_count=len(new) + priority_new,

@@ -323,7 +323,8 @@ def _salary(value: object) -> str:
     inner = _as_dict(_get(amount, "value")) or amount
     low = _flatten(_get(inner, "minValue"))
     high = _flatten(_get(inner, "maxValue"))
-    single = _flatten(_get(inner, "value")) if inner is not amount else ""
+    # `value` peut aussi être le montant lui-même : {"currency": "EUR", "value": 50000}.
+    single = _flatten(_get(inner, "value"))
     unit = _flatten(_get(inner, "unitText"))
     figure = f"{low} - {high}" if low and high else (low or high or single)
     if not figure:

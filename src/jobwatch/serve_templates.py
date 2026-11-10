@@ -980,6 +980,22 @@ _JS = """\
     });
   });
   // Un seul formulaire d'action reste ouvert à la fois dans une carte.
+  // La liste des lettres n'est rendue qu'une fois, dans un <template> : un menu
+  // la reçoit à l'ouverture de son formulaire, pas dans le HTML de chaque carte.
+  const hydrateDocSelect = select => {
+    const source = document.getElementById(select.dataset.lazyOptions);
+    delete select.dataset.lazyOptions;
+    if (source) select.append(source.content.cloneNode(true));
+  };
+  const upsertOption = (parent, value, label) => {
+    let option = [...parent.querySelectorAll('option')].find(o => o.value === value);
+    if (!option) {
+      option = document.createElement('option');
+      option.value = value;
+      parent.append(option);
+    }
+    option.textContent = label;
+  };
   [...document.querySelectorAll('.action-apply, .action-draft')].forEach(button => {
     button.addEventListener('click', () => {
       const expanded = button.getAttribute('aria-expanded') === 'true';
@@ -994,7 +1010,10 @@ _JS = """\
           });
       }
       button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-      if (form) form.hidden = expanded;
+      if (form) {
+        form.querySelectorAll('select[data-lazy-options]').forEach(hydrateDocSelect);
+        form.hidden = expanded;
+      }
     });
   });
   [...document.querySelectorAll('.apply-form')].forEach(form => {
@@ -1064,16 +1083,13 @@ _JS = """\
   };
   const registerCoverLetter = (matchId, libraryId, label) => {
     const value = String(libraryId);
-    [...document.querySelectorAll('select[data-doc-type="cover_letter"]')].forEach(select => {
-      let option = [...select.options].find(o => o.value === value);
-      if (!option) {
-        option = document.createElement('option');
-        option.value = value;
-        select.append(option);
-      }
-      option.textContent = label;
-    });
+    const source = document.getElementById('doc-options-cover_letter');
+    if (source) upsertOption(source.content, value, label);
     const own = document.querySelector(`#apply-form-${matchId} select[data-doc-type="cover_letter"]`);
+    if (own && own.dataset.lazyOptions) hydrateDocSelect(own);
+    // Les menus encore jamais ouverts liront la lettre dans le <template>.
+    [...document.querySelectorAll('select[data-doc-type="cover_letter"]:not([data-lazy-options])')]
+      .forEach(select => upsertOption(select, value, label));
     if (own) {
       own.value = value;
       own.dispatchEvent(new Event('change'));
@@ -1333,10 +1349,8 @@ _JS = """\
     });
     if (!resp.ok) return;
     const entry = await resp.json();
-    const option = document.createElement('option');
-    option.value = String(entry.id);
-    option.textContent = entry.label;
-    select.append(option);
+    if (select.dataset.lazyOptions) hydrateDocSelect(select);
+    upsertOption(select, String(entry.id), entry.label);
     select.value = String(entry.id);
     select.dispatchEvent(new Event('change'));
     pendingUploads.delete(field);

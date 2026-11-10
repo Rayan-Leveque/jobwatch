@@ -192,7 +192,7 @@ def test_codex_research_uses_schema_and_candidate_attachment(monkeypatch) -> Non
 
 def test_opencode_research_denies_local_tools_and_allows_web(monkeypatch) -> None:
     def fake_run(command, **kwargs):
-        from jobwatch.enrich import OPENCODE_TOOLS
+        from jobwatch.llm_runner import OPENCODE_TOOLS
 
         expected = {"*": "deny"}
         expected.update(

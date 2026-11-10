@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS source (
   id INTEGER PRIMARY KEY,
-  type TEXT NOT NULL,                -- 'france_travail' | 'smartrecruiters'
+  type TEXT NOT NULL,                -- type du collecteur ('linkedin', 'wttj', 'workday'…), 'research', 'related', 'web' ou 'import'
   name TEXT NOT NULL UNIQUE,
   last_run_at TEXT,
   last_success_at TEXT
@@ -26,7 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_offer_company_title ON offer(company_id, title);
 CREATE TABLE IF NOT EXISTS offer_summary (
   id INTEGER PRIMARY KEY,
   offer_id INTEGER NOT NULL UNIQUE REFERENCES offer(id) ON DELETE CASCADE,
-  status TEXT NOT NULL DEFAULT 'ready', -- 'ready' | 'limited_no_content' | 'limited_retryable'
+  status TEXT NOT NULL DEFAULT 'ready', -- 'ready' | 'limited_pending' | 'limited_no_content' | 'limited_retryable'
   attempt_count INTEGER NOT NULL DEFAULT 0,
   attempted_at TEXT
 );
@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS match (
   discarded_at TEXT,                 -- horodatage du passage à 'discarded' ; NULL sinon
   UNIQUE(search_id, offer_id)
 );
+-- Les requêtes du dashboard, d'enrich et du fit cherchent les matchs d'une offre.
+CREATE INDEX IF NOT EXISTS idx_match_offer ON match(offer_id);
 CREATE TABLE IF NOT EXISTS application (
   id INTEGER PRIMARY KEY,
   match_id INTEGER REFERENCES match(id),
@@ -84,6 +86,8 @@ CREATE TABLE IF NOT EXISTS application (
   note TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_application_match ON application(match_id);
+CREATE INDEX IF NOT EXISTS idx_application_offer ON application(offer_id);
 CREATE TABLE IF NOT EXISTS event (
   id INTEGER PRIMARY KEY,
   application_id INTEGER NOT NULL REFERENCES application(id),
@@ -91,6 +95,7 @@ CREATE TABLE IF NOT EXISTS event (
   at TEXT NOT NULL DEFAULT (datetime('now')),
   comment TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_event_application ON event(application_id);
 CREATE TABLE IF NOT EXISTS document (
   id INTEGER PRIMARY KEY,
   application_id INTEGER NOT NULL REFERENCES application(id),

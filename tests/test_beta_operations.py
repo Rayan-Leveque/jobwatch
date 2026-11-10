@@ -138,3 +138,15 @@ def test_beta_config_disables_all_ai(tmp_path, monkeypatch):
     assert config.sources.linkedin.from_profile
     assert yaml.safe_load(path.read_text())["searches"] == []
     conn.close()
+
+
+def test_backup_without_any_config_fails_with_a_message(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("JOBWATCH_INSTANCE", raising=False)
+
+    result = CliRunner().invoke(cli, ["backup", str(tmp_path / "backup")])
+
+    assert result.exit_code == 1
+    assert "aucune config trouvée" in result.output
+    assert not (tmp_path / "backup").exists()
