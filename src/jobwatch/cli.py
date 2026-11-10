@@ -991,6 +991,12 @@ def apps(config_path: Path | None) -> None:
     help="cookie réservé à HTTPS ; désactiver explicitement pour un accès HTTP privé",
 )
 @click.option(
+    "--trust-proxy",
+    is_flag=True,
+    envvar="JOBWATCH_TRUST_PROXY",
+    help="croit l'adresse visiteur X-Real-IP d'un proxy local (limite des connexions par adresse)",
+)
+@click.option(
     "--allow-open",
     is_flag=True,
     help="autorise explicitement une instance nommée sans compte (développement local uniquement)",
@@ -1006,6 +1012,7 @@ def serve(
     host: str,
     port: int,
     secure_cookie: bool,
+    trust_proxy: bool,
     allow_open: bool,
     collect_onboarding: bool,
 ) -> None:
@@ -1028,6 +1035,7 @@ def serve(
             draft_config=config.draft,
             workspace_slug=_current_instance(),
             secure_cookie=secure_cookie,
+            trust_proxy=trust_proxy,
             onboarding_enabled=_current_instance() is not None,
             collect_onboarding=collect_onboarding,
             autoapply_config=config.autoapply,

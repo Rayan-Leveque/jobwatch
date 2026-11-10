@@ -3,12 +3,30 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 from http.cookies import CookieError, SimpleCookie
 
 from jobwatch.auth import REMEMBER_SESSION_SECONDS, Session
 
 SESSION_COOKIE = "id"
 CSRF_HEADER = "X-CSRF-Token"
+CLIENT_HEADER = "X-Real-IP"
+
+
+def client_address(peer: str, forwarded: str | None, *, trust_proxy: bool) -> str:
+    """Adresse du visiteur : celle annoncée par le proxy local, sinon celle du pair.
+
+    L'en-tête n'est cru que sur demande explicite et venant de la boucle locale :
+    sans cela, n'importe quel visiteur choisirait l'adresse qui le fait limiter.
+    """
+    if not trust_proxy or not forwarded:
+        return peer
+    try:
+        if not ipaddress.ip_address(peer).is_loopback:
+            return peer
+        return str(ipaddress.ip_address(forwarded.strip()))
+    except ValueError:
+        return peer
 
 
 def session_cookie(token: str, *, secure: bool, remember: bool = False) -> str:

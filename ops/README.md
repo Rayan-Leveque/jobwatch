@@ -74,9 +74,14 @@ interdit l'accès au contrôle de santé, limite les requêtes de connexion et m
 liens d'invitation dans les journaux d'accès. Ne pas activer les logs nginx de niveau debug.
 
 Le cookie reste Secure. Avec le point d'entrée commun, son préfixe sélectionne l'instance
-et chaque base valide ensuite son propre jeton opaque. La limite applicative utilise
-l'adresse du proxy, sans faire confiance à un en-tête IP envoyé par le client. La limite
-nginx s'applique à l'adresse réelle de connexion.
+et chaque base valide ensuite son propre jeton opaque. Par défaut la limite applicative
+utilise l'adresse du proxy, sans faire confiance à un en-tête IP envoyé par le client :
+cinq échecs sur un email le bloquent alors pour tout le monde. Le point d'entrée commun
+transmet l'adresse réelle dans `X-Real-IP` (posée par nginx, toute valeur du client est
+écrasée). Ajouter `JOBWATCH_TRUST_PROXY=1` au `service.env` d'une instance pour qu'elle
+s'en serve, uniquement si TOUS ses accès passent par le point d'entrée commun : un autre
+proxy local qui ne réécrit pas cet en-tête (ancien accès Funnel) laisserait le visiteur
+choisir son adresse. La limite nginx s'applique à l'adresse réelle de connexion.
 
 Transmettre manuellement le lien d'invitation HTTPS au destinataire, jamais dans un
 journal public. Il expire après 48 heures. À l'inscription, la personne peut choisir

@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from jobwatch.auth import AuthError, normalize_email
-from jobwatch.auth_http import security_headers
+from jobwatch.auth_http import CLIENT_HEADER, client_address, security_headers
 from jobwatch.paths import validate_instance_name
 from jobwatch.serve_templates import _auth_page, _login_form
 
@@ -249,8 +249,14 @@ def make_handler(registry_path: Path) -> type[BaseHTTPRequestHandler]:
             headers = {
                 name: value
                 for name, value in self.headers.items()
-                if name.casefold() not in _HOP_BY_HOP and name.casefold() != "cookie"
+                if name.casefold() not in _HOP_BY_HOP
+                and name.casefold() not in {"cookie", CLIENT_HEADER.casefold()}
             }
+            # L'adresse du visiteur vient de nginx (pair local) ; une valeur envoyée
+            # par un client direct est remplacée par l'adresse de ce client.
+            headers[CLIENT_HEADER] = client_address(
+                self.client_address[0], self.headers.get(CLIENT_HEADER), trust_proxy=True
+            )
             if token:
                 headers["Cookie"] = f"{SESSION_COOKIE}={token}"
             headers["Connection"] = "close"

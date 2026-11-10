@@ -24,6 +24,7 @@ def _instance(
     document: bytes,
     *,
     accept: bool = True,
+    trust_proxy: bool = False,
 ):
     db_path.parent.mkdir()
     conn = connect(db_path)
@@ -52,7 +53,9 @@ def _instance(
     conn.close()
     server = ThreadingHTTPServer(
         ("127.0.0.1", 0),
-        make_handler(db_path, workspace_slug=slug, secure_cookie=False),
+        make_handler(
+            db_path, workspace_slug=slug, secure_cookie=False, trust_proxy=trust_proxy
+        ),
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -339,3 +342,52 @@ def test_invite_discovery_skips_dead_instance(tmp_path: Path) -> None:
         charlie.shutdown()
         charlie.server_close()
         charlie_thread.join(timeout=5)
+
+
+def test_login_throttle_follows_the_visitor_address_behind_the_gateway(tmp_path: Path) -> None:
+    """Cinq échecs depuis une adresse ne doivent pas bloquer le vrai propriétaire."""
+    alice, alice_thread, _invite = _instance(
+        tmp_path / "alice" / "jobwatch.db",
+        "alice",
+        "alice@example.com",
+        "Société Alice",
+        b"CV Alice",
+        trust_proxy=True,
+    )
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {"instances": [{"slug": "alice", "email": "alice@example.com", "port": alice.server_port}]}
+        ),
+        encoding="utf-8",
+    )
+    shared = ThreadingHTTPServer(("127.0.0.1", 0), make_shared_handler(registry))
+    shared_thread = threading.Thread(target=shared.serve_forever, daemon=True)
+    shared_thread.start()
+
+    def attempt(password: str, address: str) -> int:
+        body = urlencode({"email": "alice@example.com", "password": password}).encode()
+        status, _headers, _payload = _request(
+            shared.server_port,
+            "POST",
+            "/login",
+            body,
+            {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": f"http://127.0.0.1:{shared.server_port}",
+                "Host": f"127.0.0.1:{shared.server_port}",
+                "X-Real-IP": address,
+            },
+        )
+        return status
+
+    try:
+        for _ in range(5):
+            assert attempt("mauvais mot de passe", "203.0.113.7") != 303
+        assert attempt("mot de passe secret", "203.0.113.7") == 429
+        assert attempt("mot de passe secret", "198.51.100.4") == 303
+    finally:
+        for server, thread in ((shared, shared_thread), (alice, alice_thread)):
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
