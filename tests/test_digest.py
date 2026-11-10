@@ -110,3 +110,47 @@ def test_digest_skips_explicit_seniority_exclusion() -> None:
 
     assert [str(row["title"]) for row in groups["IA"]] == ["AI Engineer 2"]
     conn.close()
+
+
+def test_smtp_never_logs_in_without_tls(monkeypatch) -> None:
+    """Sans STARTTLS le mot de passe partirait en clair : l'envoi est abandonné."""
+    import smtplib
+
+    from jobwatch.config import SmtpConfig
+    from jobwatch.digest import _send_smtp
+
+    calls: list[str] = []
+
+    class FakeSmtp:
+        def __init__(self, host, port, timeout):
+            calls.append(type(self).__name__)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def starttls(self):
+            raise smtplib.SMTPNotSupportedError("STARTTLS extension not supported")
+
+        def login(self, user, password):
+            calls.append("login")
+
+        def send_message(self, message):
+            calls.append("send")
+
+    class FakeSmtpSsl(FakeSmtp):
+        pass
+
+    monkeypatch.setattr(smtplib, "SMTP", FakeSmtp)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSmtpSsl)
+    config = SmtpConfig(host="smtp.example.com", port=587, user="u", password="p", to="t@e.fr")
+
+    assert _send_smtp(config, "corps", 1) is False
+    assert calls == ["FakeSmtp"]
+
+    calls.clear()
+    config.port = 465
+    assert _send_smtp(config, "corps", 1) is True
+    assert calls == ["FakeSmtpSsl", "login", "send"]

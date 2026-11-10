@@ -1015,6 +1015,39 @@ def test_apply_without_documents_reports_network_failure_then_retries(browser, d
     page.close()
 
 
+def test_letter_menu_is_rendered_once_and_filled_when_the_form_opens(browser, dashboard) -> None:
+    """La bibliothèque de lettres ne doit pas être recopiée dans chaque carte."""
+    url, db_path = dashboard
+    conn = connect(db_path)
+    conn.execute(
+        "INSERT INTO document_library (type, label, file_path) "
+        "VALUES ('cover_letter', 'LM Acme - Poste', '/nonexistent/lm.pdf')"
+    )
+    conn.commit()
+    conn.close()
+
+    page = _open_page(browser, url)
+    assert page.content().count("LM Acme - Poste") == 1
+    card = _card(page, "NewCo")
+    select = card.locator('[name="cover_letter_library_id"]')
+    assert select.locator("option").count() == 1
+
+    card.locator(".action-apply").click()
+    card.locator(".apply-form").wait_for(state="visible", timeout=5000)
+    assert select.locator("option").all_inner_texts() == ["Aucun", "LM Acme - Poste"]
+    # Refermer puis rouvrir ne duplique pas la liste.
+    card.locator(".action-apply").click()
+    card.locator(".action-apply").click()
+    assert select.locator("option").count() == 2
+
+    # Chaque carte reçoit la liste à sa propre ouverture.
+    other = _card(page, "LaterCo")
+    page.locator('[data-section="later"] > summary').click()
+    other.locator(".action-apply").click()
+    assert other.locator('[name="cover_letter_library_id"] option').count() == 2
+    page.close()
+
+
 def test_apply_form_submits_and_removes_card_without_reload(browser, dashboard, tmp_path: Path) -> None:
     url, db_path = dashboard
     cv_src = tmp_path / "moncv.pdf"

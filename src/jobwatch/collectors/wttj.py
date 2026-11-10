@@ -24,7 +24,8 @@ def _normalized(value: object) -> str:
 
 def _geo_ok(office: dict, cities: dict[str, list[str]]) -> bool:
     country = str(office.get("country_code") or "")
-    if country == "FR":
+    # France sans villes configurées : Île-de-France, le comportement historique.
+    if country == "FR" and not cities.get("FR"):
         return "ile-de-france" in _normalized(office.get("state")).replace(" ", "-")
     city = _normalized(office.get("city"))
     return any(_normalized(target) in city for target in cities.get(country, []))

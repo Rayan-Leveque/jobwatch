@@ -1287,6 +1287,24 @@ def test_call_llm_codex_builds_command_and_reads_output(monkeypatch) -> None:
     assert command[-1].endswith("Rédige la lettre.")
 
 
+def test_call_llm_openrouter_reports_an_empty_answer(monkeypatch) -> None:
+    """Un message sans contenu (null) est un échec lisible, pas une erreur interne."""
+    import jobwatch.draft as draft_mod
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": None}}]}
+
+    monkeypatch.setattr(draft_mod.httpx, "post", lambda url, **kwargs: FakeResponse())
+    config = DraftConfig(model="m", runner="openrouter", api_key="sk-or-test")
+
+    with pytest.raises(draft.DraftError, match="réponse vide du modèle"):
+        draft._call_llm(config, "Rédige la lettre.", "# OFFRE")
+
+
 def test_call_llm_openrouter_posts_bundle(monkeypatch) -> None:
     import jobwatch.draft as draft_mod
 
@@ -1335,7 +1353,7 @@ def test_call_opencode_denies_every_tool_by_name(monkeypatch) -> None:
     """opencode.json et OPENCODE_PERMISSION sont les contrats lus par opencode."""
     import subprocess as sp
 
-    from jobwatch.enrich import OPENCODE_TOOLS
+    from jobwatch.llm_runner import OPENCODE_TOOLS
 
     captured: dict[str, object] = {}
 

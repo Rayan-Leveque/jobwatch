@@ -496,3 +496,18 @@ def test_config_rejects_invalid_public_sources(tmp_path, source_yaml: str, messa
     )
     with pytest.raises(ConfigError, match=message):
         load_config(path)
+
+
+def test_wttj_french_cities_replace_the_ile_de_france_default() -> None:
+    hits = [
+        _wttj_hit(title="Lyon", city="Lyon", country="FR", state="Auvergne-Rhône-Alpes"),
+        _wttj_hit(title="Paris", city="Paris", country="FR", state="Île-de-France"),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"hits": hits})
+
+    assert [offer.title for offer in _wttj_collector(handler).fetch()] == ["Paris"]
+    lyon = _wttj_collector(handler)
+    lyon.cities = {"FR": ["Lyon"]}
+    assert [offer.title for offer in lyon.fetch()] == ["Lyon"]

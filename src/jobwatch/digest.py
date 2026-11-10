@@ -73,11 +73,15 @@ def _send_smtp(cfg: SmtpConfig, body: str, count: int) -> bool:
     message["To"] = cfg.to
     message.set_content(body)
     try:
-        with smtplib.SMTP(cfg.host, cfg.port, timeout=30) as smtp:
-            try:
+        # Port 465 : TLS dès la connexion. Sinon STARTTLS obligatoire : sans lui,
+        # le mot de passe partirait en clair, donc on renonce à l'envoi.
+        if cfg.port == 465:
+            connection = smtplib.SMTP_SSL(cfg.host, cfg.port, timeout=30)
+        else:
+            connection = smtplib.SMTP(cfg.host, cfg.port, timeout=30)
+        with connection as smtp:
+            if cfg.port != 465:
                 smtp.starttls()
-            except smtplib.SMTPException:
-                log.debug("smtp server does not support STARTTLS, continuing without")
             smtp.login(cfg.user, cfg.password)
             smtp.send_message(message)
     except (OSError, smtplib.SMTPException) as exc:

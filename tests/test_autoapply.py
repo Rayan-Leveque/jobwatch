@@ -474,6 +474,9 @@ def test_submitted_dossier_records_application_with_proof(instance, tmp_path: Pa
 
     run_submission(db_path, config, job_id)
 
+    # Le dossier porte les mots de passe des comptes ATS : il ne survit pas à l'envoi.
+    work_dir = db_path.parent / "documents" / "submissions" / str(job_id)
+    assert work_dir.is_dir() and not (work_dir / "dossier.md").exists()
     conn = connect(db_path)
     job = conn.execute("SELECT * FROM submission_job WHERE id = ?", (job_id,)).fetchone()
     application = conn.execute(
@@ -729,3 +732,19 @@ def test_auto_send_requires_a_worker(tmp_path: Path, instance) -> None:
     config_path.write_text(config_path.read_text() + "  auto_send: true\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="runner: worker"):
         load_config(config_path)
+
+
+def test_cli_submit_only_queues_when_a_worker_sends(instance) -> None:
+    """Avec un poste d'envoi, `jw submit` ne lance pas un second navigateur sur le serveur."""
+    db_path, config_path, cv_id = instance
+    config_path.write_text(config_path.read_text() + "  runner: worker\n", encoding="utf-8")
+    match_id = _prepared(db_path, cv_id)
+
+    result = CliRunner().invoke(cli, ["submit", str(match_id), "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "mis en file" in result.output
+    conn = connect(db_path)
+    status = conn.execute("SELECT status FROM submission_job").fetchone()["status"]
+    conn.close()
+    assert status == "queued"

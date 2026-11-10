@@ -40,15 +40,11 @@ from urllib.parse import urlsplit
 import httpx
 from playwright.sync_api import sync_playwright
 
-from jobwatch import llm_runner
 from jobwatch.config import EnrichConfig
 from jobwatch.extraction import Extraction, extract
 from jobwatch.llm_runner import LLMRunnerError, opencode_text, run_codex, run_opencode, run_pi
 from jobwatch.research import OPENROUTER_URL, openrouter_model_payload
 from jobwatch.seniority import reclassify_all_profiles
-
-OPENCODE_TOOLS = llm_runner.OPENCODE_TOOLS
-opencode_sandbox = llm_runner.opencode_sandbox
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +93,8 @@ def infer_contract(markdown: str) -> str | None:
     return next(
         (label for label, pattern in CONTRACT_PATTERNS[1:] if pattern.search(markdown)), None
     )
+
+
 LIEU_LINE_RE = re.compile(r"^\s*Lieu\s*:\s*(\S.*?)\s*$", re.MULTILINE)
 POSTAL_TOWN_RE = re.compile(
     r"\b(\d{5})\s+([A-ZÀ-Þ][A-Za-zÀ-ÿ'’\- ]{1,30})[.,;)…]?\s*$", re.MULTILINE
@@ -311,6 +309,7 @@ def _pending_offers(
         "          WHERE retry_summary.id = c.summary_id "
         "            AND retry_summary.attempted_at <= datetime('now', ?)))) "
         "  OR (content_status = 'ok' AND summary_source != 'metadata' "
+        "      AND summary_attempts < ? "
         "      AND NOT EXISTS (SELECT 1 FROM summary_field sf "
         "                      WHERE sf.summary_id = c.summary_id)) "
         "ORDER BY id",
@@ -321,6 +320,7 @@ def _pending_offers(
             WTTJ_RECOVERY_VERSION,
             MAX_SUMMARY_ATTEMPTS,
             SUMMARY_RETRY_SQL_DELAY,
+            MAX_SUMMARY_ATTEMPTS,
         ),
     ).fetchall()
 
@@ -650,7 +650,9 @@ def _write_summary(
                     "WHERE id = ?",
                     (summary_id,),
                 )
-        elif row["source"] != "manual":
+        else:
+            # Résumé manuel compris : la tentative compte, sinon un résumé dont les
+            # champs ne sortent jamais serait redemandé au modèle à chaque passage.
             conn.execute(
                 "UPDATE offer_summary SET status = 'ready', "
                 "attempt_count = attempt_count + 1, attempted_at = datetime('now') "
@@ -754,6 +756,13 @@ def _write_metadata_summary(
         "SELECT id, source FROM offer_summary WHERE offer_id = ?", (offer_id,)
     ).fetchone()
     if row is not None and row["source"] != "metadata":
+        if summary_attempted:
+            conn.execute(
+                "UPDATE offer_summary SET attempt_count = attempt_count + 1, "
+                "attempted_at = datetime('now') WHERE id = ?",
+                (int(row["id"]),),
+            )
+            conn.commit()
         return False
     has_content = conn.execute(
         "SELECT 1 FROM offer_content WHERE offer_id = ? AND status = 'ok'", (offer_id,)

@@ -211,13 +211,10 @@ class NotifyConfig:
     smtp: SmtpConfig | None = None
     heartbeat: bool = False
 
-    def enabled(self) -> bool:
-        return self.ntfy is not None or self.smtp is not None
-
 
 STANDARD_LLM_RUNNERS = ("opencode", "codex", "openrouter")
-ENRICH_RUNNERS = (*STANDARD_LLM_RUNNERS, "openrouter", "pi")
-RESEARCH_RUNNERS = (*STANDARD_LLM_RUNNERS, "openrouter")
+ENRICH_RUNNERS = (*STANDARD_LLM_RUNNERS, "pi")
+RESEARCH_RUNNERS = STANDARD_LLM_RUNNERS
 
 
 @dataclass
@@ -270,8 +267,8 @@ class ReviewConfig:
 @dataclass
 class DraftConfig:
     model: str
-    # Exécuteur LLM : 'opencode' (API, facturé à l'appel) ou 'codex' (CLI codex exec,
-    # couvert par l'abonnement ChatGPT).
+    # Exécuteur LLM : 'opencode' (API, facturé à l'appel), 'codex' (CLI codex exec,
+    # couvert par l'abonnement ChatGPT) ou 'openrouter' (appel HTTP direct).
     runner: str = "opencode"
     opencode_bin: str = "opencode"
     codex_bin: str = "codex"

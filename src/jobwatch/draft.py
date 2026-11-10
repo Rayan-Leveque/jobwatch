@@ -2,8 +2,8 @@
 
 Pour un match donné, assemble le texte de l'offre (récupéré à la demande via la
 mécanique d'enrich s'il manque), le texte du CV choisi dans la bibliothèque et
-les lettres exemples .tex de la piste métier, puis demande à un LLM (OpenCode)
-d'écrire le document LaTeX complet. Le .tex est compilé avec lualatex (avec une
+les lettres exemples .tex de la piste métier, puis demande au LLM configuré
+(bloc `draft` : OpenCode, Codex ou OpenRouter) d'écrire le document LaTeX complet. Le .tex est compilé avec lualatex (avec une
 boucle de réparation LLM en cas d'erreur), rendu en PNG par pdftoppm pour
 l'aperçu mobile, et enregistré dans la bibliothèque de documents comme lettre
 de motivation prête pour le formulaire Candidater.
@@ -379,7 +379,8 @@ def _call_openrouter(config: DraftConfig, prompt: str, attachment: str) -> str:
         text = response.json()["choices"][0]["message"]["content"]
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         raise DraftError(f"appel openrouter échoué : {exc}") from exc
-    if not text.strip():
+    # Le fournisseur renvoie parfois un message sans contenu (null).
+    if not isinstance(text, str) or not text.strip():
         raise DraftError("réponse vide du modèle")
     return text
 
@@ -408,6 +409,7 @@ def _call_opencode(config: DraftConfig, prompt: str, attachment: str) -> str:
     if not text.strip():
         raise DraftError("réponse vide du modèle")
     return text
+
 
 def extract_latex(text: str) -> str:
     """Extrait le document LaTeX d'une réponse LLM (bloc ```latex``` ou texte brut)."""

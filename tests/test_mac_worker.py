@@ -67,6 +67,8 @@ def _worker_env(
     )
     return {
         "PATH": "/usr/bin:/bin",
+        # Le serveur simulé exécute le code testé, pas une copie installée ailleurs.
+        "PYTHONPATH": str(Path(__file__).parent.parent / "src"),
         "JOBWATCH_SSH": "",
         # Même forme qu'en production : instance nommée avant la sous-commande.
         "JOBWATCH_JW": f"{sys.executable} -m jobwatch.cli --instance mac",
@@ -560,3 +562,57 @@ def test_server_restart_keeps_remote_submission_running(instance) -> None:  # no
     ).fetchone()[0]
     conn.close()
     assert status == "running"
+
+
+def test_worker_delivers_a_verdict_the_server_never_received(
+    instance, tmp_path: Path  # noqa: F811
+) -> None:
+    """Réseau coupé à la fin d'un envoi : le verdict gardé sur le Mac repart au passage suivant,
+    même après que le serveur a rendu la main sur le dossier."""
+    from jobwatch.submit import STALE_REASON
+
+    db_path, config_path, cv_id = instance
+    _worker_config(config_path)
+    match_id = _prepared(db_path, cv_id)
+    conn = connect(db_path)
+    job_id = queue_submission(conn, match_id)
+    conn.close()
+    env = _worker_env(tmp_path, config_path)
+    claimed = subprocess.run(
+        [*env["JOBWATCH_JW"].split(" "), "submission-claim"],
+        env=env, capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert json.loads(claimed.stdout)["job_id"] == job_id, claimed.stderr
+    conn = connect(db_path)
+    conn.execute(
+        "UPDATE submission_job SET status = 'needs_human', reason = ? WHERE id = ?",
+        (STALE_REASON, job_id),
+    )
+    conn.commit()
+    conn.close()
+    pending = tmp_path / "mac-work" / str(job_id) / "verdict.json"
+    pending.parent.mkdir(parents=True)
+    pending.write_text(
+        json.dumps({"returncode": 0, "stdout": json.dumps({"structured_output": SUBMITTED}),
+                    "stderr": "", "proof_b64": None}),
+        encoding="utf-8",
+    )
+
+    done = _run_worker(env)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert f"job {job_id} : verdict en attente transmis (submitted" in done.stdout
+    assert not pending.exists()
+    conn = connect(db_path)
+    job = conn.execute("SELECT status FROM submission_job WHERE id = ?", (job_id,)).fetchone()
+    applied = conn.execute("SELECT 1 FROM application WHERE match_id = ?", (match_id,)).fetchone()
+    conn.close()
+    assert job["status"] == "submitted"
+    assert applied is not None
+
+    # Un verdict pour un dossier déjà clos est abandonné sans bloquer la file.
+    pending.write_text(json.dumps({"error": "doublon"}), encoding="utf-8")
+    again = _run_worker(env)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "verdict en attente abandonné" in again.stdout
+    assert not pending.exists()

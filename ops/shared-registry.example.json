@@ -1,0 +1,9 @@
+{
+  "instances": [
+    {
+      "slug": "alice",
+      "email": "alice@example.com",
+      "port": 8801
+    }
+  ]
+}

@@ -52,7 +52,9 @@ from jobwatch.auth import (
     resolve_session,
 )
 from jobwatch.auth_http import (
+    CLIENT_HEADER,
     CSRF_HEADER,
+    client_address,
     csrf_valid,
     expired_session_cookie,
     security_headers,
@@ -204,6 +206,7 @@ def make_handler(
     *,
     workspace_slug: str | None = None,
     secure_cookie: bool = True,
+    trust_proxy: bool = False,
     onboarding_config: DraftConfig | None = None,
     onboarding_enabled: bool = False,
     collect_onboarding: bool = False,
@@ -1068,7 +1071,12 @@ def make_handler(
                 if not auth_required(conn):
                     self._redirect("/")
                     return
-                key = login_throttle_key(email, self.client_address[0])
+                address = client_address(
+                    self.client_address[0],
+                    self.headers.get(CLIENT_HEADER),
+                    trust_proxy=trust_proxy,
+                )
+                key = login_throttle_key(email, address)
                 if not login_allowed(conn, key):
                     self._send_auth_page(
                         "Connexion",
@@ -1263,6 +1271,7 @@ def serve_http(
     *,
     workspace_slug: str | None = None,
     secure_cookie: bool = True,
+    trust_proxy: bool = False,
     onboarding_enabled: bool = False,
     collect_onboarding: bool = False,
     autoapply_config: AutoApplyConfig | None = None,
@@ -1278,6 +1287,7 @@ def serve_http(
                 draft_config,
                 workspace_slug=workspace_slug,
                 secure_cookie=secure_cookie,
+                trust_proxy=trust_proxy,
                 onboarding_config=draft_config,
                 onboarding_enabled=onboarding_enabled,
                 collect_onboarding=collect_onboarding,

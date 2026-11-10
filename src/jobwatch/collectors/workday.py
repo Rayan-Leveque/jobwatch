@@ -11,7 +11,6 @@ déduplication suffisent.
 from __future__ import annotations
 
 import logging
-import re
 
 import httpx
 
@@ -20,9 +19,6 @@ from jobwatch.collectors.base import RawOffer
 log = logging.getLogger(__name__)
 
 PLATFORM = "Workday"
-WORKDAY_URL_RE = re.compile(
-    r"https://[a-z0-9-]+\.wd\d+\.myworkdayjobs\.com/[A-Za-z-]+/[A-Za-z0-9_-]+"
-)
 POSTINGS_LIMIT = 20
 
 

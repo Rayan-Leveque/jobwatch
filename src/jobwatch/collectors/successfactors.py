@@ -93,6 +93,3 @@ def _offer_from_item(item: ET.Element, company: str) -> RawOffer | None:
         published_at=_published_at(item.findtext("pubDate")),
     )
 
-
-def site_slug(base_url: str) -> str:
-    return urlsplit(base_url).netloc.casefold()

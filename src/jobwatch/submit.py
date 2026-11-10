@@ -352,6 +352,13 @@ def queue_submission(conn: sqlite3.Connection, match_id: int) -> int:
 
 
 def _finish(conn: sqlite3.Connection, job_id: int, **fields: object) -> None:
+    # dossier.md porte les mots de passe des comptes ATS : il est réécrit à
+    # chaque lancement, inutile de le garder une fois l'envoi tranché.
+    db_file = conn.execute("PRAGMA database_list").fetchone()["file"]
+    if db_file:
+        (documents_dir(Path(db_file)) / "submissions" / str(job_id) / "dossier.md").unlink(
+            missing_ok=True
+        )
     assignments = ", ".join(f"{name} = ?" for name in fields)
     conn.execute(
         f"UPDATE submission_job SET {assignments}, finished_at = datetime('now') WHERE id = ?",
@@ -415,16 +422,32 @@ def claim_submission(
     return job_id if cur.rowcount == 1 else None
 
 
+#: Raison posée sur un envoi dont le poste d'envoi n'a jamais rendu le verdict.
+STALE_REASON = "le poste d'envoi ne répond plus, vérifiez le site avant de relancer"
+
+
 def expire_stale_submissions(conn: sqlite3.Connection, timeout_seconds: int) -> int:
     """Rend la main sur les envois dont le poste d'envoi ne donne plus signe de vie."""
     cur = conn.execute(
         "UPDATE submission_job SET status = 'needs_human', finished_at = datetime('now'), "
-        "reason = 'le poste d''envoi ne répond plus, vérifiez le site avant de relancer' "
-        "WHERE status = 'running' AND started_at < datetime('now', ?)",
-        (f"-{2 * timeout_seconds} seconds",),
+        "reason = ? WHERE status = 'running' AND started_at < datetime('now', ?)",
+        (STALE_REASON, f"-{2 * timeout_seconds} seconds"),
     )
     conn.commit()
     return cur.rowcount
+
+
+def awaiting_verdict(conn: sqlite3.Connection, job_id: int) -> bool:
+    """Vrai si le serveur attend encore le verdict du poste d'envoi pour ce job.
+
+    Un verdict tardif reste accepté après le délai : le poste d'envoi le garde
+    quand le réseau tombe, et la candidature a pu partir entre-temps.
+    """
+    return conn.execute(
+        "SELECT 1 FROM submission_job WHERE id = ? AND (status = 'running' "
+        "OR (status = 'needs_human' AND reason = ?))",
+        (job_id, STALE_REASON),
+    ).fetchone() is not None
 
 
 def build_dossier(conn: sqlite3.Connection, db_path: Path, job_id: int) -> Dossier:

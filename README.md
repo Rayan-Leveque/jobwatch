@@ -128,12 +128,12 @@ $EDITOR ~/.config/jobwatch/instances/alice/config.yaml
 .venv/bin/jw --instance alice serve --host 127.0.0.1 --port 8766
 ```
 
-Le chemin `/invite/...` affiché à l'étape 3 est à compléter avec l'URL publique propre à Alice.
-Utilisez de préférence un nom d'hôte distinct par personne, par exemple
-`https://alice.jobs.example/invite/...`, dirigé par le reverse proxy vers `127.0.0.1:8766`.
-Les préfixes de chemin ne sont pas supportés : l'application utilise des routes à la racine. Un simple
-partage du port ou de l'URL du capitaine n'isole rien. Les cookies ne sont pas séparés par port ; des
-noms d'hôte distincts évitent aussi qu'une session d'une instance gêne la connexion à une autre.
+Le chemin `/invite/...` affiché à l'étape 3 est à compléter avec
+`https://jobwatch.cloud`. En production, `python -m jobwatch.shared` reçoit toutes les
+requêtes publiques et les route vers cette instance privée. Il choisit l'instance par
+l'email lors de la connexion, puis par un préfixe du cookie. Chaque base valide encore
+son propre jeton opaque. Les ports internes ne sont jamais publics. Consultez
+[`ops/README.md`](ops/README.md) pour le registre et les unités systemd.
 
 Avant d'envoyer une invitation, vérifiez pour cette instance :
 
@@ -438,7 +438,7 @@ remplacer.
 | `notify` | Canaux de notification. `ntfy` publie sur `https://ntfy.sh/<topic>`. `smtp` envoie via `host`, `port`, `user`, `password`, `to`. Les deux sont optionnels ; vous pouvez en utiliser un, les deux ou aucun. |
 | `research` | Recherche web large facultative après les collecteurs directs : runner `codex`, `opencode` ou `openrouter`. Avec `openrouter`, appel HTTP direct avec la clé `api_key`, le modèle `model` et, si besoin, le fournisseur imposé `provider` (par exemple `fireworks`, sans repli) ; la recherche web passe par le plugin `web` d'OpenRouter. Fenêtre `recency_days`, plafond `max_results` (appliqué après validation et déduplication) et instructions de profil. Les offres récentes encore sans fit rejoignent aussi les candidats à évaluer. Codex ignore la configuration utilisateur et désactive les outils locaux. OpenCode refuse ses outils nommément et autorise seulement `websearch` et `webfetch` pour `research`. |
 | `enrich` | Configuration de `jw enrich` : `runner` (`opencode`, défaut, `codex`, `openrouter` ou `pi`), le binaire correspondant (`opencode_bin`/`codex_bin`/`pi_bin`), `api_key` (requis avec `openrouter`, appel HTTP direct sans plugin web), `model` (ex. `opencode/deepseek-v4-flash-free`, `deepseek/deepseek-v4.1-flash`, `gpt-5.6-luna` ou `openai-codex/gpt-5.6-luna` avec Pi), `provider` optionnel pour imposer un fournisseur OpenRouter comme `fireworks` sans repli, `variant` optionnel (effort de raisonnement) et `concurrency` (appels LLM simultanés, défaut 4 ; les fetchs web restent séquentiels). Codex et OpenCode sont exécutés sans outils. Pi est exécuté sans outils, extensions, skills, fichiers de contexte ni session persistante. |
-| `draft` | Génération de lettre de motivation depuis le tableau de bord, sans outils du runner. `runner` (`opencode` ou `codex`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. Si `examples` ne couvre pas la piste, jobwatch utilise les lettres `letter_example` de la bibliothèque de documents, puis un modèle générique fourni avec le projet. |
+| `draft` | Génération de lettre de motivation depuis le tableau de bord, sans outils du runner. `runner` (`opencode`, `codex` ou `openrouter` avec `api_key`), le binaire correspondant (`opencode_bin`/`codex_bin`), `model` (modèle de rédaction fort, ex. `gpt-5.6-luna`), `variant` optionnel (effort de raisonnement), plus `examples`, un mapping piste (`engineer`, `project`) vers une liste de chemins de lettres `.tex` servant d'exemples de format et de ton. Si `examples` ne couvre pas la piste, jobwatch utilise les lettres `letter_example` de la bibliothèque de documents, puis un modèle générique fourni avec le projet. |
 
 Le filtre `locations` est une correspondance par sous-chaîne sur la localisation de l'offre :
 une offre située à « Puteaux » ou « Levallois-Perret » ne matche PAS une recherche avec

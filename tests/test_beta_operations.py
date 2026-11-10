@@ -71,6 +71,19 @@ def test_backup_restore_documents_and_cookie_isolation(tmp_path, monkeypatch):
     content = b"%PDF-1.4 document prive"
     entry = save_upload(conn, config.db, "cv", "Mon CV", "cv.pdf", base64.b64encode(content).decode())
     token, _ = create_session(conn, "alice@example.com", "une phrase de passe privée", "alice")
+    proof = config.db.parent / "documents" / "submissions" / "1" / "preuve.png"
+    conn.executescript(
+        "INSERT INTO source (type, name) VALUES ('t', 't');"
+        "INSERT INTO offer (source_id, title, url) VALUES (1, 'Poste', 'https://example.com/o');"
+        "INSERT INTO search (name, include_json, exclude_json, locations_json) "
+        "VALUES ('s', '[]', '[]', '[]');"
+        "INSERT INTO match (search_id, offer_id) VALUES (1, 1);"
+    )
+    conn.execute(
+        "INSERT INTO submission_job (match_id, status, proof_path) VALUES (1, 'submitted', ?)",
+        (str(proof),),
+    )
+    conn.commit()
     conn.close()
     backup = tmp_path / "backup"
     create_backup(path, backup)
@@ -79,6 +92,10 @@ def test_backup_restore_documents_and_cookie_isolation(tmp_path, monkeypatch):
     restored_conn = connect(restored.db)
     document = restored_conn.execute("SELECT file_path FROM document_library").fetchone()[0]
     assert str(tmp_path / "restored") in document
+    restored_proof = restored_conn.execute("SELECT proof_path FROM submission_job").fetchone()[0]
+    assert restored_proof == str(
+        tmp_path / "restored" / "data" / "documents" / "submissions" / "1" / "preuve.png"
+    )
     assert restored_conn.execute("SELECT COUNT(*) FROM web_session").fetchone()[0] == 0
     restored_conn.close()
     server, thread = _start_server(restored.db, workspace_slug="alice")
@@ -138,3 +155,15 @@ def test_beta_config_disables_all_ai(tmp_path, monkeypatch):
     assert config.sources.linkedin.from_profile
     assert yaml.safe_load(path.read_text())["searches"] == []
     conn.close()
+
+
+def test_backup_without_any_config_fails_with_a_message(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("JOBWATCH_INSTANCE", raising=False)
+
+    result = CliRunner().invoke(cli, ["backup", str(tmp_path / "backup")])
+
+    assert result.exit_code == 1
+    assert "aucune config trouvée" in result.output
+    assert not (tmp_path / "backup").exists()
