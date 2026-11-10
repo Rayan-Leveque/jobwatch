@@ -24,8 +24,9 @@ SENIORITY_LEVELS = (
 )
 LEVEL_LABELS = dict(SENIORITY_LEVELS)
 
+# Appliquée au texte replié par _fold : « 3 à 6 ans » y devient « 3 a 6 ans ».
 _YEARS_RE = re.compile(
-    r"\b(\d{1,2})\s*(?:\+|(?:[-–à/]\s*\d{1,2}))?\s*(?:ans?|annees?|years?)\b",
+    r"\b(\d{1,2})\s*(?:\+|(?:(?:[-–/]|a|to)\s*\d{1,2}))?\s*(?:ans?|annees?|years?)\b",
     re.IGNORECASE,
 )
 _UNCLASSIFIED_VALUES = {"", "non precise", "non renseigne", "inconnu", "unknown"}
