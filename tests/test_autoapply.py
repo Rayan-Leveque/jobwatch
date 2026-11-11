@@ -635,7 +635,8 @@ def test_needs_human_keeps_dossier_and_saves_created_account(instance, tmp_path:
 
     accounts = json.loads(accounts_path(db_path).read_text())
     assert accounts["x.wd3.myworkdayjobs.com"]["email"] == "candidat@example.com"
-    assert len(accounts["x.wd3.myworkdayjobs.com"]["password"]) >= 16
+    # SuccessFactors et Atos refusent plus de 18 caractères.
+    assert 12 <= len(accounts["x.wd3.myworkdayjobs.com"]["password"]) <= 18
     assert oct(os.stat(accounts_path(db_path)).st_mode & 0o777) == "0o600"
 
 
