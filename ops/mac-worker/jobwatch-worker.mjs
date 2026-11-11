@@ -333,7 +333,11 @@ async function main() {
       return;
     }
     const assist = LANE === "1" && existsSync(ASSIST);
-    const claim = JSON.parse(remote(`${JW} submission-claim${assist ? " --blocked" : ""}`) || "{}");
+    // Le fichier de session garde les dossiers déjà repris : un captcha non
+    // résolu ne revient pas en tête de file avant la session suivante.
+    const tried = assist ? readFileSync(ASSIST, "utf8").split(",").filter(Boolean) : [];
+    const flags = assist ? ` --blocked${tried.length ? ` --skip ${tried.join(",")}` : ""}` : "";
+    const claim = JSON.parse(remote(`${JW} submission-claim${flags}`) || "{}");
     saveStatus({
       sent: claim.sent, blocked: claim.blocked, error: null, current: null, paused: false,
       quotaUntil: null,
@@ -344,6 +348,7 @@ async function main() {
       continue;
     }
     if (!claim.job_id) return;
+    if (assist) writeFileSync(ASSIST, [...tried, claim.job_id].join(","));
     if (claim.error) log(`job ${claim.job_id} refusé par le serveur : ${claim.error}`);
     else await runJob(claim);
   }
@@ -385,9 +390,14 @@ function runAgent(claim, workDir, agentEnv, real, args) {
 }
 
 // Notification macOS : la fenêtre visible attend le candidat.
+function notify(message) {
+  spawnSync("osascript", ["-e", `display notification ${JSON.stringify(message)} with title "jobwatch" sound name "Glass"`]);
+}
+
 async function runJob(claim) {
   const workDir = join(WORK_ROOT, String(claim.job_id));
   const label = claim.label || `dossier ${claim.job_id}`;
+  if (claim.assisted) notify(`Captcha à résoudre dans Chrome : ${label}`);
   saveStatus({ current: { label, started: new Date().toISOString(), timeout: claim.timeout_seconds } });
   let report;
   try {

@@ -245,6 +245,41 @@ def test_captcha_waits_for_the_captcha_session_in_a_visible_window(
     assert not any(line.startswith("Débloquer") for line in menu)
 
 
+def test_unsolved_captcha_is_retried_once_per_session(
+    instance, tmp_path: Path  # noqa: F811
+) -> None:
+    db_path, config_path, cv_id = instance
+    _worker_config(config_path)
+    conn = connect(db_path)
+    jobs = [
+        queue_submission(conn, _prepared(db_path, cv_id, url=f"https://example.com/o-{n}"))
+        for n in (1, 2)
+    ]
+    conn.close()
+    env = _worker_env(tmp_path, config_path)
+    blocked = {**SUBMITTED, "status": "needs_human", "reason": "Captcha.", "blocker": "captcha"}
+    # Le candidat n'est pas devant l'écran : chaque captcha reste non résolu.
+    env["CLAUDE_BIN"] = str(_fake_bin(
+        tmp_path / "mac-bin", "fake-claude-captcha",
+        "import json\n"
+        f"print(json.dumps({{'structured_output': json.loads({json.dumps(json.dumps(blocked))})}}))\n",
+    ))
+    assert _run_worker(env).returncode == 0
+    calls = tmp_path / "browser-calls.txt"
+    calls.unlink()
+
+    (_support_dir(tmp_path) / "assist").touch()
+    done = _run_worker(env)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    # Chaque dossier une seule fois, le plus récent d'abord, puis fin de session.
+    claimed = [int(line.split()[2]) for line in done.stdout.splitlines() if ": needs_human" in line]
+    assert claimed == jobs[::-1]
+    opens = [c for c in calls.read_text().splitlines() if c.startswith("open ")]
+    assert len(opens) == 2 and all(o.endswith("--headed") for o in opens)
+    assert not (_support_dir(tmp_path) / "assist").exists()
+
+
 def test_worker_runs_codex_in_its_sandbox(instance, tmp_path: Path) -> None:  # noqa: F811
     db_path, config_path, cv_id = instance
     config_path.write_text(

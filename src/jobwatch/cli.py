@@ -681,8 +681,9 @@ def _alert_worker(config: Config, reason: str) -> None:
 
 @cli.command(name="submission-claim")
 @click.option("--blocked", is_flag=True, help="dossier arrêté sur un captcha ou une connexion")
+@click.option("--skip", default="", help="dossiers déjà repris pendant la session (ids, virgules)")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
-def submission_claim(config_path: Path | None, blocked: bool) -> None:
+def submission_claim(config_path: Path | None, blocked: bool, skip: str) -> None:
     """Réserve le plus ancien envoi en file pour un poste d'envoi (JSON sur stdout)."""
     config = _require_config(config_path)
     if config.autoapply is None:
@@ -695,7 +696,9 @@ def submission_claim(config_path: Path | None, blocked: bool) -> None:
         sent = conn.execute(
             "SELECT COUNT(*) FROM submission_job WHERE status = 'submitted'"
         ).fetchone()[0]
-        job_id = claim_submission(conn, blocked=blocked)
+        job_id = claim_submission(
+            conn, blocked=blocked, skip=frozenset(int(i) for i in skip.split(",") if i)
+        )
         # Affiché dans la barre des menus : de quoi lancer une session captcha.
         waiting = blocked_submissions(conn)
         if job_id is None:

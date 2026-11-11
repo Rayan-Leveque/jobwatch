@@ -395,19 +395,29 @@ def blocked_submissions(conn: sqlite3.Connection) -> int:
 
 
 def claim_submission(
-    conn: sqlite3.Connection, job_id: int | None = None, *, blocked: bool = False
+    conn: sqlite3.Connection,
+    job_id: int | None = None,
+    *,
+    blocked: bool = False,
+    skip: frozenset[int] = frozenset(),
 ) -> int | None:
     """Passe un job 'queued' à 'running' (le plus ancien si `job_id` est absent).
 
-    `blocked` : prend plutôt un dossier arrêté sur un captcha ou une connexion.
+    `blocked` : prend plutôt le plus récent dossier arrêté sur un captcha ou une
+    connexion, hors `skip` (dossiers déjà repris pendant la session captcha).
     """
     source = _BLOCKED_SQL if blocked else "status = 'queued'"
     if job_id is None:
         # Plusieurs voies réclament en même temps : celle qui perd la course prend
         # le suivant au lieu de croire la file vide.
         while True:
+            # Session captcha : les offres récentes d'abord, les anciennes ont
+            # souvent fermé.
             row = conn.execute(
-                f"SELECT id FROM submission_job WHERE {source} ORDER BY id LIMIT 1"
+                f"SELECT id FROM submission_job WHERE {source} "
+                f"AND id NOT IN ({', '.join('?' * len(skip))}) "
+                f"ORDER BY id {'DESC' if blocked else 'ASC'} LIMIT 1",
+                tuple(skip),
             ).fetchone()
             if row is None:
                 return None
@@ -481,7 +491,8 @@ def build_dossier(conn: sqlite3.Connection, db_path: Path, job_id: int) -> Dossi
     shutil.copyfile(letter["pdf_path"], work_dir / letter_name)
 
     accounts = _load_accounts(db_path)
-    new_password = secrets.token_urlsafe(12) + "!7a"
+    # 15 caractères : SuccessFactors et Atos refusent plus de 18.
+    new_password = secrets.token_urlsafe(9) + "!7a"
     (work_dir / _PENDING_PASSWORD).write_text(new_password, encoding="utf-8")
     protect_private_file(work_dir / _PENDING_PASSWORD)
     attachment = (
